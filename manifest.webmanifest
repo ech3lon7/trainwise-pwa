@@ -1,0 +1,24 @@
+{
+  "name": "TrainWise",
+  "short_name": "TrainWise",
+  "description": "A personal strength, nutrition, and progress tracker.",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "background_color": "#101310",
+  "theme_color": "#101310",
+  "orientation": "portrait",
+  "icons": [
+    {
+      "src": "./icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "./icon.svg",
+      "sizes": "512x512",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
