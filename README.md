@@ -1,16 +1,32 @@
 # TrainWise PWA
 
-TrainWise is a free, static, offline-first workout and nutrition PWA.
+TrainWise is a free, static, offline-first hypertrophy workout and nutrition PWA.
 
 ## What is included
 
-- Strength logging: exercise, sets, reps, load, RIR, and notes
+- Hypertrophy logging: exercise, target muscle, sets, reps, load, RIR, and notes
 - Nutrition/body logging: body weight, calories, protein, and notes
-- Progress charts for volume, estimated 1RM, body weight, calories, and protein
-- Rule-based coaching recommendations
+- Progress charts for hard sets, exercise volume, estimated 1RM, body weight, calories, and protein
+- Rule-based hypertrophy recommendations
 - IndexedDB local storage
 - Export/import JSON backups
 - Optional Supabase cloud backup using a free Supabase project
+
+## Hypertrophy coaching rules
+
+The app is minimum-first and home-basics focused.
+
+- Weekly volume uses a rolling 7-day window.
+- The first target is 10 hard sets per muscle per week.
+- The growth zone is 12-20 hard sets per muscle per week.
+- Muscles should usually be trained at least 2 times per week.
+- Most working sets should land around 1-3 reps in reserve.
+- Sets with RIR above 3 count at half credit.
+- Compound exercises count 1.0x for primary muscles and 0.5x for secondary muscles.
+- Protein targets use the latest body weight: 1.6-2.2 g/kg/day.
+- The exercise library assumes dumbbells, bands, bench, and bodyweight options.
+
+This is personal training guidance, not medical advice. Avoid sharp pain and adjust for injury, recovery, and fatigue.
 
 ## Run locally
 
@@ -80,3 +96,5 @@ The Supabase free tier is enough for personal workout logs. Free projects can pa
 ## Important
 
 Local data lives in browser storage. Use export/import or Supabase backup so clearing Safari website data does not wipe your only copy.
+
+Backups include workouts, nutrition metrics, and non-secret hypertrophy settings. Supabase credentials and sessions are not included in exported backup files.

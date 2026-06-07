@@ -1,26 +1,234 @@
 "use strict";
 
 const DB_NAME = "trainwise-db";
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const STORES = ["workouts", "metrics", "settings"];
-const APP_VERSION = "1.0.0";
+const APP_VERSION = "1.1.0";
 
-const defaultExercises = [
-  "Bench Press",
-  "Squat",
-  "Deadlift",
-  "Overhead Press",
-  "Barbell Row",
-  "Pull-up",
-  "Romanian Deadlift",
-  "Incline Dumbbell Press"
+const HYPERTROPHY = {
+  minimumSets: 10,
+  growthLow: 12,
+  growthHigh: 20,
+  idealRirMin: 1,
+  idealRirMax: 3,
+  highRirDiscount: 0.5,
+  proteinFloorGPerKg: 1.6,
+  proteinUpperGPerKg: 2.2
+};
+
+const muscleGroups = [
+  { id: "chest", label: "Chest" },
+  { id: "back", label: "Back" },
+  { id: "shoulders", label: "Shoulders" },
+  { id: "biceps", label: "Biceps" },
+  { id: "triceps", label: "Triceps" },
+  { id: "quads", label: "Quads" },
+  { id: "hamstrings", label: "Hamstrings" },
+  { id: "glutes", label: "Glutes" },
+  { id: "calves", label: "Calves" },
+  { id: "abs", label: "Abs" }
 ];
+
+const exerciseLibrary = [
+  {
+    id: "push-up",
+    name: "Push-up",
+    primaryMuscles: ["chest"],
+    secondaryMuscles: ["triceps", "shoulders"],
+    equipment: "bodyweight",
+    reps: "8-20",
+    rest: "60-120 sec",
+    cue: "Add a backpack or slow eccentric when 20 reps gets easy."
+  },
+  {
+    id: "dumbbell-bench-press",
+    name: "Dumbbell Bench Press",
+    primaryMuscles: ["chest"],
+    secondaryMuscles: ["triceps", "shoulders"],
+    equipment: "dumbbells, bench",
+    reps: "8-15",
+    rest: "90-180 sec",
+    cue: "Use a deep, controlled stretch and stop 1-3 reps short of failure."
+  },
+  {
+    id: "dumbbell-fly",
+    name: "Dumbbell Fly",
+    primaryMuscles: ["chest"],
+    secondaryMuscles: ["shoulders"],
+    equipment: "dumbbells, bench",
+    reps: "10-20",
+    rest: "60-120 sec",
+    cue: "Keep the load light enough to control the stretched position."
+  },
+  {
+    id: "dumbbell-row",
+    name: "Dumbbell Row",
+    primaryMuscles: ["back"],
+    secondaryMuscles: ["biceps"],
+    equipment: "dumbbell",
+    reps: "8-15",
+    rest: "90-180 sec",
+    cue: "Pull the elbow toward your hip and pause briefly near the top."
+  },
+  {
+    id: "band-row",
+    name: "Band Row",
+    primaryMuscles: ["back"],
+    secondaryMuscles: ["biceps"],
+    equipment: "band",
+    reps: "12-25",
+    rest: "60-120 sec",
+    cue: "Use higher reps and a hard squeeze if the band is light."
+  },
+  {
+    id: "pull-up-inverted-row",
+    name: "Pull-up / Inverted Row",
+    primaryMuscles: ["back"],
+    secondaryMuscles: ["biceps"],
+    equipment: "bar or sturdy table",
+    reps: "6-15",
+    rest: "90-180 sec",
+    cue: "Choose the variation that keeps reps controlled and near failure."
+  },
+  {
+    id: "dumbbell-shoulder-press",
+    name: "Dumbbell Shoulder Press",
+    primaryMuscles: ["shoulders"],
+    secondaryMuscles: ["triceps"],
+    equipment: "dumbbells",
+    reps: "8-15",
+    rest: "90-180 sec",
+    cue: "Press in a pain-free path and avoid grinding every set."
+  },
+  {
+    id: "lateral-raise",
+    name: "Lateral Raise",
+    primaryMuscles: ["shoulders"],
+    secondaryMuscles: [],
+    equipment: "dumbbells or bands",
+    reps: "12-25",
+    rest: "45-90 sec",
+    cue: "Use strict reps; small load jumps go a long way here."
+  },
+  {
+    id: "rear-delt-fly",
+    name: "Rear Delt Fly",
+    primaryMuscles: ["shoulders"],
+    secondaryMuscles: ["back"],
+    equipment: "dumbbells or bands",
+    reps: "12-25",
+    rest: "45-90 sec",
+    cue: "Lead with elbows and keep traps from taking over."
+  },
+  {
+    id: "dumbbell-curl",
+    name: "Dumbbell Curl",
+    primaryMuscles: ["biceps"],
+    secondaryMuscles: [],
+    equipment: "dumbbells",
+    reps: "8-15",
+    rest: "45-90 sec",
+    cue: "Control the lowering phase and avoid swinging."
+  },
+  {
+    id: "hammer-curl",
+    name: "Hammer Curl",
+    primaryMuscles: ["biceps"],
+    secondaryMuscles: [],
+    equipment: "dumbbells",
+    reps: "8-15",
+    rest: "45-90 sec",
+    cue: "Keep wrists neutral and elbows pinned."
+  },
+  {
+    id: "overhead-triceps-extension",
+    name: "Overhead Triceps Extension",
+    primaryMuscles: ["triceps"],
+    secondaryMuscles: [],
+    equipment: "dumbbell or band",
+    reps: "10-20",
+    rest: "45-90 sec",
+    cue: "Use the overhead stretch, but keep elbows comfortable."
+  },
+  {
+    id: "goblet-squat",
+    name: "Goblet Squat",
+    primaryMuscles: ["quads"],
+    secondaryMuscles: ["glutes", "abs"],
+    equipment: "dumbbell",
+    reps: "8-20",
+    rest: "90-180 sec",
+    cue: "Keep depth consistent so progression means something."
+  },
+  {
+    id: "bulgarian-split-squat",
+    name: "Bulgarian Split Squat",
+    primaryMuscles: ["quads", "glutes"],
+    secondaryMuscles: ["hamstrings"],
+    equipment: "dumbbells, bench",
+    reps: "8-15",
+    rest: "90-180 sec",
+    cue: "Count one set after both legs are complete."
+  },
+  {
+    id: "romanian-deadlift",
+    name: "Romanian Deadlift",
+    primaryMuscles: ["hamstrings"],
+    secondaryMuscles: ["glutes", "back"],
+    equipment: "dumbbells",
+    reps: "8-15",
+    rest: "90-180 sec",
+    cue: "Push hips back and keep tension in the hamstrings."
+  },
+  {
+    id: "hip-thrust-glute-bridge",
+    name: "Hip Thrust / Glute Bridge",
+    primaryMuscles: ["glutes"],
+    secondaryMuscles: ["hamstrings"],
+    equipment: "bodyweight or dumbbell",
+    reps: "10-20",
+    rest: "60-120 sec",
+    cue: "Pause at lockout and add load once reps get easy."
+  },
+  {
+    id: "standing-calf-raise",
+    name: "Standing Calf Raise",
+    primaryMuscles: ["calves"],
+    secondaryMuscles: [],
+    equipment: "bodyweight or dumbbells",
+    reps: "10-25",
+    rest: "45-90 sec",
+    cue: "Use a full stretch and pause at the top."
+  },
+  {
+    id: "plank-dead-bug",
+    name: "Plank / Dead Bug",
+    primaryMuscles: ["abs"],
+    secondaryMuscles: [],
+    equipment: "bodyweight",
+    reps: "30-60 sec",
+    rest: "45-90 sec",
+    cue: "Progress by adding time, control, or harder variations."
+  }
+];
+
+const legacyExerciseMetadata = [
+  { name: "Bench Press", primaryMuscles: ["chest"], secondaryMuscles: ["triceps", "shoulders"], equipment: "barbell", reps: "6-12", rest: "90-180 sec" },
+  { name: "Squat", primaryMuscles: ["quads"], secondaryMuscles: ["glutes", "hamstrings", "abs"], equipment: "barbell", reps: "6-12", rest: "120-180 sec" },
+  { name: "Deadlift", primaryMuscles: ["hamstrings", "glutes"], secondaryMuscles: ["back", "quads"], equipment: "barbell", reps: "5-10", rest: "120-180 sec" },
+  { name: "Overhead Press", primaryMuscles: ["shoulders"], secondaryMuscles: ["triceps"], equipment: "barbell", reps: "6-12", rest: "90-180 sec" },
+  { name: "Barbell Row", primaryMuscles: ["back"], secondaryMuscles: ["biceps"], equipment: "barbell", reps: "8-12", rest: "90-180 sec" },
+  { name: "Pull-up", primaryMuscles: ["back"], secondaryMuscles: ["biceps"], equipment: "bar", reps: "6-15", rest: "90-180 sec" },
+  { name: "Incline Dumbbell Press", primaryMuscles: ["chest"], secondaryMuscles: ["shoulders", "triceps"], equipment: "dumbbells, bench", reps: "8-15", rest: "90-180 sec" }
+];
+
+const defaultExercises = exerciseLibrary.map((exercise) => exercise.name);
 
 const state = {
   db: null,
   activeTab: "dashboard",
   logMode: "strength",
-  selectedExercise: "Bench Press",
+  selectedExercise: "Push-up",
   workouts: [],
   metrics: [],
   settings: {}
@@ -49,6 +257,19 @@ function parseNum(value) {
   return Number.isFinite(num) ? num : 0;
 }
 
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
+function normalizeName(value) {
+  return String(value || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
 function toast(message) {
   els.toast.textContent = message;
   els.toast.classList.add("show");
@@ -61,11 +282,18 @@ function openDB() {
     const request = indexedDB.open(DB_NAME, DB_VERSION);
     request.onupgradeneeded = () => {
       const db = request.result;
+      let workoutStore;
       if (!db.objectStoreNames.contains("workouts")) {
-        const store = db.createObjectStore("workouts", { keyPath: "id" });
-        store.createIndex("date", "date");
-        store.createIndex("exercise", "exercise");
+        workoutStore = db.createObjectStore("workouts", { keyPath: "id" });
+        workoutStore.createIndex("date", "date");
+        workoutStore.createIndex("exercise", "exercise");
+      } else {
+        workoutStore = request.transaction.objectStore("workouts");
       }
+      if (workoutStore && !workoutStore.indexNames.contains("exerciseId")) {
+        workoutStore.createIndex("exerciseId", "exerciseId");
+      }
+
       if (!db.objectStoreNames.contains("metrics")) {
         const store = db.createObjectStore("metrics", { keyPath: "id" });
         store.createIndex("date", "date");
@@ -115,14 +343,22 @@ function dbClear(name) {
   });
 }
 
+function sortByDateDesc(items) {
+  return items.sort((a, b) => {
+    const dateCompare = String(b.date || "").localeCompare(String(a.date || ""));
+    if (dateCompare) return dateCompare;
+    return String(b.createdAt || "").localeCompare(String(a.createdAt || ""));
+  });
+}
+
 async function loadState() {
   const [workouts, metrics, settingsRows] = await Promise.all([
     dbAll("workouts"),
     dbAll("metrics"),
     dbAll("settings")
   ]);
-  state.workouts = workouts.sort((a, b) => b.date.localeCompare(a.date) || b.createdAt.localeCompare(a.createdAt));
-  state.metrics = metrics.sort((a, b) => b.date.localeCompare(a.date) || b.createdAt.localeCompare(a.createdAt));
+  state.workouts = sortByDateDesc(workouts);
+  state.metrics = sortByDateDesc(metrics);
   state.settings = Object.fromEntries(settingsRows.map((row) => [row.key, row.value]));
 }
 
@@ -138,6 +374,57 @@ function recentDays(days) {
   return start;
 }
 
+function daysBetween(a, b) {
+  const first = new Date(a);
+  const second = new Date(b);
+  return Math.round((second - first) / 86400000);
+}
+
+function muscleLabel(id) {
+  return muscleGroups.find((muscle) => muscle.id === id)?.label || id;
+}
+
+function allExerciseMetadata() {
+  return [...exerciseLibrary, ...legacyExerciseMetadata.map((exercise) => ({
+    id: `legacy-${normalizeName(exercise.name)}`,
+    cue: "Legacy exercise mapped for hypertrophy set tracking.",
+    ...exercise
+  }))];
+}
+
+function resolveExerciseMeta(name, fallbackMuscle = "chest") {
+  const normalized = normalizeName(name);
+  const byId = allExerciseMetadata().find((exercise) => exercise.id === name);
+  const byName = allExerciseMetadata().find((exercise) => normalizeName(exercise.name) === normalized);
+  if (byId || byName) return byId || byName;
+
+  return {
+    id: `custom-${normalized || "exercise"}`,
+    name: name || "Custom exercise",
+    primaryMuscles: [fallbackMuscle || "chest"],
+    secondaryMuscles: [],
+    equipment: "custom",
+    reps: "8-15",
+    rest: "60-120 sec",
+    cue: "Custom exercise. Keep form strict and progress gradually."
+  };
+}
+
+function workoutMeta(entry) {
+  if (Array.isArray(entry.primaryMuscles) && entry.primaryMuscles.length) {
+    return {
+      id: entry.exerciseId || `custom-${normalizeName(entry.exercise)}`,
+      name: entry.exercise,
+      primaryMuscles: entry.primaryMuscles,
+      secondaryMuscles: Array.isArray(entry.secondaryMuscles) ? entry.secondaryMuscles : [],
+      equipment: entry.equipment || "custom",
+      reps: "8-15",
+      rest: "60-120 sec"
+    };
+  }
+  return resolveExerciseMeta(entry.exercise, entry.targetMuscle);
+}
+
 function workoutVolume(workout) {
   return workout.sets * workout.reps * workout.weight;
 }
@@ -146,15 +433,31 @@ function e1rm(workout) {
   return workout.weight * (1 + workout.reps / 30);
 }
 
-function lastMetric(field) {
-  return state.metrics.find((entry) => Number.isFinite(entry[field]) && entry[field] > 0);
+function setEffortMultiplier(workout) {
+  if (workout.rir === null || workout.rir === undefined || workout.rir === "") return 1;
+  return Number(workout.rir) <= HYPERTROPHY.idealRirMax ? 1 : HYPERTROPHY.highRirDiscount;
+}
+
+function creditedSetsForWorkout(workout) {
+  const meta = workoutMeta(workout);
+  const base = Math.max(0, parseNum(workout.sets)) * setEffortMultiplier(workout);
+  const credits = {};
+  for (const muscle of meta.primaryMuscles || []) {
+    credits[muscle] = (credits[muscle] || 0) + base;
+  }
+  for (const muscle of meta.secondaryMuscles || []) {
+    credits[muscle] = (credits[muscle] || 0) + base * 0.5;
+  }
+  return credits;
+}
+
+function weeklyWorkouts() {
+  const start = recentDays(7);
+  return state.workouts.filter((entry) => new Date(entry.date) >= start);
 }
 
 function getWeeklyVolume() {
-  const start = recentDays(7);
-  return state.workouts
-    .filter((entry) => new Date(entry.date) >= start)
-    .reduce((sum, entry) => sum + workoutVolume(entry), 0);
+  return weeklyWorkouts().reduce((sum, entry) => sum + workoutVolume(entry), 0);
 }
 
 function getAverage(field, days) {
@@ -164,6 +467,124 @@ function getAverage(field, days) {
     .map((entry) => entry[field]);
   if (!values.length) return 0;
   return values.reduce((sum, value) => sum + value, 0) / values.length;
+}
+
+function lastMetric(field) {
+  return state.metrics.find((entry) => Number.isFinite(entry[field]) && entry[field] > 0);
+}
+
+function weightTrend(days = 14) {
+  const start = recentDays(days);
+  const entries = state.metrics
+    .filter((entry) => new Date(entry.date) >= start && entry.bodyWeight > 0)
+    .sort((a, b) => a.date.localeCompare(b.date));
+  if (entries.length < 2) return null;
+  return entries[entries.length - 1].bodyWeight - entries[0].bodyWeight;
+}
+
+function proteinTargets() {
+  const bodyWeightLb = lastMetric("bodyWeight")?.bodyWeight || 0;
+  if (!bodyWeightLb) return { bodyWeightLb: 0, floor: 0, upper: 0 };
+  const kg = bodyWeightLb / 2.20462;
+  return {
+    bodyWeightLb,
+    floor: kg * HYPERTROPHY.proteinFloorGPerKg,
+    upper: kg * HYPERTROPHY.proteinUpperGPerKg
+  };
+}
+
+function muscleSetStats() {
+  const totals = Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, 0]));
+  const sessions = Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, new Set()]));
+  const highRir = [];
+  const unknown = [];
+
+  for (const workout of weeklyWorkouts()) {
+    const meta = workoutMeta(workout);
+    const credits = creditedSetsForWorkout(workout);
+    const hasTrackedMuscle = Object.keys(credits).some((muscle) => totals[muscle] !== undefined);
+    if (!hasTrackedMuscle) unknown.push(workout);
+
+    for (const [muscle, sets] of Object.entries(credits)) {
+      if (totals[muscle] === undefined) continue;
+      totals[muscle] += sets;
+      if (sets > 0) sessions[muscle].add(workout.date);
+    }
+
+    if (workout.rir !== null && workout.rir !== undefined && workout.rir !== "" && Number(workout.rir) > HYPERTROPHY.idealRirMax) {
+      highRir.push({ ...workout, meta });
+    }
+  }
+
+  return muscleGroups.map((muscle) => {
+    const sets = totals[muscle.id];
+    return {
+      ...muscle,
+      sets,
+      sessions: sessions[muscle.id].size,
+      percent: Math.min(100, (sets / HYPERTROPHY.minimumSets) * 100),
+      zone: setZone(sets),
+      deficit: Math.max(0, HYPERTROPHY.minimumSets - sets)
+    };
+  }).map((stat) => ({ ...stat, highRir, unknown }));
+}
+
+function setZone(sets) {
+  if (sets < 5) return { key: "low", label: "Low", tone: "hot" };
+  if (sets < HYPERTROPHY.minimumSets) return { key: "below", label: "Below minimum", tone: "warn" };
+  if (sets < HYPERTROPHY.growthLow) return { key: "minimum", label: "Minimum met", tone: "" };
+  if (sets <= HYPERTROPHY.growthHigh) return { key: "growth", label: "Growth zone", tone: "good" };
+  return { key: "high", label: "High fatigue", tone: "warn" };
+}
+
+function chooseExerciseForMuscle(muscleId) {
+  return exerciseLibrary.find((exercise) => exercise.primaryMuscles.includes(muscleId)) || exerciseLibrary[0];
+}
+
+function nextHypertrophyAction() {
+  const stats = muscleSetStats();
+  const underMinimum = stats
+    .filter((stat) => stat.sets < HYPERTROPHY.minimumSets)
+    .sort((a, b) => a.sets - b.sets || muscleGroups.findIndex((muscle) => muscle.id === a.id) - muscleGroups.findIndex((muscle) => muscle.id === b.id));
+
+  if (underMinimum.length) {
+    const target = underMinimum[0];
+    const exercise = chooseExerciseForMuscle(target.id);
+    const recommendedSets = Math.min(3, Math.max(2, Math.ceil(target.deficit)));
+    return {
+      mode: "minimum",
+      muscle: target,
+      exercise,
+      sets: recommendedSets,
+      title: `${target.label} is below the hypertrophy floor`,
+      body: `${target.label} is at ${fmt(target.sets, 1)}/${HYPERTROPHY.minimumSets} hard sets. Do ${recommendedSets} sets of ${exercise.name}, ${exercise.reps} reps, ${HYPERTROPHY.idealRirMin}-${HYPERTROPHY.idealRirMax} RIR.`
+    };
+  }
+
+  const belowGrowth = stats
+    .filter((stat) => stat.sets < HYPERTROPHY.growthLow)
+    .sort((a, b) => a.sets - b.sets);
+  if (belowGrowth.length) {
+    const target = belowGrowth[0];
+    const exercise = chooseExerciseForMuscle(target.id);
+    return {
+      mode: "growth",
+      muscle: target,
+      exercise,
+      sets: 2,
+      title: `${target.label} met the floor`,
+      body: `${target.label} has ${fmt(target.sets, 1)} hard sets. Add 2 careful sets of ${exercise.name} if recovery feels good.`
+    };
+  }
+
+  return {
+    mode: "recovery",
+    muscle: null,
+    exercise: null,
+    sets: 0,
+    title: "Minimums are covered",
+    body: "All tracked muscles are at the weekly hypertrophy floor. Progress by adding reps or load, or recover if joints or soreness are talking back."
+  };
 }
 
 function previewSeries(kind) {
@@ -222,12 +643,13 @@ function lineChart(points, color = "#35d58c", unit = "") {
   const area = `8,92 ${polyline} 92,92`;
   const last = coords[coords.length - 1];
   const first = coords[0];
+  const gradientId = `area-${color.slice(1)}-${coords.length}-${Math.round(last.value * 10)}`;
 
   return `
     <div class="chart">
       <svg viewBox="0 0 100 100" preserveAspectRatio="none" role="img" aria-label="Trend chart">
         <defs>
-          <linearGradient id="area-${color.slice(1)}" x1="0" x2="0" y1="0" y2="1">
+          <linearGradient id="${gradientId}" x1="0" x2="0" y1="0" y2="1">
             <stop offset="0%" stop-color="${color}" stop-opacity="0.36"></stop>
             <stop offset="100%" stop-color="${color}" stop-opacity="0"></stop>
           </linearGradient>
@@ -235,105 +657,176 @@ function lineChart(points, color = "#35d58c", unit = "") {
         <line x1="8" y1="16" x2="92" y2="16" stroke="rgba(255,255,255,0.08)" stroke-width="0.4"></line>
         <line x1="8" y1="50" x2="92" y2="50" stroke="rgba(255,255,255,0.08)" stroke-width="0.4"></line>
         <line x1="8" y1="84" x2="92" y2="84" stroke="rgba(255,255,255,0.08)" stroke-width="0.4"></line>
-        <polygon points="${area}" fill="url(#area-${color.slice(1)})"></polygon>
+        <polygon points="${area}" fill="url(#${gradientId})"></polygon>
         <polyline points="${polyline}" fill="none" stroke="${color}" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"></polyline>
         ${coords.map((point) => `<circle cx="${point.x}" cy="${point.y}" r="1.7" fill="${color}"></circle>`).join("")}
       </svg>
-      <p class="muted small">${first.label} to ${last.label} - Latest ${fmt(last.value, 1)}${unit}</p>
+      <p class="muted small">${escapeHtml(first.label)} to ${escapeHtml(last.label)} - Latest ${fmt(last.value, 1)}${escapeHtml(unit)}</p>
     </div>
   `;
 }
 
+function muscleProgressMarkup(stats = muscleSetStats(), compact = false) {
+  const rows = stats.map((stat) => `
+    <div class="muscle-card ${stat.zone.tone}">
+      <div class="muscle-card-top">
+        <strong>${escapeHtml(stat.label)}</strong>
+        <span>${fmt(stat.sets, 1)}/${HYPERTROPHY.minimumSets}</span>
+      </div>
+      <div class="progress-bar"><span style="width:${stat.percent}%"></span></div>
+      <div class="muscle-card-meta">
+        <span>${escapeHtml(stat.zone.label)}</span>
+        <span>${stat.sessions}/2 touches</span>
+      </div>
+    </div>
+  `).join("");
+  return `<div class="muscle-grid ${compact ? "compact" : ""}">${rows}</div>`;
+}
+
+function topUnderTargetMuscles(limit = 4) {
+  return muscleSetStats()
+    .filter((stat) => stat.sets < HYPERTROPHY.minimumSets)
+    .sort((a, b) => a.sets - b.sets)
+    .slice(0, limit);
+}
+
 function recommendations() {
   const recs = [];
-  const today = new Date(todayISO());
+  const stats = muscleSetStats();
+  const action = nextHypertrophyAction();
+  const proteinAvg = getAverage("protein", 7);
+  const protein = proteinTargets();
+  const trend = weightTrend(14);
+  const highRir = stats[0]?.highRir || [];
+  const highVolume = stats.filter((stat) => stat.sets > HYPERTROPHY.growthHigh);
+  const lowFrequency = stats.filter((stat) => stat.sets >= 5 && stat.sessions < 2).slice(0, 3);
   const lastWorkout = state.workouts[0];
-  const daysSinceWorkout = lastWorkout
-    ? Math.round((today - new Date(lastWorkout.date)) / 86400000)
-    : null;
+  const daysSinceWorkout = lastWorkout ? daysBetween(lastWorkout.date, todayISO()) : null;
+
+  recs.push({
+    tone: action.mode === "minimum" ? "hot" : "",
+    title: action.title,
+    body: action.body,
+    action
+  });
 
   if (daysSinceWorkout === null) {
     recs.push({
       tone: "warn",
-      title: "Start with a baseline session",
-      body: "Log one normal lift day without chasing a max. The app needs a baseline before it can judge progress."
+      title: "Start with a baseline hypertrophy session",
+      body: "Log 2-3 hard sets for a few muscles. The coach will start filling weekly set gaps as soon as it sees data."
     });
   } else if (daysSinceWorkout >= 4) {
     recs.push({
       tone: "warn",
-      title: "Ease back in",
-      body: `It has been ${daysSinceWorkout} days since your last logged lift. Keep one or two reps in reserve today.`
-    });
-  } else {
-    recs.push({
-      tone: "",
-      title: "Training rhythm looks alive",
-      body: "Keep logging the main lifts. The recommendation engine gets more useful once it sees repeated exercises."
+      title: "Ease back into the week",
+      body: `It has been ${daysSinceWorkout} days since your last lift. Use 2-3 sets and keep 1-3 reps in reserve.`
     });
   }
 
-  const proteinAvg = getAverage("protein", 7);
-  const bodyWeight = lastMetric("bodyWeight")?.bodyWeight || 0;
-  if (bodyWeight && proteinAvg) {
-    const target = bodyWeight * 0.75;
-    if (proteinAvg < target) {
+  if (lowFrequency.length) {
+    recs.push({
+      tone: "warn",
+      title: "Add a second weekly touch",
+      body: `${lowFrequency.map((stat) => stat.label).join(", ")} have work logged but fewer than 2 weekly touches. Split sets across another day if you can.`
+    });
+  }
+
+  if (highRir.length) {
+    recs.push({
+      tone: "warn",
+      title: "Some sets were too far from failure",
+      body: `${highRir.length} recent log${highRir.length === 1 ? "" : "s"} had RIR above 3. Those sets count at half credit for hypertrophy until effort gets closer.`
+    });
+  }
+
+  if (protein.bodyWeightLb && proteinAvg) {
+    if (proteinAvg < protein.floor) {
       recs.push({
         tone: "hot",
-        title: "Protein is trailing your body weight",
-        body: `Your 7-day protein average is ${fmt(proteinAvg)}g. A practical target is around ${fmt(target)}g or more.`
+        title: "Protein is below the hypertrophy floor",
+        body: `Your 7-day average is ${fmt(proteinAvg)}g. Based on ${fmt(protein.bodyWeightLb, 1)} lb, aim for at least ${fmt(protein.floor)}g/day.`
       });
     } else {
       recs.push({
-        tone: "",
+        tone: "good",
         title: "Protein floor is covered",
-        body: `Your 7-day average is ${fmt(proteinAvg)}g, which supports strength progression for your current logged weight.`
+        body: `Your 7-day average is ${fmt(proteinAvg)}g. Useful range for your logged weight is about ${fmt(protein.floor)}-${fmt(protein.upper)}g/day.`
       });
     }
   } else {
     recs.push({
       tone: "warn",
-      title: "Add body weight and protein",
-      body: "One week of body weight and protein logs unlocks better nutrition coaching."
+      title: "Log body weight and protein",
+      body: "The hypertrophy nutrition target needs body weight plus protein logs to calculate your daily floor."
     });
   }
 
-  const exercises = [...new Set(state.workouts.map((entry) => entry.exercise))];
-  const plateau = exercises.find((exercise) => {
-    const entries = state.workouts.filter((entry) => entry.exercise === exercise).sort((a, b) => a.date.localeCompare(b.date));
-    if (entries.length < 4) return false;
-    const recent = entries.slice(-2).reduce((sum, entry) => sum + workoutVolume(entry), 0);
-    const prior = entries.slice(-4, -2).reduce((sum, entry) => sum + workoutVolume(entry), 0);
-    return recent <= prior * 0.98;
-  });
-  if (plateau) {
+  if (trend !== null && trend <= 0 && getAverage("calories", 7)) {
     recs.push({
-      tone: "hot",
-      title: `${plateau} may be stalling`,
-      body: "Recent volume is flat or down. Try one smaller load jump, add one set, or deload if recovery feels poor."
+      tone: "warn",
+      title: "Weight trend is flat or down",
+      body: "For muscle gain, consider adding a small calorie bump and watching the next 2 weeks of body-weight trend."
     });
   }
 
-  return recs.slice(0, 4);
+  if (highVolume.length) {
+    recs.push({
+      tone: "warn",
+      title: "Watch recovery on high-volume muscles",
+      body: `${highVolume.map((stat) => stat.label).join(", ")} are above ${HYPERTROPHY.growthHigh} weekly hard sets. Consider holding volume or deloading if performance drops.`
+    });
+  }
+
+  return recs.slice(0, 6);
 }
 
 function renderDashboard() {
   const weeklyVolume = getWeeklyVolume();
   const bodyWeight = lastMetric("bodyWeight")?.bodyWeight || 0;
   const proteinAvg = getAverage("protein", 7);
-  const caloriesAvg = getAverage("calories", 7);
-  const recent = state.workouts.slice(0, 4);
+  const protein = proteinTargets();
+  const stats = muscleSetStats();
+  const covered = stats.filter((stat) => stat.sets >= HYPERTROPHY.minimumSets).length;
+  const underTarget = topUnderTargetMuscles(4);
+  const action = nextHypertrophyAction();
 
   return `
     <section class="hero">
       <div>
-        <h2 class="hero-title">Today is for useful reps.</h2>
-        <p class="hero-copy">Log the lifts, track the fuel, and let the trends decide whether to push, hold, or recover.</p>
+        <h2 class="hero-title">Build the floor first.</h2>
+        <p class="hero-copy">Reach 10 hard sets per muscle each rolling week, train muscles twice, and keep most work 1-3 reps from failure.</p>
       </div>
       <div class="grid three">
-        <div class="stat"><span class="label">7-day volume</span><span class="value accent-green">${fmt(weeklyVolume)}</span><span class="hint">lb total</span></div>
-        <div class="stat"><span class="label">Body weight</span><span class="value accent-gold">${bodyWeight ? fmt(bodyWeight, 1) : "--"}</span><span class="hint">latest lb</span></div>
-        <div class="stat"><span class="label">Protein avg</span><span class="value accent-coral">${proteinAvg ? fmt(proteinAvg) : "--"}</span><span class="hint">g per day</span></div>
+        <div class="stat"><span class="label">Hypertrophy floor</span><span class="value accent-green">${covered}/${stats.length}</span><span class="hint">muscles at 10 sets</span></div>
+        <div class="stat"><span class="label">Needs work</span><span class="value accent-gold">${stats.length - covered}</span><span class="hint">under weekly floor</span></div>
+        <div class="stat"><span class="label">Protein floor</span><span class="value accent-coral">${protein.floor ? fmt(protein.floor) : "--"}</span><span class="hint">g/day minimum</span></div>
       </div>
+    </section>
+
+    <section class="section grid two">
+      <div class="card coach-action">
+        <span class="badge">Next best lift</span>
+        <h3>${escapeHtml(action.title)}</h3>
+        <p>${escapeHtml(action.body)}</p>
+        ${action.exercise ? `<p class="muted small">Rest ${escapeHtml(action.exercise.rest)}. ${escapeHtml(action.exercise.cue)}</p>` : ""}
+      </div>
+      <div class="card">
+        <h3>Lowest set counts</h3>
+        <div class="list">
+          ${underTarget.length ? underTarget.map((stat) => `
+            <div class="list-item simple">
+              <strong>${escapeHtml(stat.label)}</strong>
+              <span class="muted small">${fmt(stat.sets, 1)}/${HYPERTROPHY.minimumSets} hard sets - ${stat.sessions}/2 touches</span>
+            </div>
+          `).join("") : `<div class="empty">All tracked muscles have reached the weekly floor.</div>`}
+        </div>
+      </div>
+    </section>
+
+    <section class="section chart-panel">
+      <div class="chart-header"><h3>Weekly hard sets</h3><span class="muted small">${fmt(weeklyVolume)} lb total load logged</span></div>
+      ${muscleProgressMarkup(stats, true)}
     </section>
 
     <section class="section grid two">
@@ -342,34 +835,23 @@ function renderDashboard() {
         ${lineChart(seriesFromMetrics("bodyWeight").length ? seriesFromMetrics("bodyWeight") : previewSeries("bodyWeight"), "#f2d06b", " lb")}
       </div>
       <div class="chart-panel">
-        <div class="chart-header"><h3>Calories</h3><span class="muted small">${caloriesAvg ? `${fmt(caloriesAvg)} avg` : "preview"}</span></div>
-        ${lineChart(seriesFromMetrics("calories").length ? seriesFromMetrics("calories") : previewSeries("calories"), "#ff6b5f", "")}
-      </div>
-    </section>
-
-    <section class="section grid two">
-      <div class="card">
-        <h3>Next best action</h3>
-        ${recommendations().slice(0, 1).map((rec) => `<div class="coach-card ${rec.tone}"><strong>${rec.title}</strong><p>${rec.body}</p></div>`).join("")}
-      </div>
-      <div class="card">
-        <h3>Recent lifts</h3>
-        <div class="list">
-          ${recent.length ? recent.map((entry) => listWorkout(entry)).join("") : `<div class="empty">Your latest sets will show here.</div>`}
-        </div>
+        <div class="chart-header"><h3>Protein</h3><span class="muted small">${proteinAvg ? `${fmt(proteinAvg)}g avg` : "preview"}</span></div>
+        ${lineChart(seriesFromMetrics("protein").length ? seriesFromMetrics("protein") : previewSeries("protein"), "#ff6b5f", "g")}
       </div>
     </section>
   `;
 }
 
 function listWorkout(entry) {
+  const meta = workoutMeta(entry);
   return `
     <div class="list-item">
       <div>
-        <strong>${entry.exercise}</strong>
-        <span class="muted small">${entry.date} - ${entry.sets}x${entry.reps} @ ${fmt(entry.weight)} lb - ${fmt(workoutVolume(entry))} lb volume</span>
+        <strong>${escapeHtml(entry.exercise)}</strong>
+        <span class="muted small">${escapeHtml(entry.date)} - ${entry.sets}x${entry.reps} @ ${fmt(entry.weight)} lb - ${fmt(workoutVolume(entry))} lb volume</span>
+        <span class="muted micro">${meta.primaryMuscles.map(muscleLabel).join(", ")}${entry.rir !== null && entry.rir !== undefined ? ` - ${fmt(Number(entry.rir))} RIR` : ""}</span>
       </div>
-      <button class="delete-small" type="button" aria-label="Delete workout" data-action="delete-workout" data-id="${entry.id}">x</button>
+      <button class="delete-small" type="button" aria-label="Delete workout" data-action="delete-workout" data-id="${escapeHtml(entry.id)}">x</button>
     </div>
   `;
 }
@@ -382,17 +864,21 @@ function listMetric(entry) {
   return `
     <div class="list-item">
       <div>
-        <strong>${entry.date}</strong>
-        <span class="muted small">${parts.join(" - ") || "Metric entry"}</span>
+        <strong>${escapeHtml(entry.date)}</strong>
+        <span class="muted small">${escapeHtml(parts.join(" - ") || "Metric entry")}</span>
       </div>
-      <button class="delete-small" type="button" aria-label="Delete metric" data-action="delete-metric" data-id="${entry.id}">x</button>
+      <button class="delete-small" type="button" aria-label="Delete metric" data-action="delete-metric" data-id="${escapeHtml(entry.id)}">x</button>
     </div>
   `;
 }
 
 function renderLog() {
   const exerciseChips = defaultExercises.map((name) => `
-    <button class="pill ${state.selectedExercise === name ? "is-active" : ""}" type="button" data-action="choose-exercise" data-exercise="${name}">${name}</button>
+    <button class="pill ${state.selectedExercise === name ? "is-active" : ""}" type="button" data-action="choose-exercise" data-exercise="${escapeHtml(name)}">${escapeHtml(name)}</button>
+  `).join("");
+  const selectedMeta = resolveExerciseMeta(state.selectedExercise);
+  const muscleOptions = muscleGroups.map((muscle) => `
+    <option value="${muscle.id}" ${selectedMeta.primaryMuscles.includes(muscle.id) ? "selected" : ""}>${escapeHtml(muscle.label)}</option>
   `).join("");
 
   return `
@@ -407,7 +893,11 @@ function renderLog() {
           <div class="pill-row">${exerciseChips}</div>
           <div class="field">
             <label for="exercise">Exercise</label>
-            <input id="exercise" name="exercise" required value="${state.selectedExercise}">
+            <input id="exercise" name="exercise" required value="${escapeHtml(state.selectedExercise)}">
+          </div>
+          <div class="field">
+            <label for="targetMuscle">Target muscle for custom lifts</label>
+            <select id="targetMuscle" name="targetMuscle">${muscleOptions}</select>
           </div>
           <div class="field">
             <label for="workout-date">Date</label>
@@ -415,7 +905,7 @@ function renderLog() {
           </div>
           <div class="field-row">
             <div class="field"><label for="sets">Sets</label><input id="sets" name="sets" type="number" inputmode="decimal" min="1" step="1" required value="3"></div>
-            <div class="field"><label for="reps">Reps</label><input id="reps" name="reps" type="number" inputmode="decimal" min="1" step="1" required value="8"></div>
+            <div class="field"><label for="reps">Reps</label><input id="reps" name="reps" type="number" inputmode="decimal" min="1" step="1" required value="10"></div>
             <div class="field"><label for="weight">Weight</label><input id="weight" name="weight" type="number" inputmode="decimal" min="0" step="2.5" required placeholder="lb"></div>
           </div>
           <div class="field">
@@ -424,9 +914,10 @@ function renderLog() {
           </div>
           <div class="field">
             <label for="workout-notes">Notes</label>
-            <textarea id="workout-notes" name="notes" placeholder="Bar speed, soreness, setup, anything useful."></textarea>
+            <textarea id="workout-notes" name="notes" placeholder="Tempo, soreness, pain, pump, setup, anything useful."></textarea>
           </div>
-          <button class="primary-button" type="submit">Save lift</button>
+          <button class="primary-button" type="submit">Save hypertrophy set</button>
+          <p class="muted micro form-note">Avoid sharp pain. Most hypertrophy work should stop 1-3 reps before failure.</p>
         </form>
       ` : `
         <form id="metric-form">
@@ -441,7 +932,7 @@ function renderLog() {
           </div>
           <div class="field">
             <label for="metric-notes">Notes</label>
-            <textarea id="metric-notes" name="notes" placeholder="Sleep, hunger, sodium, stress, or anything that explains the trend."></textarea>
+            <textarea id="metric-notes" name="notes" placeholder="Sleep, hunger, stress, digestion, or anything that explains the trend."></textarea>
           </div>
           <button class="primary-button" type="submit">Save metrics</button>
         </form>
@@ -464,20 +955,24 @@ function renderLog() {
 function renderTrends() {
   const exercises = [...new Set([...defaultExercises, ...state.workouts.map((entry) => entry.exercise)])];
   if (!exercises.includes(state.selectedExercise)) state.selectedExercise = exercises[0];
-  const options = exercises.map((exercise) => `<option ${exercise === state.selectedExercise ? "selected" : ""}>${exercise}</option>`).join("");
+  const options = exercises.map((exercise) => `<option ${exercise === state.selectedExercise ? "selected" : ""}>${escapeHtml(exercise)}</option>`).join("");
   const volumeSeries = seriesFromWorkouts(state.selectedExercise, workoutVolume);
   const e1rmSeries = seriesFromWorkouts(state.selectedExercise, e1rm);
 
   return `
     <section class="settings-panel">
       <div class="field">
-        <label for="trend-exercise">Exercise trend</label>
+        <label for="trend-exercise">Exercise progression</label>
         <select id="trend-exercise" data-action="trend-exercise">${options}</select>
       </div>
     </section>
+    <section class="section chart-panel">
+      <div class="chart-header"><h3>Weekly hard sets by muscle</h3><span class="muted small">rolling 7 days</span></div>
+      ${muscleProgressMarkup(muscleSetStats())}
+    </section>
     <section class="section grid two">
       <div class="chart-panel">
-        <div class="chart-header"><h3>${state.selectedExercise} volume</h3><span class="muted small">sets x reps x load</span></div>
+        <div class="chart-header"><h3>${escapeHtml(state.selectedExercise)} volume</h3><span class="muted small">sets x reps x load</span></div>
         ${lineChart(volumeSeries, "#35d58c", " lb")}
       </div>
       <div class="chart-panel">
@@ -497,15 +992,35 @@ function renderTrends() {
 }
 
 function renderCoach() {
+  const recs = recommendations();
+  const action = recs[0]?.action;
   return `
     <section class="hero">
       <div>
-        <h2 class="hero-title">Rules before hype.</h2>
-        <p class="hero-copy">These recommendations come from your logged data: consistency, progressive overload, calories, protein, and recovery signals.</p>
+        <h2 class="hero-title">Hypertrophy is counted in hard sets.</h2>
+        <p class="hero-copy">Minimum-first coaching: 10 hard sets per muscle, 2 weekly touches, 1-3 RIR, enough protein, and gradual overload.</p>
       </div>
     </section>
+    ${action?.exercise ? `
+      <section class="section card coach-action featured-action">
+        <span class="badge">Recommended now</span>
+        <h3>${escapeHtml(action.exercise.name)}</h3>
+        <p>${escapeHtml(action.body)}</p>
+        <div class="action-grid">
+          <span><strong>${action.sets}</strong> sets</span>
+          <span><strong>${escapeHtml(action.exercise.reps)}</strong> reps</span>
+          <span><strong>${HYPERTROPHY.idealRirMin}-${HYPERTROPHY.idealRirMax}</strong> RIR</span>
+          <span><strong>${escapeHtml(action.exercise.rest)}</strong> rest</span>
+        </div>
+        <p class="muted small">${escapeHtml(action.exercise.cue)}</p>
+      </section>
+    ` : ""}
+    <section class="section chart-panel">
+      <div class="chart-header"><h3>Muscle set audit</h3><span class="muted small">10 set floor, 12-20 growth zone</span></div>
+      ${muscleProgressMarkup(muscleSetStats())}
+    </section>
     <section class="section grid">
-      ${recommendations().map((rec) => `<div class="coach-card ${rec.tone}"><strong>${rec.title}</strong><p>${rec.body}</p></div>`).join("")}
+      ${recs.map((rec) => `<div class="coach-card ${rec.tone}"><strong>${escapeHtml(rec.title)}</strong><p>${escapeHtml(rec.body)}</p></div>`).join("")}
     </section>
   `;
 }
@@ -532,10 +1047,35 @@ function supabaseStatus() {
   return "Not configured";
 }
 
+function hypertrophySettings() {
+  return {
+    goal: "hypertrophy",
+    volumeStyle: "minimum-first",
+    equipmentScope: "home-basics",
+    scheduleStyle: "flexible",
+    minimumSets: HYPERTROPHY.minimumSets,
+    growthLow: HYPERTROPHY.growthLow,
+    growthHigh: HYPERTROPHY.growthHigh,
+    proteinFloorGPerKg: HYPERTROPHY.proteinFloorGPerKg,
+    proteinUpperGPerKg: HYPERTROPHY.proteinUpperGPerKg
+  };
+}
+
 async function renderSettings() {
   const estimate = await storageEstimateMarkup();
   return `
     <section class="settings-panel">
+      <h2>Hypertrophy defaults</h2>
+      <div class="settings-list">
+        <span>Weekly floor <strong>${HYPERTROPHY.minimumSets} hard sets/muscle</strong></span>
+        <span>Growth zone <strong>${HYPERTROPHY.growthLow}-${HYPERTROPHY.growthHigh} sets</strong></span>
+        <span>Effort target <strong>${HYPERTROPHY.idealRirMin}-${HYPERTROPHY.idealRirMax} RIR</strong></span>
+        <span>Protein floor <strong>${HYPERTROPHY.proteinFloorGPerKg} g/kg/day</strong></span>
+      </div>
+      <p class="muted small">This is training guidance for personal tracking, not medical advice.</p>
+    </section>
+
+    <section class="section settings-panel">
       <h2>Storage</h2>
       ${estimate}
       <div class="grid two">
@@ -547,18 +1087,18 @@ async function renderSettings() {
 
     <section class="section settings-panel">
       <h2>Supabase sync</h2>
-      <p class="muted small">Status: ${supabaseStatus()}</p>
+      <p class="muted small">Status: ${escapeHtml(supabaseStatus())}</p>
       <div class="field">
         <label for="supabaseUrl">Project URL</label>
-        <input id="supabaseUrl" value="${state.settings.supabaseUrl || ""}" placeholder="https://your-project.supabase.co">
+        <input id="supabaseUrl" value="${escapeHtml(state.settings.supabaseUrl || "")}" placeholder="https://your-project.supabase.co">
       </div>
       <div class="field">
         <label for="supabaseAnonKey">Anon public key</label>
-        <input id="supabaseAnonKey" value="${state.settings.supabaseAnonKey || ""}" placeholder="Paste your Supabase anon key">
+        <input id="supabaseAnonKey" value="${escapeHtml(state.settings.supabaseAnonKey || "")}" placeholder="Paste your Supabase anon key">
       </div>
       <div class="field">
         <label for="supabaseEmail">Email</label>
-        <input id="supabaseEmail" type="email" value="${state.settings.supabaseEmail || ""}" placeholder="you@example.com">
+        <input id="supabaseEmail" type="email" value="${escapeHtml(state.settings.supabaseEmail || "")}" placeholder="you@example.com">
       </div>
       <div class="field">
         <label for="supabasePassword">Password</label>
@@ -595,10 +1135,16 @@ async function render() {
 
 async function saveWorkout(form) {
   const data = Object.fromEntries(new FormData(form));
+  const exerciseName = data.exercise.trim();
+  const meta = resolveExerciseMeta(exerciseName, data.targetMuscle);
   const entry = {
     id: uid(),
     date: data.date,
-    exercise: data.exercise.trim(),
+    exercise: exerciseName,
+    exerciseId: meta.id,
+    primaryMuscles: [...meta.primaryMuscles],
+    secondaryMuscles: [...meta.secondaryMuscles],
+    equipment: meta.equipment,
     sets: Math.max(1, parseNum(data.sets)),
     reps: Math.max(1, parseNum(data.reps)),
     weight: Math.max(0, parseNum(data.weight)),
@@ -610,7 +1156,7 @@ async function saveWorkout(form) {
   await dbPut("workouts", entry);
   await loadState();
   await render();
-  toast("Lift saved.");
+  toast("Hypertrophy set saved.");
 }
 
 async function saveMetric(form) {
@@ -630,11 +1176,19 @@ async function saveMetric(form) {
   toast("Metrics saved.");
 }
 
+function exportSafeSettings() {
+  return {
+    hypertrophyProfile: hypertrophySettings(),
+    lastBackupAt: new Date().toISOString()
+  };
+}
+
 function exportPayload() {
   return {
     app: "TrainWise",
     version: APP_VERSION,
     exportedAt: new Date().toISOString(),
+    settings: exportSafeSettings(),
     workouts: state.workouts,
     metrics: state.metrics
   };
@@ -658,6 +1212,9 @@ async function importPayload(payload) {
   await Promise.all(STORES.filter((store) => store !== "settings").map((store) => dbClear(store)));
   for (const entry of payload.workouts) await dbPut("workouts", entry);
   for (const entry of payload.metrics) await dbPut("metrics", entry);
+  if (payload.settings?.hypertrophyProfile) {
+    await saveSetting("hypertrophyProfile", payload.settings.hypertrophyProfile);
+  }
   await loadState();
   await render();
 }
@@ -855,5 +1412,5 @@ async function init() {
 }
 
 init().catch((error) => {
-  els.app.innerHTML = `<div class="empty">TrainWise could not start: ${error.message}</div>`;
+  els.app.innerHTML = `<div class="empty">TrainWise could not start: ${escapeHtml(error.message)}</div>`;
 });

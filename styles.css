@@ -346,6 +346,13 @@ textarea {
   padding: 12px;
 }
 
+.list-item.simple {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
 .list-item strong {
   display: block;
   margin-bottom: 4px;
@@ -408,10 +415,166 @@ textarea {
   border-left-color: var(--coral);
 }
 
+.coach-card.good {
+  border-left-color: var(--green);
+}
+
 .coach-card p {
   margin-bottom: 0;
   color: var(--muted);
   line-height: 1.45;
+}
+
+.coach-action h3 {
+  margin-top: 8px;
+}
+
+.coach-action p {
+  margin-bottom: 8px;
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.featured-action {
+  border-color: rgba(53, 213, 140, 0.22);
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 0 8px;
+  border: 1px solid rgba(53, 213, 140, 0.28);
+  border-radius: 999px;
+  background: rgba(53, 213, 140, 0.1);
+  color: var(--green);
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0;
+}
+
+.action-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  margin: 12px 0;
+}
+
+.action-grid span {
+  min-height: 58px;
+  padding: 10px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.045);
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.action-grid strong {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--text);
+  font-size: 15px;
+}
+
+.muscle-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.muscle-grid.compact {
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+
+.muscle-card {
+  display: grid;
+  gap: 8px;
+  min-height: 86px;
+  padding: 10px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.muscle-card.hot .progress-bar span {
+  background: var(--coral);
+}
+
+.muscle-card.warn .progress-bar span {
+  background: var(--gold);
+}
+
+.muscle-card.good .progress-bar span {
+  background: var(--green);
+}
+
+.muscle-card-top,
+.muscle-card-meta,
+.settings-list span {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.muscle-card-top strong,
+.muscle-card-top span {
+  font-size: 13px;
+}
+
+.muscle-card-top span {
+  color: var(--text);
+  font-weight: 800;
+}
+
+.muscle-card-meta {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.progress-bar {
+  height: 9px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.progress-bar span {
+  display: block;
+  height: 100%;
+  max-width: 100%;
+  border-radius: inherit;
+  background: var(--green);
+}
+
+.settings-list {
+  display: grid;
+  gap: 8px;
+}
+
+.settings-list span {
+  min-height: 42px;
+  padding: 10px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  color: var(--muted);
+}
+
+.settings-list span:last-child {
+  border-bottom: 0;
+}
+
+.settings-list strong {
+  color: var(--text);
+}
+
+.micro {
+  display: block;
+  margin-top: 4px;
+  font-size: 11px;
+}
+
+.form-note {
+  margin: 10px 0 0;
 }
 
 .storage-meter {
@@ -472,6 +635,15 @@ textarea {
     grid-template-columns: 1fr;
   }
 
+  .muscle-grid,
+  .muscle-grid.compact {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .action-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .field-row {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
@@ -496,6 +668,17 @@ textarea {
 
   .field-row {
     grid-template-columns: 1fr;
+  }
+
+  .muscle-grid,
+  .muscle-grid.compact {
+    grid-template-columns: 1fr;
+  }
+
+  .list-item.simple,
+  .settings-list span {
+    align-items: flex-start;
+    flex-direction: column;
   }
 
   .tab {
