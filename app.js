@@ -3,7 +3,8 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 2;
 const STORES = ["workouts", "metrics", "settings"];
-const APP_VERSION = "1.1.0";
+const APP_VERSION = "1.2.0";
+const SAMPLE_BATCH = "hypertrophy-demo-v1";
 
 const HYPERTROPHY = {
   minimumSets: 10,
@@ -243,8 +244,29 @@ function uid() {
   return crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
+function isoFromLocalDate(date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
 function todayISO() {
-  return new Date().toISOString().slice(0, 10);
+  return isoFromLocalDate(new Date());
+}
+
+function dateDaysAgo(daysAgo) {
+  const date = new Date();
+  date.setDate(date.getDate() - daysAgo);
+  return isoFromLocalDate(date);
+}
+
+function parseLocalDate(value) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(value || ""));
+  if (match) {
+    return new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+  }
+  return new Date(value);
 }
 
 function fmt(num, digits = 0) {
@@ -375,8 +397,8 @@ function recentDays(days) {
 }
 
 function daysBetween(a, b) {
-  const first = new Date(a);
-  const second = new Date(b);
+  const first = parseLocalDate(a);
+  const second = parseLocalDate(b);
   return Math.round((second - first) / 86400000);
 }
 
@@ -453,7 +475,7 @@ function creditedSetsForWorkout(workout) {
 
 function weeklyWorkouts() {
   const start = recentDays(7);
-  return state.workouts.filter((entry) => new Date(entry.date) >= start);
+  return state.workouts.filter((entry) => parseLocalDate(entry.date) >= start);
 }
 
 function getWeeklyVolume() {
@@ -463,7 +485,7 @@ function getWeeklyVolume() {
 function getAverage(field, days) {
   const start = recentDays(days);
   const values = state.metrics
-    .filter((entry) => new Date(entry.date) >= start && entry[field] > 0)
+    .filter((entry) => parseLocalDate(entry.date) >= start && entry[field] > 0)
     .map((entry) => entry[field]);
   if (!values.length) return 0;
   return values.reduce((sum, value) => sum + value, 0) / values.length;
@@ -476,7 +498,7 @@ function lastMetric(field) {
 function weightTrend(days = 14) {
   const start = recentDays(days);
   const entries = state.metrics
-    .filter((entry) => new Date(entry.date) >= start && entry.bodyWeight > 0)
+    .filter((entry) => parseLocalDate(entry.date) >= start && entry.bodyWeight > 0)
     .sort((a, b) => a.date.localeCompare(b.date));
   if (entries.length < 2) return null;
   return entries[entries.length - 1].bodyWeight - entries[0].bodyWeight;
@@ -595,7 +617,7 @@ function previewSeries(kind) {
     date.setDate(date.getDate() - index * 3);
     const bump = Math.sin(index / 1.8) * 8;
     values.push({
-      label: date.toISOString().slice(5, 10),
+      label: isoFromLocalDate(date).slice(5, 10),
       value: kind === "calories" ? 2300 + bump * 18 : kind === "protein" ? 165 + bump : 185 + bump / 2
     });
   }
@@ -987,6 +1009,10 @@ function renderTrends() {
         <div class="chart-header"><h3>Protein</h3><span class="muted small">daily grams</span></div>
         ${lineChart(seriesFromMetrics("protein"), "#ff6b5f", "g")}
       </div>
+      <div class="chart-panel">
+        <div class="chart-header"><h3>Calories</h3><span class="muted small">daily intake</span></div>
+        ${lineChart(seriesFromMetrics("calories"), "#35d58c", "")}
+      </div>
     </section>
   `;
 }
@@ -1063,6 +1089,8 @@ function hypertrophySettings() {
 
 async function renderSettings() {
   const estimate = await storageEstimateMarkup();
+  const sampleWorkouts = state.workouts.filter(isSampleEntry).length;
+  const sampleMetrics = state.metrics.filter(isSampleEntry).length;
   return `
     <section class="settings-panel">
       <h2>Hypertrophy defaults</h2>
@@ -1073,6 +1101,15 @@ async function renderSettings() {
         <span>Protein floor <strong>${HYPERTROPHY.proteinFloorGPerKg} g/kg/day</strong></span>
       </div>
       <p class="muted small">This is training guidance for personal tracking, not medical advice.</p>
+    </section>
+
+    <section class="section settings-panel">
+      <h2>Sample chart data</h2>
+      <p class="muted small">${sampleWorkouts + sampleMetrics ? `${sampleWorkouts} sample lifts and ${sampleMetrics} sample metrics are loaded.` : "Load demo logs to test every chart and recommendation without touching your real backups."}</p>
+      <div class="grid two">
+        <button class="primary-button" type="button" data-action="load-sample-data">Load sample data</button>
+        <button class="ghost-button" type="button" data-action="remove-sample-data">Remove sample data</button>
+      </div>
     </section>
 
     <section class="section settings-panel">
@@ -1176,6 +1213,123 @@ async function saveMetric(form) {
   toast("Metrics saved.");
 }
 
+function isSampleEntry(entry) {
+  return entry?.sample === true || entry?.sampleBatch === SAMPLE_BATCH;
+}
+
+function sampleWorkout({ exercise, daysAgo, sets, reps, weight, rir, note }) {
+  const date = dateDaysAgo(daysAgo);
+  const meta = resolveExerciseMeta(exercise);
+  return {
+    id: `${SAMPLE_BATCH}-workout-${date}-${meta.id}`,
+    sample: true,
+    sampleBatch: SAMPLE_BATCH,
+    date,
+    exercise: meta.name,
+    exerciseId: meta.id,
+    primaryMuscles: [...meta.primaryMuscles],
+    secondaryMuscles: [...meta.secondaryMuscles],
+    equipment: meta.equipment,
+    sets,
+    reps,
+    weight,
+    rir,
+    notes: note || "Sample hypertrophy data for chart testing.",
+    createdAt: `${date}T12:00:00.000Z`
+  };
+}
+
+function sampleMetric(daysAgo) {
+  const date = dateDaysAgo(daysAgo);
+  const progress = 41 - daysAgo;
+  const wave = Math.sin(progress / 3);
+  return {
+    id: `${SAMPLE_BATCH}-metric-${date}`,
+    sample: true,
+    sampleBatch: SAMPLE_BATCH,
+    date,
+    bodyWeight: 181 + progress * 0.08 + wave * 0.25,
+    calories: Math.round(2380 + progress * 7 + wave * 70),
+    protein: Math.round(126 + progress * 0.95 + wave * 6),
+    notes: "Sample nutrition data for chart testing.",
+    createdAt: `${date}T08:00:00.000Z`
+  };
+}
+
+function generateSampleData() {
+  const workoutPlan = [
+    { offset: 6, exercise: "Dumbbell Bench Press", sets: 3, reps: 10, base: 30, step: 2.5, rir: 2 },
+    { offset: 6, exercise: "Dumbbell Row", sets: 3, reps: 10, base: 35, step: 2.5, rir: 2 },
+    { offset: 6, exercise: "Lateral Raise", sets: 3, reps: 16, base: 10, step: 1, rir: 2 },
+    { offset: 5, exercise: "Goblet Squat", sets: 3, reps: 12, base: 35, step: 2.5, rir: 2 },
+    { offset: 5, exercise: "Romanian Deadlift", sets: 3, reps: 10, base: 40, step: 2.5, rir: 2 },
+    { offset: 5, exercise: "Standing Calf Raise", sets: 3, reps: 18, base: 25, step: 2, rir: 2 },
+    { offset: 4, exercise: "Push-up", sets: 3, reps: 15, base: 0, step: 0, rir: 2 },
+    { offset: 4, exercise: "Band Row", sets: 3, reps: 18, base: 0, step: 0, rir: 2 },
+    { offset: 4, exercise: "Dumbbell Shoulder Press", sets: 3, reps: 10, base: 22.5, step: 1.5, rir: 2 },
+    { offset: 4, exercise: "Dumbbell Fly", sets: 2, reps: 15, base: 12.5, step: 1, rir: 4 },
+    { offset: 3, exercise: "Bulgarian Split Squat", sets: 3, reps: 10, base: 20, step: 2, rir: 2 },
+    { offset: 3, exercise: "Hip Thrust / Glute Bridge", sets: 3, reps: 15, base: 35, step: 2.5, rir: 2 },
+    { offset: 3, exercise: "Plank / Dead Bug", sets: 3, reps: 45, base: 0, step: 0, rir: 2 },
+    { offset: 2, exercise: "Overhead Triceps Extension", sets: 2, reps: 14, base: 15, step: 1, rir: 2 },
+    { offset: 2, exercise: "Dumbbell Curl", sets: 2, reps: 12, base: 15, step: 1, rir: 2 },
+    { offset: 2, exercise: "Hammer Curl", sets: 2, reps: 12, base: 15, step: 1, rir: 2 }
+  ];
+
+  const workouts = [];
+  for (let week = 5; week >= 0; week -= 1) {
+    const progression = 5 - week;
+    for (const item of workoutPlan) {
+      workouts.push(sampleWorkout({
+        exercise: item.exercise,
+        daysAgo: week * 7 + item.offset,
+        sets: item.sets,
+        reps: item.reps + (progression % 2),
+        weight: Math.max(0, item.base + progression * item.step),
+        rir: item.rir,
+        note: `Sample week ${progression + 1}: ${item.exercise}`
+      }));
+    }
+  }
+
+  const metrics = [];
+  for (let daysAgo = 41; daysAgo >= 0; daysAgo -= 1) {
+    metrics.push(sampleMetric(daysAgo));
+  }
+
+  return { workouts, metrics };
+}
+
+async function deleteSampleEntries() {
+  const [workouts, metrics] = await Promise.all([dbAll("workouts"), dbAll("metrics")]);
+  const deletes = [
+    ...workouts.filter(isSampleEntry).map((entry) => dbDelete("workouts", entry.id)),
+    ...metrics.filter(isSampleEntry).map((entry) => dbDelete("metrics", entry.id))
+  ];
+  await Promise.all(deletes);
+}
+
+async function loadSampleData() {
+  await deleteSampleEntries();
+  const sample = generateSampleData();
+  for (const entry of sample.workouts) await dbPut("workouts", entry);
+  for (const entry of sample.metrics) await dbPut("metrics", entry);
+  await saveSetting("sampleDataLoadedAt", new Date().toISOString());
+  state.selectedExercise = "Dumbbell Bench Press";
+  state.activeTab = "trends";
+  await loadState();
+  await render();
+  toast("Sample data loaded.");
+}
+
+async function removeSampleData() {
+  await deleteSampleEntries();
+  await saveSetting("sampleDataLoadedAt", null);
+  await loadState();
+  await render();
+  toast("Sample data removed.");
+}
+
 function exportSafeSettings() {
   return {
     hypertrophyProfile: hypertrophySettings(),
@@ -1189,8 +1343,8 @@ function exportPayload() {
     version: APP_VERSION,
     exportedAt: new Date().toISOString(),
     settings: exportSafeSettings(),
-    workouts: state.workouts,
-    metrics: state.metrics
+    workouts: state.workouts.filter((entry) => !isSampleEntry(entry)),
+    metrics: state.metrics.filter((entry) => !isSampleEntry(entry))
   };
 }
 
@@ -1346,6 +1500,8 @@ async function handleAction(action, target) {
   if (action === "signin-supabase") await supabaseAuth("signin");
   if (action === "push-supabase") await pushSupabaseBackup();
   if (action === "pull-supabase") await pullSupabaseBackup();
+  if (action === "load-sample-data") await loadSampleData();
+  if (action === "remove-sample-data") await removeSampleData();
   if (action === "clear-all") await clearAll();
 }
 

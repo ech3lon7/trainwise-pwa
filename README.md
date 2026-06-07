@@ -8,6 +8,7 @@ TrainWise is a free, static, offline-first hypertrophy workout and nutrition PWA
 - Nutrition/body logging: body weight, calories, protein, and notes
 - Progress charts for hard sets, exercise volume, estimated 1RM, body weight, calories, and protein
 - Rule-based hypertrophy recommendations
+- Optional sample chart data for testing the dashboards locally
 - IndexedDB local storage
 - Export/import JSON backups
 - Optional Supabase cloud backup using a free Supabase project
@@ -27,6 +28,12 @@ The app is minimum-first and home-basics focused.
 - The exercise library assumes dumbbells, bands, bench, and bodyweight options.
 
 This is personal training guidance, not medical advice. Avoid sharp pain and adjust for injury, recovery, and fatigue.
+
+## Sample chart data
+
+Settings includes a sample-data loader that adds 6 weeks of demo workouts and daily nutrition metrics to local browser storage. Use it to test hard-set charts, exercise progression, body weight, calories, protein, and coaching recommendations.
+
+Sample entries are marked internally and can be removed with "Remove sample data" without deleting real logs. Exported backups and Supabase snapshots exclude sample entries.
 
 ## Run locally
 
