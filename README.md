@@ -4,10 +4,11 @@ TrainWise is a free, static, offline-first hypertrophy workout and nutrition PWA
 
 ## What is included
 
-- Hypertrophy logging: exercise, target muscle, sets, reps, load, RIR, and notes
+- Hypertrophy logging: exercise, target muscle, per-set reps/load/RIR, and notes
 - Nutrition/body logging: body weight, calories, protein, and notes
-- Progress charts for hard sets, exercise volume, estimated 1RM, body weight, calories, and protein
-- Rule-based hypertrophy recommendations
+- Interactive progress charts for muscle hard sets, muscle volume, exercise volume, estimated 1RM, body weight, calories, and protein
+- Rule-based hypertrophy recommendations capped around 1-hour sessions
+- Day templates for reusing logged exercise days
 - Optional sample chart data for testing the dashboards locally
 - IndexedDB local storage
 - Export/import JSON backups
@@ -34,6 +35,12 @@ This is personal training guidance, not medical advice. Avoid sharp pain and adj
 Settings includes a sample-data loader that adds 6 weeks of demo workouts and daily nutrition metrics to local browser storage. Use it to test hard-set charts, exercise progression, body weight, calories, protein, and coaching recommendations.
 
 Sample entries are marked internally and can be removed with "Remove sample data" without deleting real logs. Exported backups and Supabase snapshots exclude sample entries.
+
+## Workout templates and set table
+
+The strength logger uses one row per set so each set can carry its own load, reps, and RIR. Use "Use last session" to fill the table from your previous session for that exercise, then lock it in or update the saved entry later.
+
+Day templates save the logged exercises and set rows from a chosen date. Loading a template queues those exercises for quick logging on a new day.
 
 ## Run locally
 
@@ -104,4 +111,4 @@ The Supabase free tier is enough for personal workout logs. Free projects can pa
 
 Local data lives in browser storage. Use export/import or Supabase backup so clearing Safari website data does not wipe your only copy.
 
-Backups include workouts, nutrition metrics, and non-secret hypertrophy settings. Supabase credentials and sessions are not included in exported backup files.
+Backups include workouts, nutrition metrics, day templates, and non-secret hypertrophy settings. Supabase credentials and sessions are not included in exported backup files.

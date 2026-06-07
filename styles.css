@@ -358,6 +358,12 @@ textarea {
   margin-bottom: 4px;
 }
 
+.row-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
 .delete-small {
   align-self: center;
   width: 36px;
@@ -385,10 +391,40 @@ textarea {
   min-height: 200px;
 }
 
+.interactive-chart {
+  display: grid;
+  gap: 8px;
+}
+
+.chart-stage {
+  position: relative;
+  min-height: 220px;
+  touch-action: pan-y;
+}
+
 .chart svg {
   display: block;
   width: 100%;
   height: 220px;
+}
+
+.chart-marker {
+  position: absolute;
+  width: 14px;
+  height: 14px;
+  border: 3px solid var(--text);
+  border-radius: 999px;
+  background: var(--panel);
+  box-shadow: 0 0 0 5px rgba(53, 213, 140, 0.16);
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+
+.chart-readout {
+  margin: 0;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 800;
 }
 
 .empty {
@@ -475,6 +511,25 @@ textarea {
   margin-bottom: 4px;
   color: var(--text);
   font-size: 15px;
+}
+
+.session-plan-list {
+  display: grid;
+  gap: 8px;
+}
+
+.session-plan-item {
+  display: grid;
+  gap: 4px;
+  min-height: 58px;
+  padding: 10px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.045);
+}
+
+.session-plan-item span {
+  color: var(--muted);
+  font-size: 12px;
 }
 
 .muscle-grid {
@@ -577,6 +632,170 @@ textarea {
   margin: 10px 0 0;
 }
 
+.trend-section {
+  margin-top: 14px;
+  padding: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  background: rgba(23, 27, 23, 0.7);
+}
+
+.trend-section-header,
+.log-table-head {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 12px;
+  align-items: end;
+  margin-bottom: 12px;
+}
+
+.trend-section-header h2 {
+  margin-bottom: 4px;
+}
+
+.compact-field {
+  min-width: 190px;
+  margin-bottom: 0;
+}
+
+.log-table-head {
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+}
+
+.exercise-badge {
+  display: grid;
+  place-items: center;
+  width: 58px;
+  height: 58px;
+  border-radius: 8px;
+  background: linear-gradient(145deg, rgba(242, 208, 107, 0.95), rgba(53, 213, 140, 0.78));
+  color: #101310;
+  font-size: 26px;
+  font-weight: 900;
+}
+
+.template-queue {
+  display: flex;
+  gap: 8px;
+  margin: 0 0 12px;
+  overflow-x: auto;
+  padding-bottom: 4px;
+}
+
+.set-table-wrap {
+  overflow-x: auto;
+  margin: 12px 0;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.set-table {
+  width: 100%;
+  min-width: 640px;
+  border-collapse: separate;
+  border-spacing: 0;
+}
+
+.set-table th,
+.set-table td {
+  padding: 10px;
+  text-align: left;
+  vertical-align: middle;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.set-table th {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.set-table tr:last-child td {
+  border-bottom: 0;
+}
+
+.set-table input {
+  min-width: 90px;
+  text-align: center;
+  font-size: 20px;
+  font-weight: 800;
+}
+
+.set-type {
+  min-width: 116px;
+  color: var(--violet);
+}
+
+.set-number {
+  display: inline-grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  margin-right: 8px;
+  border-radius: 8px;
+  background: rgba(155, 140, 255, 0.12);
+  color: var(--text);
+  font-weight: 900;
+}
+
+.prev-cell {
+  min-width: 96px;
+  color: var(--muted);
+  font-weight: 800;
+}
+
+.log-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 8px 0 12px;
+  flex-wrap: wrap;
+}
+
+.round-add {
+  display: grid;
+  place-items: center;
+  width: 50px;
+  height: 50px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--violet);
+  color: #fff;
+  font-size: 34px;
+  line-height: 1;
+  box-shadow: 0 10px 22px rgba(155, 140, 255, 0.24);
+}
+
+.ghost-mini {
+  min-height: 34px;
+  padding: 0 10px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text);
+  font-size: 12px;
+}
+
+.ghost-mini:disabled,
+.ghost-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.lock-button {
+  min-height: 52px;
+}
+
+.template-panel .grid.two {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.exercise-history {
+  margin-top: 14px;
+}
+
 .storage-meter {
   height: 10px;
   overflow: hidden;
@@ -648,6 +867,18 @@ textarea {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
+  .trend-section-header {
+    grid-template-columns: 1fr;
+  }
+
+  .compact-field {
+    min-width: 0;
+  }
+
+  .template-panel .grid.two {
+    grid-template-columns: 1fr;
+  }
+
   .hero-title {
     font-size: 25px;
   }
@@ -668,6 +899,19 @@ textarea {
 
   .field-row {
     grid-template-columns: 1fr;
+  }
+
+  .log-table-head {
+    grid-template-columns: auto 1fr;
+  }
+
+  .log-table-head .ghost-button {
+    grid-column: 1 / -1;
+  }
+
+  .row-actions {
+    flex-direction: column;
+    align-items: flex-end;
   }
 
   .muscle-grid,

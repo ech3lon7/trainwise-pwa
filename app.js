@@ -3,9 +3,11 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 2;
 const STORES = ["workouts", "metrics", "settings"];
-const APP_VERSION = "1.2.1";
+const APP_VERSION = "1.3.0";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 let dbOpenPromise = null;
+let chartId = 0;
+const SESSION_LIMIT_MINUTES = 60;
 
 const HYPERTROPHY = {
   minimumSets: 10,
@@ -231,6 +233,17 @@ const state = {
   activeTab: "dashboard",
   logMode: "strength",
   selectedExercise: "Push-up",
+  selectedMuscle: "chest",
+  editingWorkoutId: null,
+  historyExercise: "",
+  templateQueue: [],
+  draftDate: todayISO(),
+  draftNotes: "",
+  setRows: [
+    { weight: "", reps: 10, rir: 2 },
+    { weight: "", reps: 10, rir: 2 },
+    { weight: "", reps: 10, rir: 2 }
+  ],
   workouts: [],
   metrics: [],
   settings: {}
@@ -486,22 +499,53 @@ function workoutMeta(entry) {
   return resolveExerciseMeta(entry.exercise, entry.targetMuscle);
 }
 
+function setRowsFromWorkout(workout) {
+  if (Array.isArray(workout.setRows) && workout.setRows.length) {
+    return workout.setRows.map((row) => ({
+      weight: parseNum(row.weight),
+      reps: Math.max(1, parseNum(row.reps)),
+      rir: row.rir === null || row.rir === undefined || row.rir === "" ? null : parseNum(row.rir)
+    }));
+  }
+  const sets = Math.max(1, parseNum(workout.sets));
+  return Array.from({ length: sets }, () => ({
+    weight: Math.max(0, parseNum(workout.weight)),
+    reps: Math.max(1, parseNum(workout.reps)),
+    rir: workout.rir === null || workout.rir === undefined || workout.rir === "" ? null : parseNum(workout.rir)
+  }));
+}
+
+function normalizeSetRows(rows) {
+  const cleaned = (rows || [])
+    .map((row) => ({
+      weight: Math.max(0, parseNum(row.weight)),
+      reps: Math.max(1, parseNum(row.reps)),
+      rir: row.rir === "" || row.rir === null || row.rir === undefined ? null : Math.max(0, parseNum(row.rir))
+    }))
+    .filter((row) => row.reps > 0);
+  return cleaned.length ? cleaned : [{ weight: 0, reps: 10, rir: 2 }];
+}
+
 function workoutVolume(workout) {
-  return workout.sets * workout.reps * workout.weight;
+  return setRowsFromWorkout(workout).reduce((sum, row) => sum + row.weight * row.reps, 0);
 }
 
 function e1rm(workout) {
-  return workout.weight * (1 + workout.reps / 30);
+  return setRowsFromWorkout(workout).reduce((best, row) => Math.max(best, row.weight * (1 + row.reps / 30)), 0);
 }
 
-function setEffortMultiplier(workout) {
-  if (workout.rir === null || workout.rir === undefined || workout.rir === "") return 1;
-  return Number(workout.rir) <= HYPERTROPHY.idealRirMax ? 1 : HYPERTROPHY.highRirDiscount;
+function rowEffortMultiplier(row) {
+  if (row.rir === null || row.rir === undefined || row.rir === "") return 1;
+  return Number(row.rir) <= HYPERTROPHY.idealRirMax ? 1 : HYPERTROPHY.highRirDiscount;
+}
+
+function hardSetCount(workout) {
+  return setRowsFromWorkout(workout).reduce((sum, row) => sum + rowEffortMultiplier(row), 0);
 }
 
 function creditedSetsForWorkout(workout) {
   const meta = workoutMeta(workout);
-  const base = Math.max(0, parseNum(workout.sets)) * setEffortMultiplier(workout);
+  const base = hardSetCount(workout);
   const credits = {};
   for (const muscle of meta.primaryMuscles || []) {
     credits[muscle] = (credits[muscle] || 0) + base;
@@ -510,6 +554,23 @@ function creditedSetsForWorkout(workout) {
     credits[muscle] = (credits[muscle] || 0) + base * 0.5;
   }
   return credits;
+}
+
+function bestSetLabel(workout) {
+  const rows = setRowsFromWorkout(workout);
+  const best = rows.reduce((winner, row) => {
+    const score = row.weight * (1 + row.reps / 30);
+    return !winner || score > winner.score ? { ...row, score } : winner;
+  }, null);
+  return best ? `${fmt(best.weight)} x ${fmt(best.reps)}` : "--";
+}
+
+function averageRir(workout) {
+  const values = setRowsFromWorkout(workout)
+    .map((row) => row.rir)
+    .filter((value) => Number.isFinite(value));
+  if (!values.length) return null;
+  return values.reduce((sum, value) => sum + value, 0) / values.length;
 }
 
 function weeklyWorkouts() {
@@ -572,7 +633,7 @@ function muscleSetStats() {
       if (sets > 0) sessions[muscle].add(workout.date);
     }
 
-    if (workout.rir !== null && workout.rir !== undefined && workout.rir !== "" && Number(workout.rir) > HYPERTROPHY.idealRirMax) {
+    if (setRowsFromWorkout(workout).some((row) => row.rir !== null && Number(row.rir) > HYPERTROPHY.idealRirMax)) {
       highRir.push({ ...workout, meta });
     }
   }
@@ -602,8 +663,39 @@ function chooseExerciseForMuscle(muscleId) {
   return exerciseLibrary.find((exercise) => exercise.primaryMuscles.includes(muscleId)) || exerciseLibrary[0];
 }
 
+function estimateExerciseMinutes(exercise, sets) {
+  const restMatch = String(exercise.rest || "90 sec").match(/(\d+)(?:-(\d+))?/);
+  const restSeconds = restMatch ? (Number(restMatch[2] || restMatch[1]) + Number(restMatch[1])) / 2 : 90;
+  const perSetMinutes = 0.75 + restSeconds / 60;
+  return Math.ceil(3 + sets * perSetMinutes);
+}
+
+function buildSessionPlan(limitMinutes = SESSION_LIMIT_MINUTES) {
+  const stats = muscleSetStats()
+    .filter((stat) => stat.sets < HYPERTROPHY.minimumSets)
+    .sort((a, b) => a.sets - b.sets);
+  const items = [];
+  let totalMinutes = 0;
+  const usedExercises = new Set();
+
+  for (const target of stats) {
+    const exercise = chooseExerciseForMuscle(target.id);
+    if (usedExercises.has(exercise.id)) continue;
+    const sets = Math.min(3, Math.max(2, Math.ceil(target.deficit)));
+    const minutes = estimateExerciseMinutes(exercise, sets);
+    if (items.length && totalMinutes + minutes > limitMinutes) continue;
+    items.push({ muscle: target, exercise, sets, minutes });
+    usedExercises.add(exercise.id);
+    totalMinutes += minutes;
+    if (totalMinutes >= limitMinutes - 8) break;
+  }
+
+  return { items, totalMinutes, limitMinutes };
+}
+
 function nextHypertrophyAction() {
   const stats = muscleSetStats();
+  const sessionPlan = buildSessionPlan();
   const underMinimum = stats
     .filter((stat) => stat.sets < HYPERTROPHY.minimumSets)
     .sort((a, b) => a.sets - b.sets || muscleGroups.findIndex((muscle) => muscle.id === a.id) - muscleGroups.findIndex((muscle) => muscle.id === b.id));
@@ -617,8 +709,10 @@ function nextHypertrophyAction() {
       muscle: target,
       exercise,
       sets: recommendedSets,
+      minutes: estimateExerciseMinutes(exercise, recommendedSets),
+      sessionPlan,
       title: `${target.label} is below the hypertrophy floor`,
-      body: `${target.label} is at ${fmt(target.sets, 1)}/${HYPERTROPHY.minimumSets} hard sets. Do ${recommendedSets} sets of ${exercise.name}, ${exercise.reps} reps, ${HYPERTROPHY.idealRirMin}-${HYPERTROPHY.idealRirMax} RIR.`
+      body: `${target.label} is at ${fmt(target.sets, 1)}/${HYPERTROPHY.minimumSets} hard sets. Do ${recommendedSets} sets of ${exercise.name}, ${exercise.reps} reps, ${HYPERTROPHY.idealRirMin}-${HYPERTROPHY.idealRirMax} RIR. About ${estimateExerciseMinutes(exercise, recommendedSets)} min.`
     };
   }
 
@@ -633,8 +727,10 @@ function nextHypertrophyAction() {
       muscle: target,
       exercise,
       sets: 2,
+      minutes: estimateExerciseMinutes(exercise, 2),
+      sessionPlan,
       title: `${target.label} met the floor`,
-      body: `${target.label} has ${fmt(target.sets, 1)} hard sets. Add 2 careful sets of ${exercise.name} if recovery feels good.`
+      body: `${target.label} has ${fmt(target.sets, 1)} hard sets. Add 2 careful sets of ${exercise.name} if recovery feels good. About ${estimateExerciseMinutes(exercise, 2)} min.`
     };
   }
 
@@ -643,6 +739,8 @@ function nextHypertrophyAction() {
     muscle: null,
     exercise: null,
     sets: 0,
+    minutes: 0,
+    sessionPlan,
     title: "Minimums are covered",
     body: "All tracked muscles are at the weekly hypertrophy floor. Progress by adding reps or load, or recover if joints or soreness are talking back."
   };
@@ -683,13 +781,45 @@ function seriesFromMetrics(field) {
     }));
 }
 
+function aggregateByDate(entries, valueForEntry) {
+  const byDate = new Map();
+  for (const entry of entries) {
+    const value = valueForEntry(entry);
+    if (!Number.isFinite(value) || value <= 0) continue;
+    byDate.set(entry.date, (byDate.get(entry.date) || 0) + value);
+  }
+  return [...byDate.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([date, value]) => ({ label: date.slice(5, 10), value }));
+}
+
+function muscleCreditFactor(workout, muscleId) {
+  const meta = workoutMeta(workout);
+  if ((meta.primaryMuscles || []).includes(muscleId)) return 1;
+  if ((meta.secondaryMuscles || []).includes(muscleId)) return 0.5;
+  return 0;
+}
+
+function seriesFromMuscle(muscleId, metric) {
+  return aggregateByDate(state.workouts, (workout) => {
+    const factor = muscleCreditFactor(workout, muscleId);
+    if (!factor) return 0;
+    if (metric === "sets") return hardSetCount(workout) * factor;
+    return workoutVolume(workout) * factor;
+  });
+}
+
+function chartReadout(point, unit) {
+  return `${point.label}: ${fmt(point.value, 1)}${unit}`;
+}
+
 function lineChart(points, color = "#35d58c", unit = "") {
   if (!points.length) {
     return `<div class="empty">No data yet. Your chart will appear after the first few logs.</div>`;
   }
 
   const chartPoints = points.length > 1 ? points : [
-    { label: points[0].label, value: points[0].value - 1 },
+    { label: points[0].label, value: points[0].value - 1, hidden: true },
     points[0]
   ];
   const min = Math.min(...chartPoints.map((point) => point.value));
@@ -702,27 +832,39 @@ function lineChart(points, color = "#35d58c", unit = "") {
   });
   const polyline = coords.map((point) => `${point.x},${point.y}`).join(" ");
   const area = `8,92 ${polyline} 92,92`;
-  const last = coords[coords.length - 1];
-  const first = coords[0];
-  const gradientId = `area-${color.slice(1)}-${coords.length}-${Math.round(last.value * 10)}`;
+  const visibleCoords = coords.filter((point) => !point.hidden);
+  const last = visibleCoords[visibleCoords.length - 1];
+  const first = visibleCoords[0];
+  chartId += 1;
+  const gradientId = `area-${color.slice(1)}-${chartId}`;
+  const payload = escapeHtml(JSON.stringify(visibleCoords.map((point) => ({
+    x: point.x,
+    y: point.y,
+    label: point.label,
+    value: point.value
+  }))));
 
   return `
-    <div class="chart">
-      <svg viewBox="0 0 100 100" preserveAspectRatio="none" role="img" aria-label="Trend chart">
-        <defs>
-          <linearGradient id="${gradientId}" x1="0" x2="0" y1="0" y2="1">
-            <stop offset="0%" stop-color="${color}" stop-opacity="0.36"></stop>
-            <stop offset="100%" stop-color="${color}" stop-opacity="0"></stop>
-          </linearGradient>
-        </defs>
-        <line x1="8" y1="16" x2="92" y2="16" stroke="rgba(255,255,255,0.08)" stroke-width="0.4"></line>
-        <line x1="8" y1="50" x2="92" y2="50" stroke="rgba(255,255,255,0.08)" stroke-width="0.4"></line>
-        <line x1="8" y1="84" x2="92" y2="84" stroke="rgba(255,255,255,0.08)" stroke-width="0.4"></line>
-        <polygon points="${area}" fill="url(#${gradientId})"></polygon>
-        <polyline points="${polyline}" fill="none" stroke="${color}" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"></polyline>
-        ${coords.map((point) => `<circle cx="${point.x}" cy="${point.y}" r="1.7" fill="${color}"></circle>`).join("")}
-      </svg>
-      <p class="muted small">${escapeHtml(first.label)} to ${escapeHtml(last.label)} - Latest ${fmt(last.value, 1)}${escapeHtml(unit)}</p>
+    <div class="chart interactive-chart" data-points="${payload}" data-unit="${escapeHtml(unit)}">
+      <div class="chart-stage">
+        <svg viewBox="0 0 100 100" preserveAspectRatio="none" role="img" aria-label="Interactive trend chart">
+          <defs>
+            <linearGradient id="${gradientId}" x1="0" x2="0" y1="0" y2="1">
+              <stop offset="0%" stop-color="${color}" stop-opacity="0.36"></stop>
+              <stop offset="100%" stop-color="${color}" stop-opacity="0"></stop>
+            </linearGradient>
+          </defs>
+          <line x1="8" y1="16" x2="92" y2="16" stroke="rgba(255,255,255,0.08)" stroke-width="0.4"></line>
+          <line x1="8" y1="50" x2="92" y2="50" stroke="rgba(255,255,255,0.08)" stroke-width="0.4"></line>
+          <line x1="8" y1="84" x2="92" y2="84" stroke="rgba(255,255,255,0.08)" stroke-width="0.4"></line>
+          <polygon points="${area}" fill="url(#${gradientId})"></polygon>
+          <polyline points="${polyline}" fill="none" stroke="${color}" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"></polyline>
+          ${visibleCoords.map((point) => `<circle cx="${point.x}" cy="${point.y}" r="1.7" fill="${color}"></circle>`).join("")}
+        </svg>
+        <div class="chart-marker" style="left:${last.x}%; top:${last.y}%"></div>
+      </div>
+      <p class="chart-readout">${escapeHtml(chartReadout(last, unit))}</p>
+      <p class="muted small">${escapeHtml(first.label)} to ${escapeHtml(last.label)}</p>
     </div>
   `;
 }
@@ -905,14 +1047,18 @@ function renderDashboard() {
 
 function listWorkout(entry) {
   const meta = workoutMeta(entry);
+  const avgRir = averageRir(entry);
   return `
     <div class="list-item">
       <div>
         <strong>${escapeHtml(entry.exercise)}</strong>
-        <span class="muted small">${escapeHtml(entry.date)} - ${entry.sets}x${entry.reps} @ ${fmt(entry.weight)} lb - ${fmt(workoutVolume(entry))} lb volume</span>
-        <span class="muted micro">${meta.primaryMuscles.map(muscleLabel).join(", ")}${entry.rir !== null && entry.rir !== undefined ? ` - ${fmt(Number(entry.rir))} RIR` : ""}</span>
+        <span class="muted small">${escapeHtml(entry.date)} - ${setRowsFromWorkout(entry).length} sets - best ${bestSetLabel(entry)} - ${fmt(workoutVolume(entry))} lb volume</span>
+        <span class="muted micro">${meta.primaryMuscles.map(muscleLabel).join(", ")}${avgRir !== null ? ` - ${fmt(avgRir, 1)} avg RIR` : ""}</span>
       </div>
-      <button class="delete-small" type="button" aria-label="Delete workout" data-action="delete-workout" data-id="${escapeHtml(entry.id)}">x</button>
+      <div class="row-actions">
+        <button class="ghost-mini" type="button" data-action="edit-workout" data-id="${escapeHtml(entry.id)}">Edit</button>
+        <button class="delete-small" type="button" aria-label="Delete workout" data-action="delete-workout" data-id="${escapeHtml(entry.id)}">x</button>
+      </div>
     </div>
   `;
 }
@@ -933,14 +1079,176 @@ function listMetric(entry) {
   `;
 }
 
+function defaultSetRows(count = 3) {
+  return Array.from({ length: count }, () => ({ weight: "", reps: 10, rir: 2 }));
+}
+
+function readDraftFromForm() {
+  const form = document.getElementById("strength-form");
+  if (!form) return;
+  const data = Object.fromEntries(new FormData(form));
+  state.selectedExercise = data.exercise?.trim() || state.selectedExercise;
+  state.draftDate = data.date || state.draftDate || todayISO();
+  state.draftNotes = data.notes || "";
+  state.draftTargetMuscle = data.targetMuscle || state.draftTargetMuscle || "chest";
+  state.setRows = normalizeSetRows([...form.querySelectorAll(".set-row")].map((row) => ({
+    weight: row.querySelector('[data-set-field="weight"]')?.value,
+    reps: row.querySelector('[data-set-field="reps"]')?.value,
+    rir: row.querySelector('[data-set-field="rir"]')?.value
+  })));
+}
+
+function lastSessionForExercise(exercise, excludeId = null) {
+  return state.workouts
+    .filter((entry) => entry.exercise === exercise && entry.id !== excludeId)
+    .sort((a, b) => b.date.localeCompare(a.date) || String(b.createdAt || "").localeCompare(String(a.createdAt || "")))[0] || null;
+}
+
+function previousSetLabel(exercise, index) {
+  const last = lastSessionForExercise(exercise, state.editingWorkoutId);
+  if (!last) return "--";
+  const row = setRowsFromWorkout(last)[index];
+  return row ? `${fmt(row.weight)} x ${fmt(row.reps)}` : "--";
+}
+
+function renderSetRows() {
+  const rows = normalizeSetRows(state.setRows);
+  return rows.map((row, index) => `
+    <tr class="set-row" data-index="${index}">
+      <td class="set-type"><span class="set-number">${index + 1}</span><strong>Set</strong></td>
+      <td class="prev-cell">${escapeHtml(previousSetLabel(state.selectedExercise, index))}</td>
+      <td><input data-set-field="weight" type="number" inputmode="decimal" min="0" step="2.5" value="${escapeHtml(row.weight)}" aria-label="Set ${index + 1} weight"></td>
+      <td><input data-set-field="reps" type="number" inputmode="numeric" min="1" step="1" value="${escapeHtml(row.reps)}" aria-label="Set ${index + 1} reps"></td>
+      <td><input data-set-field="rir" type="number" inputmode="numeric" min="0" max="5" step="1" value="${row.rir ?? ""}" aria-label="Set ${index + 1} RIR"></td>
+      <td><button class="ghost-mini" type="button" data-action="remove-set" data-index="${index}" ${rows.length <= 1 ? "disabled" : ""}>x</button></td>
+    </tr>
+  `).join("");
+}
+
+function exerciseInitial(name) {
+  return escapeHtml((name || "?").trim().slice(0, 1).toUpperCase());
+}
+
+function exerciseHistoryMarkup() {
+  if (state.historyExercise !== state.selectedExercise) return "";
+  const sessions = state.workouts
+    .filter((entry) => entry.exercise === state.selectedExercise)
+    .slice(0, 6);
+  return `
+    <section class="section card exercise-history">
+      <div class="chart-header"><h3>${escapeHtml(state.selectedExercise)} history</h3><span class="muted small">last ${sessions.length} sessions</span></div>
+      <div class="list">
+        ${sessions.length ? sessions.map((entry) => `
+          <div class="list-item simple">
+            <strong>${escapeHtml(entry.date)}</strong>
+            <span class="muted small">${setRowsFromWorkout(entry).length} sets - best ${bestSetLabel(entry)} - ${fmt(workoutVolume(entry))} lb</span>
+          </div>
+        `).join("") : `<div class="empty">No history for this exercise yet.</div>`}
+      </div>
+    </section>
+  `;
+}
+
+function getDayTemplates() {
+  return Array.isArray(state.settings.dayTemplates) ? state.settings.dayTemplates : [];
+}
+
+function workoutToTemplateExercise(workout) {
+  const meta = workoutMeta(workout);
+  return {
+    exercise: workout.exercise,
+    targetMuscle: meta.primaryMuscles[0] || "chest",
+    notes: workout.notes || "",
+    setRows: setRowsFromWorkout(workout)
+  };
+}
+
+function currentDraftTemplateExercise() {
+  readDraftFromForm();
+  return {
+    exercise: state.selectedExercise,
+    targetMuscle: state.draftTargetMuscle || resolveExerciseMeta(state.selectedExercise).primaryMuscles[0] || "chest",
+    notes: state.draftNotes || "",
+    setRows: normalizeSetRows(state.setRows)
+  };
+}
+
+function templateOptionsMarkup(templates) {
+  if (!templates.length) return `<option value="">No templates saved</option>`;
+  return templates.map((template) => `<option value="${escapeHtml(template.id)}">${escapeHtml(template.name)}</option>`).join("");
+}
+
+function renderTemplateQueue() {
+  if (!state.templateQueue.length) return "";
+  return `
+    <div class="template-queue">
+      ${state.templateQueue.map((item, index) => `
+        <button class="pill ${item.exercise === state.selectedExercise ? "is-active" : ""}" type="button" data-action="template-exercise" data-index="${index}">${escapeHtml(item.exercise)}</button>
+      `).join("")}
+    </div>
+  `;
+}
+
+function applyTemplateExercise(item) {
+  state.selectedExercise = item.exercise;
+  state.draftTargetMuscle = item.targetMuscle || resolveExerciseMeta(item.exercise).primaryMuscles[0] || "chest";
+  state.draftNotes = item.notes || "";
+  state.setRows = normalizeSetRows(item.setRows);
+  state.editingWorkoutId = null;
+}
+
+async function saveDayTemplate() {
+  readDraftFromForm();
+  const date = state.draftDate || todayISO();
+  let exercises = state.workouts.filter((entry) => entry.date === date).map(workoutToTemplateExercise);
+  if (!exercises.length) exercises = [currentDraftTemplateExercise()];
+  const defaultName = `Hypertrophy day ${getDayTemplates().length + 1}`;
+  const name = (document.getElementById("template-name")?.value || defaultName).trim();
+  if (!name) return;
+  const templates = getDayTemplates().filter((template) => template.name !== name);
+  templates.push({
+    id: uid(),
+    name,
+    createdAt: new Date().toISOString(),
+    exercises
+  });
+  await saveSetting("dayTemplates", templates);
+  await render();
+  toast("Template saved.");
+}
+
+async function loadDayTemplate() {
+  const select = document.getElementById("template-select");
+  const template = getDayTemplates().find((item) => item.id === select?.value);
+  if (!template) throw new Error("Choose a template first.");
+  state.templateQueue = template.exercises || [];
+  if (state.templateQueue.length) applyTemplateExercise(state.templateQueue[0]);
+  state.draftDate = todayISO();
+  await render();
+  toast("Template loaded.");
+}
+
+async function deleteDayTemplate() {
+  const select = document.getElementById("template-select");
+  const template = getDayTemplates().find((item) => item.id === select?.value);
+  if (!template) throw new Error("Choose a template first.");
+  if (!confirm(`Delete template "${template.name}"?`)) return;
+  await saveSetting("dayTemplates", getDayTemplates().filter((item) => item.id !== template.id));
+  state.templateQueue = [];
+  await render();
+  toast("Template deleted.");
+}
+
 function renderLog() {
   const exerciseChips = defaultExercises.map((name) => `
     <button class="pill ${state.selectedExercise === name ? "is-active" : ""}" type="button" data-action="choose-exercise" data-exercise="${escapeHtml(name)}">${escapeHtml(name)}</button>
   `).join("");
   const selectedMeta = resolveExerciseMeta(state.selectedExercise);
   const muscleOptions = muscleGroups.map((muscle) => `
-    <option value="${muscle.id}" ${selectedMeta.primaryMuscles.includes(muscle.id) ? "selected" : ""}>${escapeHtml(muscle.label)}</option>
+    <option value="${muscle.id}" ${(state.draftTargetMuscle || selectedMeta.primaryMuscles[0]) === muscle.id ? "selected" : ""}>${escapeHtml(muscle.label)}</option>
   `).join("");
+  const templates = getDayTemplates();
+  const lockLabel = state.editingWorkoutId ? "Update" : "Lock in";
 
   return `
     <section class="form-panel">
@@ -951,35 +1259,77 @@ function renderLog() {
 
       ${state.logMode === "strength" ? `
         <form id="strength-form">
+          <div class="log-table-head">
+            <div class="exercise-badge">${exerciseInitial(state.selectedExercise)}</div>
+            <div>
+              <label for="exercise">Exercise</label>
+              <input id="exercise" name="exercise" required value="${escapeHtml(state.selectedExercise)}">
+            </div>
+            <button class="ghost-button" type="button" data-action="toggle-history">History</button>
+          </div>
+
           <div class="pill-row">${exerciseChips}</div>
-          <div class="field">
-            <label for="exercise">Exercise</label>
-            <input id="exercise" name="exercise" required value="${escapeHtml(state.selectedExercise)}">
-          </div>
-          <div class="field">
-            <label for="targetMuscle">Target muscle for custom lifts</label>
-            <select id="targetMuscle" name="targetMuscle">${muscleOptions}</select>
-          </div>
-          <div class="field">
-            <label for="workout-date">Date</label>
-            <input id="workout-date" name="date" type="date" required value="${todayISO()}">
-          </div>
+          ${renderTemplateQueue()}
+
           <div class="field-row">
-            <div class="field"><label for="sets">Sets</label><input id="sets" name="sets" type="number" inputmode="decimal" min="1" step="1" required value="3"></div>
-            <div class="field"><label for="reps">Reps</label><input id="reps" name="reps" type="number" inputmode="decimal" min="1" step="1" required value="10"></div>
-            <div class="field"><label for="weight">Weight</label><input id="weight" name="weight" type="number" inputmode="decimal" min="0" step="2.5" required placeholder="lb"></div>
+            <div class="field">
+              <label for="targetMuscle">Target muscle for custom lifts</label>
+              <select id="targetMuscle" name="targetMuscle">${muscleOptions}</select>
+            </div>
+            <div class="field">
+              <label for="workout-date">Date</label>
+              <input id="workout-date" name="date" type="date" required value="${escapeHtml(state.draftDate || todayISO())}">
+            </div>
           </div>
-          <div class="field">
-            <label for="rir">Reps in reserve</label>
-            <input id="rir" name="rir" type="number" inputmode="decimal" min="0" max="5" step="1" placeholder="2">
+
+          <div class="set-table-wrap">
+            <table class="set-table">
+              <thead>
+                <tr>
+                  <th>Type</th>
+                  <th>Prev</th>
+                  <th>lbs</th>
+                  <th>Reps</th>
+                  <th>RIR</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>${renderSetRows()}</tbody>
+            </table>
           </div>
+
+          <div class="log-actions">
+            <button class="round-add" type="button" aria-label="Add set" data-action="add-set">+</button>
+            <button class="ghost-button" type="button" data-action="use-last-session">Use last session</button>
+            ${state.editingWorkoutId ? `<button class="ghost-button" type="button" data-action="new-log">New log</button>` : ""}
+          </div>
+
           <div class="field">
             <label for="workout-notes">Notes</label>
-            <textarea id="workout-notes" name="notes" placeholder="Tempo, soreness, pain, pump, setup, anything useful."></textarea>
+            <textarea id="workout-notes" name="notes" placeholder="Tempo, soreness, pain, pump, setup, anything useful.">${escapeHtml(state.draftNotes || "")}</textarea>
           </div>
-          <button class="primary-button" type="submit">Save hypertrophy set</button>
-          <p class="muted micro form-note">Avoid sharp pain. Most hypertrophy work should stop 1-3 reps before failure.</p>
+
+          <button class="primary-button lock-button" type="submit">${lockLabel}</button>
+          <p class="muted micro form-note">Most hypertrophy work should stop 1-3 reps before failure. Keep the whole workout inside roughly ${SESSION_LIMIT_MINUTES} minutes.</p>
         </form>
+
+        <section class="section settings-panel template-panel">
+          <h3>Day templates</h3>
+          <div class="field">
+            <label for="template-name">Template name</label>
+            <input id="template-name" placeholder="Upper A, Lower B, Push day">
+          </div>
+          <div class="field">
+            <label for="template-select">Saved template</label>
+            <select id="template-select">${templateOptionsMarkup(templates)}</select>
+          </div>
+          <div class="grid two">
+            <button class="ghost-button" type="button" data-action="load-template" ${templates.length ? "" : "disabled"}>Load template</button>
+            <button class="ghost-button" type="button" data-action="delete-template" ${templates.length ? "" : "disabled"}>Delete template</button>
+            <button class="primary-button" type="button" data-action="save-day-template">Save day as template</button>
+          </div>
+        </section>
+        ${exerciseHistoryMarkup()}
       ` : `
         <form id="metric-form">
           <div class="field">
@@ -1017,40 +1367,85 @@ function renderTrends() {
   const exercises = [...new Set([...defaultExercises, ...state.workouts.map((entry) => entry.exercise)])];
   if (!exercises.includes(state.selectedExercise)) state.selectedExercise = exercises[0];
   const options = exercises.map((exercise) => `<option ${exercise === state.selectedExercise ? "selected" : ""}>${escapeHtml(exercise)}</option>`).join("");
+  const muscleOptions = muscleGroups.map((muscle) => `<option value="${muscle.id}" ${muscle.id === state.selectedMuscle ? "selected" : ""}>${escapeHtml(muscle.label)}</option>`).join("");
+  const selectedMuscleLabel = muscleLabel(state.selectedMuscle);
   const volumeSeries = seriesFromWorkouts(state.selectedExercise, workoutVolume);
   const e1rmSeries = seriesFromWorkouts(state.selectedExercise, e1rm);
+  const muscleSetSeries = seriesFromMuscle(state.selectedMuscle, "sets");
+  const muscleVolumeSeries = seriesFromMuscle(state.selectedMuscle, "volume");
 
   return `
-    <section class="settings-panel">
-      <div class="field">
-        <label for="trend-exercise">Exercise progression</label>
-        <select id="trend-exercise" data-action="trend-exercise">${options}</select>
+    <section class="trend-section">
+      <div class="trend-section-header">
+        <div>
+          <h2>Muscle volume</h2>
+          <p class="muted small">Hard sets and load credited to a muscle group.</p>
+        </div>
+        <div class="field compact-field">
+          <label for="trend-muscle">Muscle</label>
+          <select id="trend-muscle">${muscleOptions}</select>
+        </div>
+      </div>
+      <div class="grid two">
+        <div class="chart-panel">
+          <div class="chart-header"><h3>${escapeHtml(selectedMuscleLabel)} hard sets</h3><span class="muted small">daily credit</span></div>
+          ${lineChart(muscleSetSeries, "#f2d06b", " sets")}
+        </div>
+        <div class="chart-panel">
+          <div class="chart-header"><h3>${escapeHtml(selectedMuscleLabel)} volume</h3><span class="muted small">credited load</span></div>
+          ${lineChart(muscleVolumeSeries, "#35d58c", " lb")}
+        </div>
       </div>
     </section>
+
     <section class="section chart-panel">
       <div class="chart-header"><h3>Weekly hard sets by muscle</h3><span class="muted small">rolling 7 days</span></div>
       ${muscleProgressMarkup(muscleSetStats())}
     </section>
-    <section class="section grid two">
-      <div class="chart-panel">
-        <div class="chart-header"><h3>${escapeHtml(state.selectedExercise)} volume</h3><span class="muted small">sets x reps x load</span></div>
-        ${lineChart(volumeSeries, "#35d58c", " lb")}
+
+    <section class="section trend-section">
+      <div class="trend-section-header">
+        <div>
+          <h2>Exercise performance</h2>
+          <p class="muted small">Track the exercise you care about right now.</p>
+        </div>
+        <div class="field compact-field">
+          <label for="trend-exercise">Exercise</label>
+          <select id="trend-exercise" data-action="trend-exercise">${options}</select>
+        </div>
       </div>
-      <div class="chart-panel">
-        <div class="chart-header"><h3>Estimated 1RM</h3><span class="muted small">Epley formula</span></div>
-        ${lineChart(e1rmSeries, "#9b8cff", " lb")}
+      <div class="grid two">
+        <div class="chart-panel">
+          <div class="chart-header"><h3>${escapeHtml(state.selectedExercise)} volume</h3><span class="muted small">sets x reps x load</span></div>
+          ${lineChart(volumeSeries, "#9b8cff", " lb")}
+        </div>
+        <div class="chart-panel">
+          <div class="chart-header"><h3>Estimated 1RM</h3><span class="muted small">best set estimate</span></div>
+          ${lineChart(e1rmSeries, "#ff6b5f", " lb")}
+        </div>
       </div>
-      <div class="chart-panel">
-        <div class="chart-header"><h3>Body weight</h3><span class="muted small">latest logs</span></div>
-        ${lineChart(seriesFromMetrics("bodyWeight"), "#f2d06b", " lb")}
+    </section>
+
+    <section class="section trend-section">
+      <div class="trend-section-header">
+        <div>
+          <h2>Health trends</h2>
+          <p class="muted small">Body weight, protein, and calories stay separate from training volume.</p>
+        </div>
       </div>
-      <div class="chart-panel">
-        <div class="chart-header"><h3>Protein</h3><span class="muted small">daily grams</span></div>
-        ${lineChart(seriesFromMetrics("protein"), "#ff6b5f", "g")}
-      </div>
-      <div class="chart-panel">
-        <div class="chart-header"><h3>Calories</h3><span class="muted small">daily intake</span></div>
-        ${lineChart(seriesFromMetrics("calories"), "#35d58c", "")}
+      <div class="grid two">
+        <div class="chart-panel">
+          <div class="chart-header"><h3>Body weight</h3><span class="muted small">daily weight</span></div>
+          ${lineChart(seriesFromMetrics("bodyWeight"), "#f2d06b", " lb")}
+        </div>
+        <div class="chart-panel">
+          <div class="chart-header"><h3>Protein</h3><span class="muted small">daily grams</span></div>
+          ${lineChart(seriesFromMetrics("protein"), "#ff6b5f", "g")}
+        </div>
+        <div class="chart-panel">
+          <div class="chart-header"><h3>Calories</h3><span class="muted small">daily intake</span></div>
+          ${lineChart(seriesFromMetrics("calories"), "#35d58c", "")}
+        </div>
       </div>
     </section>
   `;
@@ -1059,6 +1454,7 @@ function renderTrends() {
 function renderCoach() {
   const recs = recommendations();
   const action = recs[0]?.action;
+  const sessionPlan = action?.sessionPlan || buildSessionPlan();
   return `
     <section class="hero">
       <div>
@@ -1075,11 +1471,22 @@ function renderCoach() {
           <span><strong>${action.sets}</strong> sets</span>
           <span><strong>${escapeHtml(action.exercise.reps)}</strong> reps</span>
           <span><strong>${HYPERTROPHY.idealRirMin}-${HYPERTROPHY.idealRirMax}</strong> RIR</span>
-          <span><strong>${escapeHtml(action.exercise.rest)}</strong> rest</span>
+          <span><strong>${action.minutes}</strong> min</span>
         </div>
         <p class="muted small">${escapeHtml(action.exercise.cue)}</p>
       </section>
     ` : ""}
+    <section class="section card">
+      <div class="chart-header"><h3>Under 1 hour plan</h3><span class="muted small">${sessionPlan.totalMinutes}/${SESSION_LIMIT_MINUTES} min estimate</span></div>
+      <div class="session-plan-list">
+        ${sessionPlan.items.length ? sessionPlan.items.map((item) => `
+          <div class="session-plan-item">
+            <strong>${escapeHtml(item.exercise.name)}</strong>
+            <span>${item.sets} sets - ${escapeHtml(item.exercise.reps)} reps - ${escapeHtml(item.muscle.label)} - ${item.minutes} min</span>
+          </div>
+        `).join("") : `<div class="empty">No extra work needed right now. Keep sessions short and recover.</div>`}
+      </div>
+    </section>
     <section class="section chart-panel">
       <div class="chart-header"><h3>Muscle set audit</h3><span class="muted small">10 set floor, 12-20 growth zone</span></div>
       ${muscleProgressMarkup(muscleSetStats())}
@@ -1210,29 +1617,43 @@ async function render() {
 }
 
 async function saveWorkout(form) {
+  readDraftFromForm();
   const data = Object.fromEntries(new FormData(form));
   const exerciseName = data.exercise.trim();
   const meta = resolveExerciseMeta(exerciseName, data.targetMuscle);
+  const setRows = normalizeSetRows(state.setRows);
+  const existing = state.editingWorkoutId ? state.workouts.find((entry) => entry.id === state.editingWorkoutId) : null;
+  const best = setRows.reduce((winner, row) => {
+    const score = row.weight * (1 + row.reps / 30);
+    return !winner || score > winner.score ? { ...row, score } : winner;
+  }, null);
   const entry = {
-    id: uid(),
+    id: existing?.id || uid(),
     date: data.date,
     exercise: exerciseName,
     exerciseId: meta.id,
     primaryMuscles: [...meta.primaryMuscles],
     secondaryMuscles: [...meta.secondaryMuscles],
     equipment: meta.equipment,
-    sets: Math.max(1, parseNum(data.sets)),
-    reps: Math.max(1, parseNum(data.reps)),
-    weight: Math.max(0, parseNum(data.weight)),
-    rir: data.rir === "" ? null : parseNum(data.rir),
+    setRows,
+    sets: setRows.length,
+    reps: best?.reps || 1,
+    weight: best?.weight || 0,
+    rir: averageRir({ setRows }),
     notes: data.notes.trim(),
-    createdAt: new Date().toISOString()
+    createdAt: existing?.createdAt || new Date().toISOString(),
+    updatedAt: new Date().toISOString()
   };
   state.selectedExercise = entry.exercise;
+  state.draftDate = entry.date;
+  state.draftNotes = entry.notes;
+  state.draftTargetMuscle = meta.primaryMuscles[0] || data.targetMuscle || "chest";
+  state.setRows = setRows;
+  state.editingWorkoutId = entry.id;
   await dbPut("workouts", entry);
   await loadState();
   await render();
-  toast("Hypertrophy set saved.");
+  toast(existing ? "Workout updated." : "Workout locked in.");
 }
 
 async function saveMetric(form) {
@@ -1259,6 +1680,11 @@ function isSampleEntry(entry) {
 function sampleWorkout({ exercise, daysAgo, sets, reps, weight, rir, note }) {
   const date = dateDaysAgo(daysAgo);
   const meta = resolveExerciseMeta(exercise);
+  const setRows = Array.from({ length: sets }, (_, index) => ({
+    weight: Math.max(0, weight - index * (weight ? 2.5 : 0)),
+    reps: Math.max(1, reps - (index % 3)),
+    rir
+  }));
   return {
     id: `${SAMPLE_BATCH}-workout-${date}-${meta.id}`,
     sample: true,
@@ -1269,6 +1695,7 @@ function sampleWorkout({ exercise, daysAgo, sets, reps, weight, rir, note }) {
     primaryMuscles: [...meta.primaryMuscles],
     secondaryMuscles: [...meta.secondaryMuscles],
     equipment: meta.equipment,
+    setRows,
     sets,
     reps,
     weight,
@@ -1372,6 +1799,7 @@ async function removeSampleData() {
 function exportSafeSettings() {
   return {
     hypertrophyProfile: hypertrophySettings(),
+    dayTemplates: getDayTemplates(),
     lastBackupAt: new Date().toISOString()
   };
 }
@@ -1407,6 +1835,9 @@ async function importPayload(payload) {
   for (const entry of payload.metrics) await dbPut("metrics", entry);
   if (payload.settings?.hypertrophyProfile) {
     await saveSetting("hypertrophyProfile", payload.settings.hypertrophyProfile);
+  }
+  if (Array.isArray(payload.settings?.dayTemplates)) {
+    await saveSetting("dayTemplates", payload.settings.dayTemplates);
   }
   await loadState();
   await render();
@@ -1515,11 +1946,77 @@ async function clearAll() {
   toast("Local data cleared.");
 }
 
+function editWorkout(id) {
+  const entry = state.workouts.find((workout) => workout.id === id);
+  if (!entry) throw new Error("Workout not found.");
+  const meta = workoutMeta(entry);
+  state.logMode = "strength";
+  state.activeTab = "log";
+  state.selectedExercise = entry.exercise;
+  state.draftDate = entry.date;
+  state.draftNotes = entry.notes || "";
+  state.draftTargetMuscle = meta.primaryMuscles[0] || "chest";
+  state.setRows = setRowsFromWorkout(entry);
+  state.editingWorkoutId = entry.id;
+}
+
+function clearWorkoutDraft() {
+  state.editingWorkoutId = null;
+  state.draftDate = todayISO();
+  state.draftNotes = "";
+  state.setRows = defaultSetRows();
+}
+
 async function handleAction(action, target) {
   if (action === "quick-backup" || action === "export-data") downloadBackup();
   if (action === "import-click") document.getElementById("import-file")?.click();
+  if (action === "add-set") {
+    readDraftFromForm();
+    const last = state.setRows[state.setRows.length - 1] || { weight: "", reps: 10, rir: 2 };
+    state.setRows.push({ ...last });
+    await render();
+  }
+  if (action === "remove-set") {
+    readDraftFromForm();
+    const index = Number(target.dataset.index);
+    if (state.setRows.length > 1) state.setRows.splice(index, 1);
+    await render();
+  }
+  if (action === "use-last-session") {
+    readDraftFromForm();
+    const last = lastSessionForExercise(state.selectedExercise, state.editingWorkoutId);
+    if (!last) throw new Error("No previous session for this exercise yet.");
+    state.setRows = setRowsFromWorkout(last);
+    state.draftNotes = last.notes || state.draftNotes;
+    await render();
+    toast("Last session loaded.");
+  }
+  if (action === "toggle-history") {
+    readDraftFromForm();
+    state.historyExercise = state.historyExercise === state.selectedExercise ? "" : state.selectedExercise;
+    await render();
+  }
+  if (action === "new-log") {
+    readDraftFromForm();
+    clearWorkoutDraft();
+    await render();
+  }
+  if (action === "edit-workout") {
+    editWorkout(target.dataset.id);
+    await render();
+  }
+  if (action === "save-day-template") await saveDayTemplate();
+  if (action === "load-template") await loadDayTemplate();
+  if (action === "delete-template") await deleteDayTemplate();
+  if (action === "template-exercise") {
+    readDraftFromForm();
+    const item = state.templateQueue[Number(target.dataset.index)];
+    if (item) applyTemplateExercise(item);
+    await render();
+  }
   if (action === "delete-workout") {
     await dbDelete("workouts", target.dataset.id);
+    if (state.editingWorkoutId === target.dataset.id) clearWorkoutDraft();
     await loadState();
     await render();
     toast("Lift deleted.");
@@ -1531,7 +2028,11 @@ async function handleAction(action, target) {
     toast("Metric deleted.");
   }
   if (action === "choose-exercise") {
+    readDraftFromForm();
     state.selectedExercise = target.dataset.exercise;
+    state.draftTargetMuscle = resolveExerciseMeta(state.selectedExercise).primaryMuscles[0] || "chest";
+    state.setRows = defaultSetRows();
+    state.editingWorkoutId = null;
     await render();
   }
   if (action === "save-supabase") await saveSupabaseSettings();
@@ -1542,6 +2043,29 @@ async function handleAction(action, target) {
   if (action === "load-sample-data") await loadSampleData();
   if (action === "remove-sample-data") await removeSampleData();
   if (action === "clear-all") await clearAll();
+}
+
+function updateInteractiveChart(chart, event) {
+  const stage = chart.querySelector(".chart-stage");
+  const marker = chart.querySelector(".chart-marker");
+  const readout = chart.querySelector(".chart-readout");
+  if (!stage || !marker || !readout) return;
+  let points = [];
+  try {
+    points = JSON.parse(chart.dataset.points || "[]");
+  } catch {
+    points = [];
+  }
+  if (!points.length) return;
+  const rect = stage.getBoundingClientRect();
+  const xPct = Math.min(100, Math.max(0, ((event.clientX - rect.left) / rect.width) * 100));
+  const nearest = points.reduce((best, point) => (
+    !best || Math.abs(point.x - xPct) < Math.abs(best.x - xPct) ? point : best
+  ), null);
+  if (!nearest) return;
+  marker.style.left = `${nearest.x}%`;
+  marker.style.top = `${nearest.y}%`;
+  readout.textContent = chartReadout(nearest, chart.dataset.unit || "");
 }
 
 document.addEventListener("click", async (event) => {
@@ -1572,6 +2096,10 @@ document.addEventListener("change", async (event) => {
       state.selectedExercise = event.target.value;
       await render();
     }
+    if (event.target.matches("#trend-muscle")) {
+      state.selectedMuscle = event.target.value;
+      await render();
+    }
     if (event.target.matches("#import-file") && event.target.files?.[0]) {
       await importFile(event.target.files[0]);
       event.target.value = "";
@@ -1579,6 +2107,16 @@ document.addEventListener("change", async (event) => {
   } catch (error) {
     toast(error.message || "Import failed.");
   }
+});
+
+document.addEventListener("pointermove", (event) => {
+  const chart = event.target.closest(".interactive-chart");
+  if (chart) updateInteractiveChart(chart, event);
+});
+
+document.addEventListener("pointerdown", (event) => {
+  const chart = event.target.closest(".interactive-chart");
+  if (chart) updateInteractiveChart(chart, event);
 });
 
 document.addEventListener("submit", async (event) => {
