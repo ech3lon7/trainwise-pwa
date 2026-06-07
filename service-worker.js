@@ -1,21 +1,21 @@
 "use strict";
 
-const CACHE_NAME = "trainwise-cache-v5";
+const CACHE_NAME = "trainwise-cache-v6";
 const ASSETS = [
   "./",
   "./index.html",
-  "./styles.css",
-  "./app.js",
-  "./manifest.webmanifest",
-  "./icon.svg",
-  "./icon-512.png",
-  "./apple-touch-icon.png"
+  "./styles.css?v=1.3.1",
+  "./app.js?v=1.3.1",
+  "./manifest.webmanifest?v=1.3.1",
+  "./icon.svg?v=1.3.1",
+  "./icon-512.png?v=1.3.1",
+  "./apple-touch-icon.png?v=1.3.1"
 ];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
     caches.open(CACHE_NAME)
-      .then((cache) => cache.addAll(ASSETS))
+      .then((cache) => cache.addAll(ASSETS.map((asset) => new Request(asset, { cache: "reload" }))))
       .then(() => self.skipWaiting())
   );
 });
@@ -32,13 +32,35 @@ self.addEventListener("fetch", (event) => {
   const request = event.request;
   if (request.method !== "GET") return;
 
-  event.respondWith(
-    fetch(request)
-      .then((response) => {
-        const copy = response.clone();
-        caches.open(CACHE_NAME).then((cache) => cache.put(request, copy));
-        return response;
-      })
-      .catch(() => caches.match(request).then((cached) => cached || caches.match("./index.html")))
-  );
+  event.respondWith(networkFirst(request));
 });
+
+self.addEventListener("message", (event) => {
+  if (event.data?.type === "SKIP_WAITING") {
+    self.skipWaiting();
+  }
+
+  if (event.data?.type === "CLEAR_APP_SHELL") {
+    event.waitUntil(
+      caches.keys()
+        .then((keys) => Promise.all(keys.filter((key) => key.startsWith("trainwise-cache")).map((key) => caches.delete(key))))
+    );
+  }
+});
+
+async function networkFirst(request) {
+  try {
+    const response = await fetch(request, { cache: "reload" });
+    if (response?.ok) {
+      const cache = await caches.open(CACHE_NAME);
+      await cache.put(request, response.clone());
+    }
+    return response;
+  } catch {
+    const cached = await caches.match(request, { ignoreSearch: true });
+    return cached || caches.match("./index.html") || new Response("TrainWise is offline and no cached shell is available.", {
+      status: 503,
+      headers: { "Content-Type": "text/plain" }
+    });
+  }
+}

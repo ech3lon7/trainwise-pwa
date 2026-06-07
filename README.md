@@ -107,6 +107,12 @@ The Supabase free tier is enough for personal workout logs. Free projects can pa
 4. Tap Add to Home Screen.
 5. Open TrainWise from the Home Screen icon.
 
+## iPhone update troubleshooting
+
+If Safari or the Home Screen PWA keeps showing an older version, open Settings in TrainWise and tap "Refresh app shell." This clears cached app files and reloads the PWA without deleting IndexedDB workout or nutrition logs.
+
+You can confirm the loaded version in Settings under App update.
+
 ## Important
 
 Local data lives in browser storage. Use export/import or Supabase backup so clearing Safari website data does not wipe your only copy.

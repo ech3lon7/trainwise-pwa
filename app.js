@@ -3,10 +3,11 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 2;
 const STORES = ["workouts", "metrics", "settings"];
-const APP_VERSION = "1.3.0";
+const APP_VERSION = "1.3.1";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 let dbOpenPromise = null;
 let chartId = 0;
+let reloadingForUpdate = false;
 const SESSION_LIMIT_MINUTES = 60;
 
 const HYPERTROPHY = {
@@ -313,6 +314,10 @@ function toast(message) {
   toast.timer = window.setTimeout(() => els.toast.classList.remove("show"), 2600);
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
 function openDB() {
   return new Promise((resolve, reject) => {
     const request = indexedDB.open(DB_NAME, DB_VERSION);
@@ -350,6 +355,7 @@ function openDB() {
       };
       resolve(db);
     };
+    request.onblocked = () => reject(new Error("Storage update is blocked by another TrainWise tab. Close other TrainWise tabs and retry."));
     request.onerror = () => reject(request.error);
   });
 }
@@ -1569,6 +1575,15 @@ async function renderSettings() {
     </section>
 
     <section class="section settings-panel">
+      <h2>App update</h2>
+      <div class="settings-list">
+        <span>Installed shell <strong>v${APP_VERSION}</strong></span>
+      </div>
+      <p class="muted small">Refresh the app shell if iPhone Safari keeps showing an older screen. This clears cached app files only; workouts and metrics stay in browser storage.</p>
+      <button class="ghost-button full-button" type="button" data-action="refresh-app-shell">Refresh app shell</button>
+    </section>
+
+    <section class="section settings-panel">
       <h2>Supabase sync</h2>
       <p class="muted small">Status: ${escapeHtml(supabaseStatus())}</p>
       <div class="field">
@@ -1938,6 +1953,31 @@ async function pullSupabaseBackup() {
   toast("Cloud backup restored.");
 }
 
+async function refreshAppShell() {
+  toast("Refreshing app shell...");
+  try {
+    if ("serviceWorker" in navigator && navigator.serviceWorker.getRegistrations) {
+      const registrations = await navigator.serviceWorker.getRegistrations();
+      await Promise.all(registrations.map((registration) => {
+        registration.waiting?.postMessage({ type: "CLEAR_APP_SHELL" });
+        registration.active?.postMessage({ type: "CLEAR_APP_SHELL" });
+        return registration.unregister();
+      }));
+    }
+  } catch {}
+
+  try {
+    if ("caches" in window) {
+      const keys = await caches.keys();
+      await Promise.all(keys.filter((key) => key.startsWith("trainwise-cache")).map((key) => caches.delete(key)));
+    }
+  } catch {}
+
+  const refreshUrl = new URL(window.location.href);
+  refreshUrl.searchParams.set("refresh", Date.now());
+  window.location.replace(refreshUrl.toString());
+}
+
 async function clearAll() {
   if (!confirm("Clear all local workout and nutrition data? Export a backup first if you need it.")) return;
   await Promise.all(["workouts", "metrics"].map((store) => dbClear(store)));
@@ -1968,6 +2008,14 @@ function clearWorkoutDraft() {
 }
 
 async function handleAction(action, target) {
+  if (action === "app-retry") {
+    await init();
+    return;
+  }
+  if (action === "refresh-app-shell") {
+    await refreshAppShell();
+    return;
+  }
   if (action === "quick-backup" || action === "export-data") downloadBackup();
   if (action === "import-click") document.getElementById("import-file")?.click();
   if (action === "add-set") {
@@ -2129,21 +2177,66 @@ document.addEventListener("submit", async (event) => {
   }
 });
 
+async function registerServiceWorker() {
+  if (!("serviceWorker" in navigator)) return;
+
+  navigator.serviceWorker.addEventListener("controllerchange", () => {
+    if (reloadingForUpdate) return;
+    reloadingForUpdate = true;
+    window.location.reload();
+  });
+
+  const registration = await navigator.serviceWorker.register(`./service-worker.js?v=${APP_VERSION}`);
+  const askWorkerToActivate = (worker) => worker?.postMessage({ type: "SKIP_WAITING" });
+
+  if (registration.waiting) askWorkerToActivate(registration.waiting);
+
+  registration.addEventListener("updatefound", () => {
+    const installing = registration.installing;
+    if (!installing) return;
+    installing.addEventListener("statechange", () => {
+      if (installing.state === "installed" && navigator.serviceWorker.controller) {
+        askWorkerToActivate(installing);
+      }
+    });
+  });
+
+  registration.update().catch(() => {});
+}
+
+function renderStartupFailure(error) {
+  els.app.innerHTML = `
+    <section class="settings-panel">
+      <h2>TrainWise could not start</h2>
+      <p class="muted small">${escapeHtml(error.message || "The app shell or browser storage did not open cleanly.")}</p>
+      <div class="grid two">
+        <button class="primary-button" type="button" data-action="app-retry">Retry startup</button>
+        <button class="ghost-button" type="button" data-action="refresh-app-shell">Refresh app shell</button>
+      </div>
+      <p class="muted micro">Refreshing the app shell clears cached app files only. It does not delete workouts or nutrition logs.</p>
+    </section>
+  `;
+}
+
 async function init() {
-  state.db = await openDB();
-  await loadState();
+  try {
+    state.db = await openDB();
+    await loadState();
+  } catch (error) {
+    await sleep(350);
+    state.db = null;
+    state.db = await openDB();
+    await loadState();
+  }
 
   if (navigator.storage?.persist) {
     navigator.storage.persist().catch(() => {});
   }
 
-  if ("serviceWorker" in navigator) {
-    navigator.serviceWorker.register("./service-worker.js").catch(() => {});
-  }
-
   await render();
+  registerServiceWorker().catch(() => {});
 }
 
 init().catch((error) => {
-  els.app.innerHTML = `<div class="empty">TrainWise could not start: ${escapeHtml(error.message)}</div>`;
+  renderStartupFailure(error);
 });
