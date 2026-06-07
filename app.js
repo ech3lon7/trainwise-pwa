@@ -3,8 +3,9 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 2;
 const STORES = ["workouts", "metrics", "settings"];
-const APP_VERSION = "1.2.0";
+const APP_VERSION = "1.2.1";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
+let dbOpenPromise = null;
 
 const HYPERTROPHY = {
   minimumSets: 10,
@@ -324,45 +325,83 @@ function openDB() {
         db.createObjectStore("settings", { keyPath: "key" });
       }
     };
-    request.onsuccess = () => resolve(request.result);
+    request.onsuccess = () => {
+      const db = request.result;
+      db.onversionchange = () => {
+        db.close();
+        if (state.db === db) state.db = null;
+        toast("Storage updated. Reload if the app feels stale.");
+      };
+      db.onclose = () => {
+        if (state.db === db) state.db = null;
+      };
+      resolve(db);
+    };
     request.onerror = () => reject(request.error);
   });
 }
 
-function storeTx(name, mode = "readonly") {
-  return state.db.transaction(name, mode).objectStore(name);
+async function ensureDB() {
+  if (state.db) return state.db;
+  if (!dbOpenPromise) {
+    dbOpenPromise = openDB()
+      .then((db) => {
+        state.db = db;
+        return db;
+      })
+      .finally(() => {
+        dbOpenPromise = null;
+      });
+  }
+  return dbOpenPromise;
 }
 
-function dbAll(name) {
-  return new Promise((resolve, reject) => {
-    const request = storeTx(name).getAll();
-    request.onsuccess = () => resolve(request.result || []);
-    request.onerror = () => reject(request.error);
-  });
+function isDBConnectionError(error) {
+  const message = String(error?.message || error || "").toLowerCase();
+  return message.includes("transaction") || message.includes("database connection") || message.includes("closed");
 }
 
-function dbPut(name, value) {
-  return new Promise((resolve, reject) => {
-    const request = storeTx(name, "readwrite").put(value);
-    request.onsuccess = () => resolve(value);
-    request.onerror = () => reject(request.error);
-  });
+async function runStoreRequest(name, mode, createRequest, retried = false) {
+  const db = await ensureDB();
+  try {
+    return await new Promise((resolve, reject) => {
+      let request;
+      try {
+        request = createRequest(db.transaction(name, mode).objectStore(name));
+      } catch (error) {
+        reject(error);
+        return;
+      }
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+  } catch (error) {
+    if (!retried && isDBConnectionError(error)) {
+      if (state.db === db) state.db = null;
+      try {
+        db.close();
+      } catch {}
+      return runStoreRequest(name, mode, createRequest, true);
+    }
+    throw error;
+  }
 }
 
-function dbDelete(name, id) {
-  return new Promise((resolve, reject) => {
-    const request = storeTx(name, "readwrite").delete(id);
-    request.onsuccess = () => resolve();
-    request.onerror = () => reject(request.error);
-  });
+async function dbAll(name) {
+  return (await runStoreRequest(name, "readonly", (store) => store.getAll())) || [];
 }
 
-function dbClear(name) {
-  return new Promise((resolve, reject) => {
-    const request = storeTx(name, "readwrite").clear();
-    request.onsuccess = () => resolve();
-    request.onerror = () => reject(request.error);
-  });
+async function dbPut(name, value) {
+  await runStoreRequest(name, "readwrite", (store) => store.put(value));
+  return value;
+}
+
+async function dbDelete(name, id) {
+  await runStoreRequest(name, "readwrite", (store) => store.delete(id));
+}
+
+async function dbClear(name) {
+  await runStoreRequest(name, "readwrite", (store) => store.clear());
 }
 
 function sortByDateDesc(items) {

@@ -1,6 +1,6 @@
 "use strict";
 
-const CACHE_NAME = "trainwise-cache-v3";
+const CACHE_NAME = "trainwise-cache-v4";
 const ASSETS = [
   "./",
   "./index.html",
