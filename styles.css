@@ -204,9 +204,9 @@ h3 {
   bottom: max(10px, env(safe-area-inset-bottom));
   z-index: 20;
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: 4px;
-  max-width: 560px;
+  max-width: 680px;
   margin: 0 auto;
   padding: 6px;
   border: 1px solid rgba(255, 255, 255, 0.1);
@@ -230,7 +230,7 @@ h3 {
 .tab {
   background: transparent;
   color: var(--muted);
-  font-size: 12px;
+  font-size: 11px;
 }
 
 .tab.is-active {
@@ -800,6 +800,98 @@ textarea {
   margin-top: 14px;
 }
 
+.exercise-form-grid {
+  grid-template-columns: minmax(0, 2fr) minmax(150px, 1fr);
+}
+
+.checkbox-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.check-card {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 40px;
+  padding: 8px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--muted);
+}
+
+.check-card input {
+  width: auto;
+  min-height: auto;
+}
+
+.check-card span {
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.exercise-list {
+  display: grid;
+  gap: 10px;
+}
+
+.exercise-definition {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 12px;
+  align-items: start;
+  padding: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.exercise-definition.custom {
+  border-color: rgba(53, 213, 140, 0.18);
+}
+
+.exercise-definition-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.exercise-definition-title span {
+  padding: 3px 7px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.badge-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.muscle-badge {
+  padding: 4px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 900;
+}
+
+.muscle-badge.primary {
+  background: rgba(53, 213, 140, 0.16);
+  color: var(--green);
+}
+
+.muscle-badge.secondary {
+  background: rgba(155, 140, 255, 0.14);
+  color: #c7bfff;
+}
+
 .storage-meter {
   height: 10px;
   overflow: hidden;
@@ -883,6 +975,10 @@ textarea {
     grid-template-columns: 1fr;
   }
 
+  .checkbox-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .hero-title {
     font-size: 25px;
   }
@@ -918,6 +1014,18 @@ textarea {
     align-items: flex-end;
   }
 
+  .exercise-definition {
+    grid-template-columns: 1fr;
+  }
+
+  .exercise-definition .row-actions {
+    align-items: stretch;
+  }
+
+  .checkbox-grid {
+    grid-template-columns: 1fr;
+  }
+
   .muscle-grid,
   .muscle-grid.compact {
     grid-template-columns: 1fr;
@@ -930,6 +1038,6 @@ textarea {
   }
 
   .tab {
-    font-size: 11px;
+    font-size: 9px;
   }
 }

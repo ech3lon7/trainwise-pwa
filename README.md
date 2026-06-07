@@ -5,6 +5,7 @@ TrainWise is a free, static, offline-first hypertrophy workout and nutrition PWA
 ## What is included
 
 - Hypertrophy logging: exercise, target muscle, per-set reps/load/RIR, and notes
+- Personal exercise database with custom primary and secondary muscle mappings
 - Nutrition/body logging: body weight, calories, protein, and notes
 - Interactive progress charts for muscle hard sets, muscle volume, exercise volume, estimated 1RM, body weight, calories, and protein
 - Rule-based hypertrophy recommendations capped around 1-hour sessions
@@ -41,6 +42,10 @@ Sample entries are marked internally and can be removed with "Remove sample data
 The strength logger uses one row per set so each set can carry its own load, reps, and RIR. Use "Use last session" to fill the table from your previous session for that exercise, then lock it in or update the saved entry later.
 
 Day templates save the logged exercises and set rows from a chosen date. Loading a template queues those exercises for quick logging on a new day.
+
+## Exercise database
+
+The Exercises section lets you add the movements you actually perform and define the primary and secondary muscles they train. Custom exercises show up in logging, charts, hard-set credits, and coach recommendations.
 
 ## Run locally
 
@@ -117,4 +122,4 @@ You can confirm the loaded version in Settings under App update.
 
 Local data lives in browser storage. Use export/import or Supabase backup so clearing Safari website data does not wipe your only copy.
 
-Backups include workouts, nutrition metrics, day templates, and non-secret hypertrophy settings. Supabase credentials and sessions are not included in exported backup files.
+Backups include workouts, nutrition metrics, custom exercises, day templates, and non-secret hypertrophy settings. Supabase credentials and sessions are not included in exported backup files.

@@ -3,7 +3,7 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 2;
 const STORES = ["workouts", "metrics", "settings"];
-const APP_VERSION = "1.3.1";
+const APP_VERSION = "1.3.2";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 let dbOpenPromise = null;
 let chartId = 0;
@@ -227,14 +227,13 @@ const legacyExerciseMetadata = [
   { name: "Incline Dumbbell Press", primaryMuscles: ["chest"], secondaryMuscles: ["shoulders", "triceps"], equipment: "dumbbells, bench", reps: "8-15", rest: "90-180 sec" }
 ];
 
-const defaultExercises = exerciseLibrary.map((exercise) => exercise.name);
-
 const state = {
   db: null,
   activeTab: "dashboard",
   logMode: "strength",
   selectedExercise: "Push-up",
   selectedMuscle: "chest",
+  editingExerciseId: null,
   editingWorkoutId: null,
   historyExercise: "",
   templateQueue: [],
@@ -464,8 +463,71 @@ function muscleLabel(id) {
   return muscleGroups.find((muscle) => muscle.id === id)?.label || id;
 }
 
+function uniqueMuscles(values = []) {
+  const input = Array.isArray(values) ? values : [values];
+  const valid = new Set(muscleGroups.map((muscle) => muscle.id));
+  const seen = new Set();
+  return input
+    .map((value) => String(value || "").trim())
+    .filter((value) => valid.has(value) && !seen.has(value) && seen.add(value));
+}
+
+function normalizeExerciseDefinition(exercise) {
+  const name = String(exercise?.name || "").trim();
+  if (!name) return null;
+  const primaryMuscles = uniqueMuscles(exercise.primaryMuscles || exercise.primaryMuscle || exercise.targetMuscle || "chest");
+  if (!primaryMuscles.length) primaryMuscles.push("chest");
+  const secondaryMuscles = uniqueMuscles(exercise.secondaryMuscles || [])
+    .filter((muscle) => !primaryMuscles.includes(muscle));
+  const id = String(exercise.id || `user-${normalizeName(name)}`).trim();
+
+  return {
+    id,
+    name,
+    primaryMuscles,
+    secondaryMuscles,
+    equipment: String(exercise.equipment || "custom").trim() || "custom",
+    reps: String(exercise.reps || "8-15").trim() || "8-15",
+    rest: String(exercise.rest || "60-120 sec").trim() || "60-120 sec",
+    cue: String(exercise.cue || "Custom exercise. Keep form strict and progress gradually.").trim(),
+    userCreated: true,
+    createdAt: exercise.createdAt || new Date().toISOString(),
+    updatedAt: exercise.updatedAt || exercise.createdAt || new Date().toISOString()
+  };
+}
+
+function getCustomExercises() {
+  const source = Array.isArray(state.settings.customExercises) ? state.settings.customExercises : [];
+  const seen = new Set();
+  return source
+    .map(normalizeExerciseDefinition)
+    .filter(Boolean)
+    .filter((exercise) => {
+      const key = normalizeName(exercise.name);
+      if (!key || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function exerciseDatabase() {
+  const seen = new Set();
+  return [...getCustomExercises(), ...exerciseLibrary]
+    .filter((exercise) => {
+      const key = normalizeName(exercise.name);
+      if (!key || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+}
+
+function exerciseNames() {
+  return exerciseDatabase().map((exercise) => exercise.name);
+}
+
 function allExerciseMetadata() {
-  return [...exerciseLibrary, ...legacyExerciseMetadata.map((exercise) => ({
+  return [...exerciseDatabase(), ...legacyExerciseMetadata.map((exercise) => ({
     id: `legacy-${normalizeName(exercise.name)}`,
     cue: "Legacy exercise mapped for hypertrophy set tracking.",
     ...exercise
@@ -666,7 +728,7 @@ function setZone(sets) {
 }
 
 function chooseExerciseForMuscle(muscleId) {
-  return exerciseLibrary.find((exercise) => exercise.primaryMuscles.includes(muscleId)) || exerciseLibrary[0];
+  return exerciseDatabase().find((exercise) => exercise.primaryMuscles.includes(muscleId)) || exerciseLibrary[0];
 }
 
 function estimateExerciseMinutes(exercise, sets) {
@@ -1245,8 +1307,130 @@ async function deleteDayTemplate() {
   toast("Template deleted.");
 }
 
+function secondaryMuscleCheckboxes(selected = []) {
+  const selectedSet = new Set(selected);
+  return muscleGroups.map((muscle) => `
+    <label class="check-card">
+      <input type="checkbox" name="secondaryMuscles" value="${muscle.id}" ${selectedSet.has(muscle.id) ? "checked" : ""}>
+      <span>${escapeHtml(muscle.label)}</span>
+    </label>
+  `).join("");
+}
+
+function exerciseMuscleBadges(exercise) {
+  const primary = (exercise.primaryMuscles || []).map((muscle) => `
+    <span class="muscle-badge primary">${escapeHtml(muscleLabel(muscle))}</span>
+  `).join("");
+  const secondary = (exercise.secondaryMuscles || []).map((muscle) => `
+    <span class="muscle-badge secondary">${escapeHtml(muscleLabel(muscle))}</span>
+  `).join("");
+  return `<div class="badge-row">${primary}${secondary}</div>`;
+}
+
+function exerciseCard(exercise, editable = false) {
+  return `
+    <div class="exercise-definition ${editable ? "custom" : ""}">
+      <div>
+        <div class="exercise-definition-title">
+          <strong>${escapeHtml(exercise.name)}</strong>
+          <span>${editable ? "Yours" : "Starter"}</span>
+        </div>
+        ${exerciseMuscleBadges(exercise)}
+        <p class="muted small">${escapeHtml(exercise.equipment || "custom")} - ${escapeHtml(exercise.reps || "8-15")} reps - ${escapeHtml(exercise.rest || "60-120 sec")}</p>
+        <p class="muted micro">${escapeHtml(exercise.cue || "Keep form strict and progress gradually.")}</p>
+      </div>
+      <div class="row-actions">
+        <button class="ghost-mini" type="button" data-action="log-exercise" data-exercise="${escapeHtml(exercise.name)}">Log</button>
+        ${editable ? `<button class="ghost-mini" type="button" data-action="edit-exercise" data-id="${escapeHtml(exercise.id)}">Edit</button>` : ""}
+        ${editable ? `<button class="delete-small" type="button" aria-label="Delete exercise" data-action="delete-exercise" data-id="${escapeHtml(exercise.id)}">x</button>` : ""}
+      </div>
+    </div>
+  `;
+}
+
+function renderExercises() {
+  const customExercises = getCustomExercises();
+  const editing = customExercises.find((exercise) => exercise.id === state.editingExerciseId);
+  const primary = editing?.primaryMuscles?.[0] || "chest";
+  const primaryOptions = muscleGroups.map((muscle) => `
+    <option value="${muscle.id}" ${primary === muscle.id ? "selected" : ""}>${escapeHtml(muscle.label)}</option>
+  `).join("");
+  const builtInPreview = exerciseLibrary.slice(0, 12);
+
+  return `
+    <section class="hero">
+      <div>
+        <h2 class="hero-title">Exercises</h2>
+        <p class="hero-copy">Build the movement database TrainWise uses for logging, hard-set credits, charts, and coaching.</p>
+      </div>
+    </section>
+
+    <section class="section form-panel">
+      <h3>${editing ? "Edit exercise" : "Add exercise"}</h3>
+      <form id="exercise-form">
+        <div class="field-row exercise-form-grid">
+          <div class="field">
+            <label for="exercise-name">Exercise name</label>
+            <input id="exercise-name" name="name" required placeholder="V-Bar Pulldown" value="${escapeHtml(editing?.name || "")}">
+          </div>
+          <div class="field">
+            <label for="exercise-primary">Primary muscle</label>
+            <select id="exercise-primary" name="primaryMuscle">${primaryOptions}</select>
+          </div>
+        </div>
+        <div class="field">
+          <label>Secondary muscles</label>
+          <div class="checkbox-grid">${secondaryMuscleCheckboxes(editing?.secondaryMuscles || [])}</div>
+        </div>
+        <div class="field-row">
+          <div class="field">
+            <label for="exercise-equipment">Equipment</label>
+            <input id="exercise-equipment" name="equipment" placeholder="Cable, dumbbell, machine" value="${escapeHtml(editing?.equipment || "")}">
+          </div>
+          <div class="field">
+            <label for="exercise-reps">Rep range</label>
+            <input id="exercise-reps" name="reps" placeholder="8-15" value="${escapeHtml(editing?.reps || "")}">
+          </div>
+          <div class="field">
+            <label for="exercise-rest">Rest range</label>
+            <input id="exercise-rest" name="rest" placeholder="60-120 sec" value="${escapeHtml(editing?.rest || "")}">
+          </div>
+        </div>
+        <div class="field">
+          <label for="exercise-cue">Cue / notes</label>
+          <textarea id="exercise-cue" name="cue" placeholder="Setup, form cues, pain-free path, progression notes.">${escapeHtml(editing?.cue || "")}</textarea>
+        </div>
+        <div class="grid two">
+          <button class="primary-button" type="submit">${editing ? "Update exercise" : "Save exercise"}</button>
+          ${editing ? `<button class="ghost-button" type="button" data-action="cancel-exercise-edit">Cancel edit</button>` : `<button class="ghost-button" type="button" data-action="exercise-clear-form">Clear form</button>`}
+        </div>
+      </form>
+    </section>
+
+    <section class="section chart-panel">
+      <div class="chart-header">
+        <h3>Your exercise database</h3>
+        <span class="muted small">${customExercises.length} custom</span>
+      </div>
+      <div class="exercise-list">
+        ${customExercises.length ? customExercises.map((exercise) => exerciseCard(exercise, true)).join("") : `<div class="empty">Add the movements you actually do, then TrainWise can credit them to the right muscle groups.</div>`}
+      </div>
+    </section>
+
+    <section class="section chart-panel">
+      <div class="chart-header">
+        <h3>Starter library</h3>
+        <span class="muted small">${exerciseLibrary.length} built in</span>
+      </div>
+      <div class="exercise-list">
+        ${builtInPreview.map((exercise) => exerciseCard(exercise, false)).join("")}
+      </div>
+    </section>
+  `;
+}
+
 function renderLog() {
-  const exerciseChips = defaultExercises.map((name) => `
+  const exerciseChips = exerciseNames().map((name) => `
     <button class="pill ${state.selectedExercise === name ? "is-active" : ""}" type="button" data-action="choose-exercise" data-exercise="${escapeHtml(name)}">${escapeHtml(name)}</button>
   `).join("");
   const selectedMeta = resolveExerciseMeta(state.selectedExercise);
@@ -1279,7 +1463,7 @@ function renderLog() {
 
           <div class="field-row">
             <div class="field">
-              <label for="targetMuscle">Target muscle for custom lifts</label>
+              <label for="targetMuscle">Primary muscle if not in Exercises</label>
               <select id="targetMuscle" name="targetMuscle">${muscleOptions}</select>
             </div>
             <div class="field">
@@ -1370,7 +1554,7 @@ function renderLog() {
 }
 
 function renderTrends() {
-  const exercises = [...new Set([...defaultExercises, ...state.workouts.map((entry) => entry.exercise)])];
+  const exercises = [...new Set([...exerciseNames(), ...state.workouts.map((entry) => entry.exercise)])];
   if (!exercises.includes(state.selectedExercise)) state.selectedExercise = exercises[0];
   const options = exercises.map((exercise) => `<option ${exercise === state.selectedExercise ? "selected" : ""}>${escapeHtml(exercise)}</option>`).join("");
   const muscleOptions = muscleGroups.map((muscle) => `<option value="${muscle.id}" ${muscle.id === state.selectedMuscle ? "selected" : ""}>${escapeHtml(muscle.label)}</option>`).join("");
@@ -1628,7 +1812,47 @@ async function render() {
   if (state.activeTab === "log") els.app.innerHTML = renderLog();
   if (state.activeTab === "trends") els.app.innerHTML = renderTrends();
   if (state.activeTab === "coach") els.app.innerHTML = renderCoach();
+  if (state.activeTab === "exercises") els.app.innerHTML = renderExercises();
   if (state.activeTab === "settings") els.app.innerHTML = await renderSettings();
+}
+
+async function saveExercise(form) {
+  const formData = new FormData(form);
+  const name = String(formData.get("name") || "").trim();
+  if (!name) throw new Error("Exercise name is required.");
+  const primaryMuscle = String(formData.get("primaryMuscle") || "chest");
+  const secondaryMuscles = formData.getAll("secondaryMuscles")
+    .map((value) => String(value))
+    .filter((muscle) => muscle !== primaryMuscle);
+  const customExercises = getCustomExercises();
+  const duplicate = customExercises.find((exercise) => (
+    exercise.id !== state.editingExerciseId && normalizeName(exercise.name) === normalizeName(name)
+  ));
+  if (duplicate) throw new Error("That custom exercise already exists.");
+
+  const existing = customExercises.find((exercise) => exercise.id === state.editingExerciseId);
+  const exercise = normalizeExerciseDefinition({
+    id: existing?.id || `user-${uid()}`,
+    name,
+    primaryMuscles: [primaryMuscle],
+    secondaryMuscles,
+    equipment: String(formData.get("equipment") || "").trim() || "custom",
+    reps: String(formData.get("reps") || "").trim() || "8-15",
+    rest: String(formData.get("rest") || "").trim() || "60-120 sec",
+    cue: String(formData.get("cue") || "").trim() || "Custom exercise. Keep form strict and progress gradually.",
+    createdAt: existing?.createdAt || new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  });
+  const nextExercises = existing
+    ? customExercises.map((item) => item.id === existing.id ? exercise : item)
+    : [...customExercises, exercise];
+
+  await saveSetting("customExercises", nextExercises);
+  state.editingExerciseId = null;
+  state.selectedExercise = exercise.name;
+  state.draftTargetMuscle = exercise.primaryMuscles[0] || "chest";
+  await render();
+  toast(existing ? "Exercise updated." : "Exercise saved.");
 }
 
 async function saveWorkout(form) {
@@ -1815,6 +2039,7 @@ function exportSafeSettings() {
   return {
     hypertrophyProfile: hypertrophySettings(),
     dayTemplates: getDayTemplates(),
+    customExercises: getCustomExercises(),
     lastBackupAt: new Date().toISOString()
   };
 }
@@ -1853,6 +2078,9 @@ async function importPayload(payload) {
   }
   if (Array.isArray(payload.settings?.dayTemplates)) {
     await saveSetting("dayTemplates", payload.settings.dayTemplates);
+  }
+  if (Array.isArray(payload.settings?.customExercises)) {
+    await saveSetting("customExercises", payload.settings.customExercises.map(normalizeExerciseDefinition).filter(Boolean));
   }
   await loadState();
   await render();
@@ -2016,6 +2244,37 @@ async function handleAction(action, target) {
     await refreshAppShell();
     return;
   }
+  if (action === "edit-exercise") {
+    state.activeTab = "exercises";
+    state.editingExerciseId = target.dataset.id;
+    await render();
+    return;
+  }
+  if (action === "cancel-exercise-edit" || action === "exercise-clear-form") {
+    state.editingExerciseId = null;
+    await render();
+    return;
+  }
+  if (action === "delete-exercise") {
+    const exercise = getCustomExercises().find((item) => item.id === target.dataset.id);
+    if (!exercise) throw new Error("Exercise not found.");
+    if (!confirm(`Delete "${exercise.name}" from your exercise database? Existing logs stay intact.`)) return;
+    await saveSetting("customExercises", getCustomExercises().filter((item) => item.id !== exercise.id));
+    if (state.editingExerciseId === exercise.id) state.editingExerciseId = null;
+    await render();
+    toast("Exercise deleted.");
+    return;
+  }
+  if (action === "log-exercise") {
+    state.activeTab = "log";
+    state.logMode = "strength";
+    state.editingWorkoutId = null;
+    state.selectedExercise = target.dataset.exercise;
+    state.draftTargetMuscle = resolveExerciseMeta(state.selectedExercise).primaryMuscles[0] || "chest";
+    state.setRows = defaultSetRows();
+    await render();
+    return;
+  }
   if (action === "quick-backup" || action === "export-data") downloadBackup();
   if (action === "import-click") document.getElementById("import-file")?.click();
   if (action === "add-set") {
@@ -2170,6 +2429,7 @@ document.addEventListener("pointerdown", (event) => {
 document.addEventListener("submit", async (event) => {
   event.preventDefault();
   try {
+    if (event.target.matches("#exercise-form")) await saveExercise(event.target);
     if (event.target.matches("#strength-form")) await saveWorkout(event.target);
     if (event.target.matches("#metric-form")) await saveMetric(event.target);
   } catch (error) {
