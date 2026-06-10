@@ -687,7 +687,140 @@ textarea {
   padding-bottom: 4px;
 }
 
+.log-top-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.compact-template-panel {
+  margin-bottom: 12px;
+  padding: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.log-date-row {
+  grid-template-columns: minmax(150px, 0.5fr) minmax(0, 1.5fr);
+}
+
+.exercise-draft-list,
+.history-session-list {
+  display: grid;
+  gap: 12px;
+}
+
+.exercise-draft {
+  position: relative;
+  min-width: 0;
+  max-width: 100%;
+  padding: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 8px;
+  background: rgba(16, 21, 16, 0.72);
+}
+
+.exercise-table-top {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 12px;
+  align-items: start;
+  min-width: 0;
+}
+
+.exercise-table-title {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 12px;
+  align-items: center;
+  min-width: 0;
+}
+
+.exercise-table-title > div,
+.draft-meta-row > .field,
+.log-date-row > .field {
+  min-width: 0;
+}
+
+.table-menu-wrap {
+  position: relative;
+}
+
+.icon-button {
+  display: grid;
+  place-items: center;
+  width: 42px;
+  height: 42px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text);
+  font-size: 18px;
+  font-weight: 900;
+  letter-spacing: 0;
+}
+
+.table-menu {
+  position: absolute;
+  top: 48px;
+  right: 0;
+  z-index: 10;
+  display: grid;
+  min-width: 170px;
+  padding: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  background: #151a15;
+  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.34);
+}
+
+.table-menu button {
+  min-height: 38px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  padding: 0 10px;
+}
+
+.table-menu button:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.muscle-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 10px 0 12px;
+}
+
+.muscle-token {
+  padding: 5px 9px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 900;
+}
+
+.muscle-token.primary {
+  background: rgba(53, 213, 140, 0.16);
+  color: var(--green);
+}
+
+.muscle-token.secondary {
+  background: rgba(155, 140, 255, 0.14);
+  color: #c7bfff;
+}
+
+.draft-meta-row {
+  grid-template-columns: minmax(150px, 0.5fr) minmax(0, 1.5fr);
+}
+
 .set-table-wrap {
+  width: 100%;
+  max-width: 100%;
   overflow-x: auto;
   margin: 12px 0;
   border: 1px solid rgba(255, 255, 255, 0.08);
@@ -798,6 +931,48 @@ textarea {
 
 .exercise-history {
   margin-top: 14px;
+}
+
+.history-session-card {
+  padding: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  background: rgba(23, 27, 23, 0.88);
+}
+
+.history-session-card summary {
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--text);
+}
+
+.history-session-card summary span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.history-set-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.history-set {
+  display: grid;
+  gap: 4px;
+  padding: 10px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.045);
+}
+
+.history-set span,
+.history-set small {
+  color: var(--muted);
+  font-size: 11px;
 }
 
 .exercise-form-grid {
@@ -975,6 +1150,16 @@ textarea {
     grid-template-columns: 1fr;
   }
 
+  .log-date-row,
+  .draft-meta-row,
+  .exercise-table-top {
+    grid-template-columns: 1fr;
+  }
+
+  .history-set-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .checkbox-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -1003,6 +1188,19 @@ textarea {
 
   .log-table-head {
     grid-template-columns: auto 1fr;
+  }
+
+  .exercise-table-title {
+    grid-template-columns: 1fr;
+  }
+
+  .history-session-card summary {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .history-set-grid {
+    grid-template-columns: 1fr;
   }
 
   .log-table-head .ghost-button {

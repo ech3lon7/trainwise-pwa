@@ -3,7 +3,7 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 2;
 const STORES = ["workouts", "metrics", "settings"];
-const APP_VERSION = "1.3.2";
+const APP_VERSION = "1.3.3";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 let dbOpenPromise = null;
 let chartId = 0;
@@ -235,6 +235,9 @@ const state = {
   selectedMuscle: "chest",
   editingExerciseId: null,
   editingWorkoutId: null,
+  openExerciseMenu: null,
+  logHistoryExercise: "",
+  workoutDraft: [],
   historyExercise: "",
   templateQueue: [],
   draftDate: todayISO(),
@@ -1151,19 +1154,84 @@ function defaultSetRows(count = 3) {
   return Array.from({ length: count }, () => ({ weight: "", reps: 10, rir: 2 }));
 }
 
+function draftExerciseFromState() {
+  const meta = resolveExerciseMeta(state.selectedExercise, state.draftTargetMuscle);
+  return {
+    draftId: uid(),
+    editingWorkoutId: state.editingWorkoutId,
+    exercise: state.selectedExercise,
+    targetMuscle: state.draftTargetMuscle || meta.primaryMuscles[0] || "chest",
+    notes: state.draftNotes || "",
+    setRows: normalizeSetRows(state.setRows)
+  };
+}
+
+function defaultDraftExercise(exerciseName = state.selectedExercise) {
+  const meta = resolveExerciseMeta(exerciseName, state.draftTargetMuscle);
+  return {
+    draftId: uid(),
+    editingWorkoutId: null,
+    exercise: exerciseName,
+    targetMuscle: meta.primaryMuscles[0] || "chest",
+    notes: "",
+    setRows: defaultSetRows()
+  };
+}
+
+function ensureWorkoutDraft() {
+  if (!Array.isArray(state.workoutDraft) || !state.workoutDraft.length) {
+    state.workoutDraft = [defaultDraftExercise(state.selectedExercise)];
+  }
+  return state.workoutDraft;
+}
+
+function syncLegacyDraftFromFirst() {
+  const first = ensureWorkoutDraft()[0];
+  state.selectedExercise = first.exercise;
+  state.draftTargetMuscle = first.targetMuscle;
+  state.draftNotes = first.notes || "";
+  state.setRows = normalizeSetRows(first.setRows);
+  state.editingWorkoutId = first.editingWorkoutId || null;
+}
+
+function readWorkoutDraftFromForm() {
+  const form = document.getElementById("strength-form");
+  if (!form) {
+    ensureWorkoutDraft();
+    return;
+  }
+  const data = Object.fromEntries(new FormData(form));
+  state.draftDate = data.date || state.draftDate || todayISO();
+  state.workoutDraft = [...form.querySelectorAll(".exercise-draft")].map((section, index) => {
+    const draftId = section.dataset.draftId || uid();
+    const existing = state.workoutDraft.find((item) => item.draftId === draftId) || {};
+    const exerciseName = section.querySelector("[data-draft-field='exercise']")?.value?.trim() || existing.exercise || "Custom exercise";
+    const meta = resolveExerciseMeta(exerciseName, section.querySelector("[data-draft-field='targetMuscle']")?.value);
+    return {
+      draftId,
+      editingWorkoutId: section.dataset.editingWorkoutId || existing.editingWorkoutId || null,
+      exercise: exerciseName,
+      targetMuscle: section.querySelector("[data-draft-field='targetMuscle']")?.value || meta.primaryMuscles[0] || "chest",
+      notes: section.querySelector("[data-draft-field='notes']")?.value || "",
+      setRows: normalizeSetRows([...section.querySelectorAll(".set-row")].map((row) => ({
+        weight: row.querySelector('[data-set-field="weight"]')?.value,
+        reps: row.querySelector('[data-set-field="reps"]')?.value,
+        rir: row.querySelector('[data-set-field="rir"]')?.value
+      }))),
+      order: index
+    };
+  });
+  syncLegacyDraftFromFirst();
+}
+
 function readDraftFromForm() {
   const form = document.getElementById("strength-form");
+  if (form?.querySelector(".exercise-draft")) {
+    readWorkoutDraftFromForm();
+    return;
+  }
   if (!form) return;
-  const data = Object.fromEntries(new FormData(form));
-  state.selectedExercise = data.exercise?.trim() || state.selectedExercise;
-  state.draftDate = data.date || state.draftDate || todayISO();
-  state.draftNotes = data.notes || "";
-  state.draftTargetMuscle = data.targetMuscle || state.draftTargetMuscle || "chest";
-  state.setRows = normalizeSetRows([...form.querySelectorAll(".set-row")].map((row) => ({
-    weight: row.querySelector('[data-set-field="weight"]')?.value,
-    reps: row.querySelector('[data-set-field="reps"]')?.value,
-    rir: row.querySelector('[data-set-field="rir"]')?.value
-  })));
+  readWorkoutDraftFromForm();
 }
 
 function lastSessionForExercise(exercise, excludeId = null) {
@@ -1172,23 +1240,23 @@ function lastSessionForExercise(exercise, excludeId = null) {
     .sort((a, b) => b.date.localeCompare(a.date) || String(b.createdAt || "").localeCompare(String(a.createdAt || "")))[0] || null;
 }
 
-function previousSetLabel(exercise, index) {
-  const last = lastSessionForExercise(exercise, state.editingWorkoutId);
+function previousSetLabel(exercise, index, excludeId = state.editingWorkoutId) {
+  const last = lastSessionForExercise(exercise, excludeId);
   if (!last) return "--";
   const row = setRowsFromWorkout(last)[index];
   return row ? `${fmt(row.weight)} x ${fmt(row.reps)}` : "--";
 }
 
-function renderSetRows() {
-  const rows = normalizeSetRows(state.setRows);
+function renderSetRows(draft = draftExerciseFromState()) {
+  const rows = normalizeSetRows(draft.setRows);
   return rows.map((row, index) => `
     <tr class="set-row" data-index="${index}">
       <td class="set-type"><span class="set-number">${index + 1}</span><strong>Set</strong></td>
-      <td class="prev-cell">${escapeHtml(previousSetLabel(state.selectedExercise, index))}</td>
+      <td class="prev-cell">${escapeHtml(previousSetLabel(draft.exercise, index, draft.editingWorkoutId))}</td>
       <td><input data-set-field="weight" type="number" inputmode="decimal" min="0" step="2.5" value="${escapeHtml(row.weight)}" aria-label="Set ${index + 1} weight"></td>
       <td><input data-set-field="reps" type="number" inputmode="numeric" min="1" step="1" value="${escapeHtml(row.reps)}" aria-label="Set ${index + 1} reps"></td>
       <td><input data-set-field="rir" type="number" inputmode="numeric" min="0" max="5" step="1" value="${row.rir ?? ""}" aria-label="Set ${index + 1} RIR"></td>
-      <td><button class="ghost-mini" type="button" data-action="remove-set" data-index="${index}" ${rows.length <= 1 ? "disabled" : ""}>x</button></td>
+      <td><button class="ghost-mini" type="button" data-action="remove-set" data-draft-id="${escapeHtml(draft.draftId)}" data-index="${index}" ${rows.length <= 1 ? "disabled" : ""}>x</button></td>
     </tr>
   `).join("");
 }
@@ -1213,6 +1281,46 @@ function exerciseHistoryMarkup() {
           </div>
         `).join("") : `<div class="empty">No history for this exercise yet.</div>`}
       </div>
+    </section>
+  `;
+}
+
+function exerciseHistoryScreen(exerciseName) {
+  const sessions = state.workouts
+    .filter((entry) => entry.exercise === exerciseName)
+    .sort((a, b) => b.date.localeCompare(a.date) || String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
+  return `
+    <section class="hero">
+      <div>
+        <h2 class="hero-title">${escapeHtml(exerciseName)} history</h2>
+        <p class="hero-copy">Every recorded session for this exercise, with each set preserved.</p>
+      </div>
+    </section>
+    <section class="section">
+      <button class="ghost-button" type="button" data-action="close-log-history">Back to log</button>
+    </section>
+    <section class="section history-session-list">
+      ${sessions.length ? sessions.map((entry) => {
+        const rows = setRowsFromWorkout(entry);
+        return `
+          <details class="history-session-card">
+            <summary>
+              <strong>${escapeHtml(entry.date)}</strong>
+              <span>${rows.length} sets - best ${bestSetLabel(entry)} - ${fmt(workoutVolume(entry))} lb</span>
+            </summary>
+            <div class="history-set-grid">
+              ${rows.map((row, index) => `
+                <div class="history-set">
+                  <span>Set ${index + 1}</span>
+                  <strong>${fmt(row.weight)} lb x ${fmt(row.reps)}</strong>
+                  <small>${row.rir === null ? "--" : fmt(row.rir, 1)} RIR</small>
+                </div>
+              `).join("")}
+            </div>
+            ${entry.notes ? `<p class="muted small">${escapeHtml(entry.notes)}</p>` : ""}
+          </details>
+        `;
+      }).join("") : `<div class="empty">No recorded sessions for this exercise yet.</div>`}
     </section>
   `;
 }
@@ -1258,17 +1366,32 @@ function renderTemplateQueue() {
 }
 
 function applyTemplateExercise(item) {
-  state.selectedExercise = item.exercise;
-  state.draftTargetMuscle = item.targetMuscle || resolveExerciseMeta(item.exercise).primaryMuscles[0] || "chest";
-  state.draftNotes = item.notes || "";
-  state.setRows = normalizeSetRows(item.setRows);
+  const draft = {
+    draftId: uid(),
+    editingWorkoutId: null,
+    exercise: item.exercise,
+    targetMuscle: item.targetMuscle || resolveExerciseMeta(item.exercise).primaryMuscles[0] || "chest",
+    notes: item.notes || "",
+    setRows: normalizeSetRows(item.setRows)
+  };
+  state.workoutDraft = [draft];
+  state.selectedExercise = draft.exercise;
+  state.draftTargetMuscle = draft.targetMuscle;
+  state.draftNotes = draft.notes;
+  state.setRows = draft.setRows;
   state.editingWorkoutId = null;
 }
 
 async function saveDayTemplate() {
   readDraftFromForm();
   const date = state.draftDate || todayISO();
-  let exercises = state.workouts.filter((entry) => entry.date === date).map(workoutToTemplateExercise);
+  let exercises = ensureWorkoutDraft().map((draft) => ({
+    exercise: draft.exercise,
+    targetMuscle: draft.targetMuscle,
+    notes: draft.notes || "",
+    setRows: normalizeSetRows(draft.setRows)
+  }));
+  if (!exercises.length) exercises = state.workouts.filter((entry) => entry.date === date).map(workoutToTemplateExercise);
   if (!exercises.length) exercises = [currentDraftTemplateExercise()];
   const defaultName = `Hypertrophy day ${getDayTemplates().length + 1}`;
   const name = (document.getElementById("template-name")?.value || defaultName).trim();
@@ -1290,7 +1413,15 @@ async function loadDayTemplate() {
   const template = getDayTemplates().find((item) => item.id === select?.value);
   if (!template) throw new Error("Choose a template first.");
   state.templateQueue = template.exercises || [];
-  if (state.templateQueue.length) applyTemplateExercise(state.templateQueue[0]);
+  state.workoutDraft = state.templateQueue.map((item) => ({
+    draftId: uid(),
+    editingWorkoutId: null,
+    exercise: item.exercise,
+    targetMuscle: item.targetMuscle || resolveExerciseMeta(item.exercise).primaryMuscles[0] || "chest",
+    notes: item.notes || "",
+    setRows: normalizeSetRows(item.setRows)
+  }));
+  if (state.workoutDraft.length) syncLegacyDraftFromFirst();
   state.draftDate = todayISO();
   await render();
   toast("Template loaded.");
@@ -1429,16 +1560,96 @@ function renderExercises() {
   `;
 }
 
+function muscleStrip(meta) {
+  return `
+    <div class="muscle-strip" aria-label="Muscles worked">
+      ${(meta.primaryMuscles || []).map((muscle) => `<span class="muscle-token primary">${escapeHtml(muscleLabel(muscle))}</span>`).join("")}
+      ${(meta.secondaryMuscles || []).map((muscle) => `<span class="muscle-token secondary">${escapeHtml(muscleLabel(muscle))}</span>`).join("")}
+    </div>
+  `;
+}
+
+function exerciseOptions(selected) {
+  return exerciseNames().map((name) => `
+    <option value="${escapeHtml(name)}" ${name === selected ? "selected" : ""}>${escapeHtml(name)}</option>
+  `).join("");
+}
+
+function muscleOptions(selected) {
+  return muscleGroups.map((muscle) => `
+    <option value="${muscle.id}" ${selected === muscle.id ? "selected" : ""}>${escapeHtml(muscle.label)}</option>
+  `).join("");
+}
+
+function exerciseDraftTable(draft, index, total) {
+  const meta = resolveExerciseMeta(draft.exercise, draft.targetMuscle);
+  const menuOpen = state.openExerciseMenu === draft.draftId;
+  return `
+    <section class="exercise-draft" data-draft-id="${escapeHtml(draft.draftId)}" data-editing-workout-id="${escapeHtml(draft.editingWorkoutId || "")}">
+      <div class="exercise-table-top">
+        <div class="exercise-table-title">
+          <div class="exercise-badge">${exerciseInitial(draft.exercise)}</div>
+          <div>
+            <label for="exercise-${escapeHtml(draft.draftId)}">Exercise</label>
+            <select id="exercise-${escapeHtml(draft.draftId)}" data-draft-field="exercise" data-action="draft-exercise-change" data-draft-id="${escapeHtml(draft.draftId)}">
+              ${exerciseOptions(draft.exercise)}
+            </select>
+          </div>
+        </div>
+        <div class="table-menu-wrap">
+          <button class="icon-button" type="button" aria-label="Exercise menu" data-action="toggle-exercise-menu" data-draft-id="${escapeHtml(draft.draftId)}">...</button>
+          ${menuOpen ? `
+            <div class="table-menu">
+              <button type="button" data-action="open-exercise-history" data-exercise="${escapeHtml(draft.exercise)}">History</button>
+              <button type="button" data-action="use-last-session" data-draft-id="${escapeHtml(draft.draftId)}">Use last session</button>
+            </div>
+          ` : ""}
+        </div>
+      </div>
+      ${muscleStrip(meta)}
+      <div class="field-row draft-meta-row">
+        <div class="field">
+          <label>Primary if custom</label>
+          <select data-draft-field="targetMuscle">${muscleOptions(draft.targetMuscle || meta.primaryMuscles[0] || "chest")}</select>
+        </div>
+        <div class="field">
+          <label>Notes</label>
+          <input data-draft-field="notes" value="${escapeHtml(draft.notes || "")}" placeholder="Optional notes">
+        </div>
+      </div>
+      <div class="set-table-wrap">
+        <table class="set-table">
+          <thead>
+            <tr>
+              <th>Type</th>
+              <th>Prev</th>
+              <th>lbs</th>
+              <th>Reps</th>
+              <th>RIR</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>${renderSetRows(draft)}</tbody>
+        </table>
+      </div>
+      <div class="log-actions exercise-table-actions">
+        <button class="round-add" type="button" aria-label="Add set" data-action="add-set" data-draft-id="${escapeHtml(draft.draftId)}">+</button>
+        <button class="ghost-button" type="button" data-action="move-exercise-up" data-draft-id="${escapeHtml(draft.draftId)}" ${index === 0 ? "disabled" : ""}>Move up</button>
+        <button class="ghost-button" type="button" data-action="move-exercise-down" data-draft-id="${escapeHtml(draft.draftId)}" ${index === total - 1 ? "disabled" : ""}>Move down</button>
+        <button class="ghost-button" type="button" data-action="remove-exercise-table" data-draft-id="${escapeHtml(draft.draftId)}" ${total <= 1 ? "disabled" : ""}>Remove</button>
+      </div>
+    </section>
+  `;
+}
+
 function renderLog() {
   const exerciseChips = exerciseNames().map((name) => `
     <button class="pill ${state.selectedExercise === name ? "is-active" : ""}" type="button" data-action="choose-exercise" data-exercise="${escapeHtml(name)}">${escapeHtml(name)}</button>
   `).join("");
-  const selectedMeta = resolveExerciseMeta(state.selectedExercise);
-  const muscleOptions = muscleGroups.map((muscle) => `
-    <option value="${muscle.id}" ${(state.draftTargetMuscle || selectedMeta.primaryMuscles[0]) === muscle.id ? "selected" : ""}>${escapeHtml(muscle.label)}</option>
-  `).join("");
   const templates = getDayTemplates();
-  const lockLabel = state.editingWorkoutId ? "Update" : "Lock in";
+  const draft = ensureWorkoutDraft();
+  const lockLabel = draft.some((item) => item.editingWorkoutId) ? "Update workout" : "Lock in workout";
+  if (state.logHistoryExercise) return exerciseHistoryScreen(state.logHistoryExercise);
 
   return `
     <section class="form-panel">
@@ -1449,77 +1660,48 @@ function renderLog() {
 
       ${state.logMode === "strength" ? `
         <form id="strength-form">
-          <div class="log-table-head">
-            <div class="exercise-badge">${exerciseInitial(state.selectedExercise)}</div>
-            <div>
-              <label for="exercise">Exercise</label>
-              <input id="exercise" name="exercise" required value="${escapeHtml(state.selectedExercise)}">
-            </div>
-            <button class="ghost-button" type="button" data-action="toggle-history">History</button>
+          <div class="log-top-actions">
+            <button class="ghost-button" type="button" data-action="toggle-template-panel">Templates</button>
+            <button class="ghost-button" type="button" data-action="add-exercise-table">Add exercise</button>
+            ${draft.some((item) => item.editingWorkoutId) ? `<button class="ghost-button" type="button" data-action="new-log">New log</button>` : ""}
           </div>
 
-          <div class="pill-row">${exerciseChips}</div>
-          ${renderTemplateQueue()}
+          ${state.showTemplatePanel ? `
+            <section class="template-panel compact-template-panel">
+              <div class="field">
+                <label for="template-name">Template name</label>
+                <input id="template-name" placeholder="Upper A, Lower B, Push day">
+              </div>
+              <div class="field">
+                <label for="template-select">Saved template</label>
+                <select id="template-select">${templateOptionsMarkup(templates)}</select>
+              </div>
+              <div class="grid three">
+                <button class="ghost-button" type="button" data-action="load-template" ${templates.length ? "" : "disabled"}>Load</button>
+                <button class="ghost-button" type="button" data-action="delete-template" ${templates.length ? "" : "disabled"}>Delete</button>
+                <button class="primary-button" type="button" data-action="save-day-template">Save</button>
+              </div>
+            </section>
+          ` : ""}
 
-          <div class="field-row">
-            <div class="field">
-              <label for="targetMuscle">Primary muscle if not in Exercises</label>
-              <select id="targetMuscle" name="targetMuscle">${muscleOptions}</select>
-            </div>
+          <div class="field-row log-date-row">
             <div class="field">
               <label for="workout-date">Date</label>
               <input id="workout-date" name="date" type="date" required value="${escapeHtml(state.draftDate || todayISO())}">
             </div>
+            <div class="field">
+              <label>Add from library</label>
+              <div class="pill-row">${exerciseChips}</div>
+            </div>
           </div>
 
-          <div class="set-table-wrap">
-            <table class="set-table">
-              <thead>
-                <tr>
-                  <th>Type</th>
-                  <th>Prev</th>
-                  <th>lbs</th>
-                  <th>Reps</th>
-                  <th>RIR</th>
-                  <th></th>
-                </tr>
-              </thead>
-              <tbody>${renderSetRows()}</tbody>
-            </table>
-          </div>
-
-          <div class="log-actions">
-            <button class="round-add" type="button" aria-label="Add set" data-action="add-set">+</button>
-            <button class="ghost-button" type="button" data-action="use-last-session">Use last session</button>
-            ${state.editingWorkoutId ? `<button class="ghost-button" type="button" data-action="new-log">New log</button>` : ""}
-          </div>
-
-          <div class="field">
-            <label for="workout-notes">Notes</label>
-            <textarea id="workout-notes" name="notes" placeholder="Tempo, soreness, pain, pump, setup, anything useful.">${escapeHtml(state.draftNotes || "")}</textarea>
+          <div class="exercise-draft-list">
+            ${draft.map((item, index) => exerciseDraftTable(item, index, draft.length)).join("")}
           </div>
 
           <button class="primary-button lock-button" type="submit">${lockLabel}</button>
           <p class="muted micro form-note">Most hypertrophy work should stop 1-3 reps before failure. Keep the whole workout inside roughly ${SESSION_LIMIT_MINUTES} minutes.</p>
         </form>
-
-        <section class="section settings-panel template-panel">
-          <h3>Day templates</h3>
-          <div class="field">
-            <label for="template-name">Template name</label>
-            <input id="template-name" placeholder="Upper A, Lower B, Push day">
-          </div>
-          <div class="field">
-            <label for="template-select">Saved template</label>
-            <select id="template-select">${templateOptionsMarkup(templates)}</select>
-          </div>
-          <div class="grid two">
-            <button class="ghost-button" type="button" data-action="load-template" ${templates.length ? "" : "disabled"}>Load template</button>
-            <button class="ghost-button" type="button" data-action="delete-template" ${templates.length ? "" : "disabled"}>Delete template</button>
-            <button class="primary-button" type="button" data-action="save-day-template">Save day as template</button>
-          </div>
-        </section>
-        ${exerciseHistoryMarkup()}
       ` : `
         <form id="metric-form">
           <div class="field">
@@ -1856,43 +2038,56 @@ async function saveExercise(form) {
 }
 
 async function saveWorkout(form) {
-  readDraftFromForm();
+  readWorkoutDraftFromForm();
   const data = Object.fromEntries(new FormData(form));
-  const exerciseName = data.exercise.trim();
-  const meta = resolveExerciseMeta(exerciseName, data.targetMuscle);
-  const setRows = normalizeSetRows(state.setRows);
-  const existing = state.editingWorkoutId ? state.workouts.find((entry) => entry.id === state.editingWorkoutId) : null;
-  const best = setRows.reduce((winner, row) => {
-    const score = row.weight * (1 + row.reps / 30);
-    return !winner || score > winner.score ? { ...row, score } : winner;
-  }, null);
-  const entry = {
-    id: existing?.id || uid(),
-    date: data.date,
-    exercise: exerciseName,
-    exerciseId: meta.id,
-    primaryMuscles: [...meta.primaryMuscles],
-    secondaryMuscles: [...meta.secondaryMuscles],
-    equipment: meta.equipment,
-    setRows,
-    sets: setRows.length,
-    reps: best?.reps || 1,
-    weight: best?.weight || 0,
-    rir: averageRir({ setRows }),
-    notes: data.notes.trim(),
-    createdAt: existing?.createdAt || new Date().toISOString(),
-    updatedAt: new Date().toISOString()
-  };
-  state.selectedExercise = entry.exercise;
-  state.draftDate = entry.date;
-  state.draftNotes = entry.notes;
-  state.draftTargetMuscle = meta.primaryMuscles[0] || data.targetMuscle || "chest";
-  state.setRows = setRows;
-  state.editingWorkoutId = entry.id;
-  await dbPut("workouts", entry);
+  const hadExisting = ensureWorkoutDraft().some((draft) => draft.editingWorkoutId);
+  const entries = ensureWorkoutDraft().map((draft) => {
+    const exerciseName = draft.exercise.trim();
+    const meta = resolveExerciseMeta(exerciseName, draft.targetMuscle);
+    const setRows = normalizeSetRows(draft.setRows);
+    const existing = draft.editingWorkoutId ? state.workouts.find((entry) => entry.id === draft.editingWorkoutId) : null;
+    const best = setRows.reduce((winner, row) => {
+      const score = row.weight * (1 + row.reps / 30);
+      return !winner || score > winner.score ? { ...row, score } : winner;
+    }, null);
+    return {
+      id: existing?.id || uid(),
+      date: data.date,
+      exercise: exerciseName,
+      exerciseId: meta.id,
+      primaryMuscles: [...meta.primaryMuscles],
+      secondaryMuscles: [...meta.secondaryMuscles],
+      equipment: meta.equipment,
+      setRows,
+      sets: setRows.length,
+      reps: best?.reps || 1,
+      weight: best?.weight || 0,
+      rir: averageRir({ setRows }),
+      notes: draft.notes.trim(),
+      createdAt: existing?.createdAt || new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    };
+  });
+
+  for (const entry of entries) await dbPut("workouts", entry);
+  const first = entries[0];
+  state.selectedExercise = first.exercise;
+  state.draftDate = first.date;
+  state.draftNotes = first.notes;
+  state.draftTargetMuscle = first.primaryMuscles[0] || "chest";
+  state.setRows = setRowsFromWorkout(first);
+  state.editingWorkoutId = first.id;
+  state.workoutDraft = entries.map((entry) => ({
+    draftId: uid(),
+    editingWorkoutId: entry.id,
+    exercise: entry.exercise,
+    targetMuscle: entry.primaryMuscles[0] || "chest",
+    notes: entry.notes || "",
+    setRows: setRowsFromWorkout(entry)
+  }));
   await loadState();
   await render();
-  toast(existing ? "Workout updated." : "Workout locked in.");
+  toast(hadExisting ? "Workout updated." : "Workout locked in.");
 }
 
 async function saveMetric(form) {
@@ -2226,6 +2421,15 @@ function editWorkout(id) {
   state.draftTargetMuscle = meta.primaryMuscles[0] || "chest";
   state.setRows = setRowsFromWorkout(entry);
   state.editingWorkoutId = entry.id;
+  state.workoutDraft = [{
+    draftId: uid(),
+    editingWorkoutId: entry.id,
+    exercise: entry.exercise,
+    targetMuscle: meta.primaryMuscles[0] || "chest",
+    notes: entry.notes || "",
+    setRows: setRowsFromWorkout(entry)
+  }];
+  state.logHistoryExercise = "";
 }
 
 function clearWorkoutDraft() {
@@ -2233,6 +2437,8 @@ function clearWorkoutDraft() {
   state.draftDate = todayISO();
   state.draftNotes = "";
   state.setRows = defaultSetRows();
+  state.workoutDraft = [defaultDraftExercise(state.selectedExercise)];
+  state.logHistoryExercise = "";
 }
 
 async function handleAction(action, target) {
@@ -2242,6 +2448,56 @@ async function handleAction(action, target) {
   }
   if (action === "refresh-app-shell") {
     await refreshAppShell();
+    return;
+  }
+  if (action === "toggle-template-panel") {
+    readDraftFromForm();
+    state.showTemplatePanel = !state.showTemplatePanel;
+    await render();
+    return;
+  }
+  if (action === "add-exercise-table") {
+    readDraftFromForm();
+    state.workoutDraft.push(defaultDraftExercise(exerciseNames()[0] || "Push-up"));
+    await render();
+    return;
+  }
+  if (action === "remove-exercise-table") {
+    readDraftFromForm();
+    state.workoutDraft = ensureWorkoutDraft().filter((draft) => draft.draftId !== target.dataset.draftId);
+    syncLegacyDraftFromFirst();
+    await render();
+    return;
+  }
+  if (action === "move-exercise-up" || action === "move-exercise-down") {
+    readDraftFromForm();
+    const index = state.workoutDraft.findIndex((draft) => draft.draftId === target.dataset.draftId);
+    const offset = action === "move-exercise-up" ? -1 : 1;
+    const nextIndex = index + offset;
+    if (index >= 0 && nextIndex >= 0 && nextIndex < state.workoutDraft.length) {
+      const [item] = state.workoutDraft.splice(index, 1);
+      state.workoutDraft.splice(nextIndex, 0, item);
+    }
+    syncLegacyDraftFromFirst();
+    await render();
+    return;
+  }
+  if (action === "toggle-exercise-menu") {
+    readDraftFromForm();
+    state.openExerciseMenu = state.openExerciseMenu === target.dataset.draftId ? null : target.dataset.draftId;
+    await render();
+    return;
+  }
+  if (action === "open-exercise-history") {
+    readDraftFromForm();
+    state.logHistoryExercise = target.dataset.exercise;
+    state.openExerciseMenu = null;
+    await render();
+    return;
+  }
+  if (action === "close-log-history") {
+    state.logHistoryExercise = "";
+    await render();
     return;
   }
   if (action === "edit-exercise") {
@@ -2272,6 +2528,7 @@ async function handleAction(action, target) {
     state.selectedExercise = target.dataset.exercise;
     state.draftTargetMuscle = resolveExerciseMeta(state.selectedExercise).primaryMuscles[0] || "chest";
     state.setRows = defaultSetRows();
+    state.workoutDraft = [defaultDraftExercise(state.selectedExercise)];
     await render();
     return;
   }
@@ -2279,22 +2536,28 @@ async function handleAction(action, target) {
   if (action === "import-click") document.getElementById("import-file")?.click();
   if (action === "add-set") {
     readDraftFromForm();
-    const last = state.setRows[state.setRows.length - 1] || { weight: "", reps: 10, rir: 2 };
-    state.setRows.push({ ...last });
+    const draft = state.workoutDraft.find((item) => item.draftId === target.dataset.draftId) || state.workoutDraft[0];
+    const last = draft.setRows[draft.setRows.length - 1] || { weight: "", reps: 10, rir: 2 };
+    draft.setRows.push({ ...last });
+    syncLegacyDraftFromFirst();
     await render();
   }
   if (action === "remove-set") {
     readDraftFromForm();
     const index = Number(target.dataset.index);
-    if (state.setRows.length > 1) state.setRows.splice(index, 1);
+    const draft = state.workoutDraft.find((item) => item.draftId === target.dataset.draftId) || state.workoutDraft[0];
+    if (draft.setRows.length > 1) draft.setRows.splice(index, 1);
+    syncLegacyDraftFromFirst();
     await render();
   }
   if (action === "use-last-session") {
     readDraftFromForm();
-    const last = lastSessionForExercise(state.selectedExercise, state.editingWorkoutId);
+    const draft = state.workoutDraft.find((item) => item.draftId === target.dataset.draftId) || state.workoutDraft[0];
+    const last = lastSessionForExercise(draft.exercise, draft.editingWorkoutId);
     if (!last) throw new Error("No previous session for this exercise yet.");
-    state.setRows = setRowsFromWorkout(last);
-    state.draftNotes = last.notes || state.draftNotes;
+    draft.setRows = setRowsFromWorkout(last);
+    draft.notes = last.notes || draft.notes;
+    syncLegacyDraftFromFirst();
     await render();
     toast("Last session loaded.");
   }
@@ -2318,7 +2581,18 @@ async function handleAction(action, target) {
   if (action === "template-exercise") {
     readDraftFromForm();
     const item = state.templateQueue[Number(target.dataset.index)];
-    if (item) applyTemplateExercise(item);
+    if (item) {
+      const draft = {
+        draftId: uid(),
+        editingWorkoutId: null,
+        exercise: item.exercise,
+        targetMuscle: item.targetMuscle || resolveExerciseMeta(item.exercise).primaryMuscles[0] || "chest",
+        notes: item.notes || "",
+        setRows: normalizeSetRows(item.setRows)
+      };
+      state.workoutDraft = [draft];
+      syncLegacyDraftFromFirst();
+    }
     await render();
   }
   if (action === "delete-workout") {
@@ -2336,10 +2610,9 @@ async function handleAction(action, target) {
   }
   if (action === "choose-exercise") {
     readDraftFromForm();
-    state.selectedExercise = target.dataset.exercise;
-    state.draftTargetMuscle = resolveExerciseMeta(state.selectedExercise).primaryMuscles[0] || "chest";
-    state.setRows = defaultSetRows();
-    state.editingWorkoutId = null;
+    const exercise = target.dataset.exercise;
+    state.workoutDraft.push(defaultDraftExercise(exercise));
+    syncLegacyDraftFromFirst();
     await render();
   }
   if (action === "save-supabase") await saveSupabaseSettings();
@@ -2399,6 +2672,16 @@ document.addEventListener("click", async (event) => {
 
 document.addEventListener("change", async (event) => {
   try {
+    if (event.target.matches("[data-draft-field='exercise']")) {
+      readDraftFromForm();
+      const draft = state.workoutDraft.find((item) => item.draftId === event.target.dataset.draftId);
+      if (draft) {
+        const meta = resolveExerciseMeta(draft.exercise, draft.targetMuscle);
+        draft.targetMuscle = meta.primaryMuscles[0] || draft.targetMuscle || "chest";
+      }
+      syncLegacyDraftFromFirst();
+      await render();
+    }
     if (event.target.matches("#trend-exercise")) {
       state.selectedExercise = event.target.value;
       await render();

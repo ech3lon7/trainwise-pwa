@@ -1,15 +1,15 @@
 "use strict";
 
-const CACHE_NAME = "trainwise-cache-v7";
+const CACHE_NAME = "trainwise-cache-v8";
 const ASSETS = [
   "./",
   "./index.html",
-  "./styles.css?v=1.3.2",
-  "./app.js?v=1.3.2",
-  "./manifest.webmanifest?v=1.3.2",
-  "./icon.svg?v=1.3.2",
-  "./icon-512.png?v=1.3.2",
-  "./apple-touch-icon.png?v=1.3.2"
+  "./styles.css?v=1.3.3",
+  "./app.js?v=1.3.3",
+  "./manifest.webmanifest?v=1.3.3",
+  "./icon.svg?v=1.3.3",
+  "./icon-512.png?v=1.3.3",
+  "./apple-touch-icon.png?v=1.3.3"
 ];
 
 self.addEventListener("install", (event) => {

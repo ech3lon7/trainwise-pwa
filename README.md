@@ -41,7 +41,9 @@ Sample entries are marked internally and can be removed with "Remove sample data
 
 The strength logger uses one row per set so each set can carry its own load, reps, and RIR. Use "Use last session" to fill the table from your previous session for that exercise, then lock it in or update the saved entry later.
 
-Day templates save the logged exercises and set rows from a chosen date. Loading a template queues those exercises for quick logging on a new day.
+Log can hold multiple exercise tables for the same workout day. Each table can be reordered, removed, filled from the last session, or opened into full exercise history from its menu.
+
+Day templates save the current workout's exercise tables and set rows. Loading a template restores those tables for quick logging on a new day.
 
 ## Exercise database
 
