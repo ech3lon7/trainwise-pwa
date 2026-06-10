@@ -1,15 +1,25 @@
 "use strict";
 
-const CACHE_NAME = "trainwise-cache-v8";
+const CACHE_NAME = "trainwise-cache-v10";
 const ASSETS = [
   "./",
   "./index.html",
-  "./styles.css?v=1.3.3",
-  "./app.js?v=1.3.3",
-  "./manifest.webmanifest?v=1.3.3",
-  "./icon.svg?v=1.3.3",
-  "./icon-512.png?v=1.3.3",
-  "./apple-touch-icon.png?v=1.3.3"
+  "./styles.css?v=1.3.5",
+  "./app.js?v=1.3.5",
+  "./manifest.webmanifest?v=1.3.5",
+  "./icon.svg?v=1.3.5",
+  "./icon-512.png?v=1.3.5",
+  "./apple-touch-icon.png?v=1.3.5",
+  "./assets/muscles/abs.png?v=1.3.5",
+  "./assets/muscles/back.png?v=1.3.5",
+  "./assets/muscles/bicep.png?v=1.3.5",
+  "./assets/muscles/calves.png?v=1.3.5",
+  "./assets/muscles/chest.png?v=1.3.5",
+  "./assets/muscles/glutes.png?v=1.3.5",
+  "./assets/muscles/hamstrings.png?v=1.3.5",
+  "./assets/muscles/quads.png?v=1.3.5",
+  "./assets/muscles/shoulders.png?v=1.3.5",
+  "./assets/muscles/triceps.png?v=1.3.5"
 ];
 
 self.addEventListener("install", (event) => {

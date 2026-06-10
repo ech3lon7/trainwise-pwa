@@ -536,6 +536,15 @@ textarea {
   font-size: 12px;
 }
 
+.session-plan-gap {
+  padding: 12px;
+  border: 1px solid rgba(242, 208, 107, 0.24);
+  border-radius: 8px;
+  color: var(--muted);
+  background: rgba(242, 208, 107, 0.08);
+  font-size: 13px;
+}
+
 .muscle-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -667,16 +676,45 @@ textarea {
   align-items: center;
 }
 
-.exercise-badge {
+.exercise-muscle-icons {
+  display: grid;
+  grid-template-columns: repeat(2, 30px);
+  grid-auto-rows: 30px;
+  gap: 4px;
+  width: 64px;
+  min-width: 64px;
+}
+
+.muscle-icon-chip {
   display: grid;
   place-items: center;
-  width: 58px;
-  height: 58px;
+  width: 30px;
+  height: 30px;
+  overflow: hidden;
+  border: 2px solid rgba(255, 255, 255, 0.16);
   border-radius: 8px;
-  background: linear-gradient(145deg, rgba(242, 208, 107, 0.95), rgba(53, 213, 140, 0.78));
-  color: #101310;
-  font-size: 26px;
-  font-weight: 900;
+  background: rgba(255, 255, 255, 0.9);
+  box-shadow: 0 8px 18px rgba(0, 0, 0, 0.18);
+}
+
+.muscle-icon-chip.primary {
+  border-color: rgba(53, 213, 140, 0.95);
+}
+
+.muscle-icon-chip.secondary {
+  border-color: rgba(143, 125, 255, 0.95);
+}
+
+.muscle-icon-chip.empty {
+  color: var(--muted);
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.muscle-icon-chip img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
 }
 
 .template-queue {

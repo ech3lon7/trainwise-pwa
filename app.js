@@ -3,7 +3,7 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 2;
 const STORES = ["workouts", "metrics", "settings"];
-const APP_VERSION = "1.3.3";
+const APP_VERSION = "1.3.5";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 let dbOpenPromise = null;
 let chartId = 0;
@@ -33,6 +33,19 @@ const muscleGroups = [
   { id: "calves", label: "Calves" },
   { id: "abs", label: "Abs" }
 ];
+
+const muscleIconPaths = {
+  chest: "./assets/muscles/chest.png",
+  back: "./assets/muscles/back.png",
+  shoulders: "./assets/muscles/shoulders.png",
+  biceps: "./assets/muscles/bicep.png",
+  triceps: "./assets/muscles/triceps.png",
+  quads: "./assets/muscles/quads.png",
+  hamstrings: "./assets/muscles/hamstrings.png",
+  glutes: "./assets/muscles/glutes.png",
+  calves: "./assets/muscles/calves.png",
+  abs: "./assets/muscles/abs.png"
+};
 
 const exerciseLibrary = [
   {
@@ -731,7 +744,7 @@ function setZone(sets) {
 }
 
 function chooseExerciseForMuscle(muscleId) {
-  return exerciseDatabase().find((exercise) => exercise.primaryMuscles.includes(muscleId)) || exerciseLibrary[0];
+  return exerciseDatabase().find((exercise) => exercise.primaryMuscles.includes(muscleId)) || null;
 }
 
 function estimateExerciseMinutes(exercise, sets) {
@@ -746,11 +759,16 @@ function buildSessionPlan(limitMinutes = SESSION_LIMIT_MINUTES) {
     .filter((stat) => stat.sets < HYPERTROPHY.minimumSets)
     .sort((a, b) => a.sets - b.sets);
   const items = [];
+  const missing = [];
   let totalMinutes = 0;
   const usedExercises = new Set();
 
   for (const target of stats) {
     const exercise = chooseExerciseForMuscle(target.id);
+    if (!exercise) {
+      missing.push(target);
+      continue;
+    }
     if (usedExercises.has(exercise.id)) continue;
     const sets = Math.min(3, Math.max(2, Math.ceil(target.deficit)));
     const minutes = estimateExerciseMinutes(exercise, sets);
@@ -761,7 +779,7 @@ function buildSessionPlan(limitMinutes = SESSION_LIMIT_MINUTES) {
     if (totalMinutes >= limitMinutes - 8) break;
   }
 
-  return { items, totalMinutes, limitMinutes };
+  return { items, missing, totalMinutes, limitMinutes };
 }
 
 function nextHypertrophyAction() {
@@ -775,6 +793,18 @@ function nextHypertrophyAction() {
     const target = underMinimum[0];
     const exercise = chooseExerciseForMuscle(target.id);
     const recommendedSets = Math.min(3, Math.max(2, Math.ceil(target.deficit)));
+    if (!exercise) {
+      return {
+        mode: "library-gap",
+        muscle: target,
+        exercise: null,
+        sets: 0,
+        minutes: 0,
+        sessionPlan,
+        title: `${target.label} needs an exercise`,
+        body: `${target.label} is at ${fmt(target.sets, 1)}/${HYPERTROPHY.minimumSets} hard sets, but your Exercises library has no primary ${target.label} movement. Add one in Exercises before TrainWise can recommend work for it.`
+      };
+    }
     return {
       mode: "minimum",
       muscle: target,
@@ -793,6 +823,18 @@ function nextHypertrophyAction() {
   if (belowGrowth.length) {
     const target = belowGrowth[0];
     const exercise = chooseExerciseForMuscle(target.id);
+    if (!exercise) {
+      return {
+        mode: "library-gap",
+        muscle: target,
+        exercise: null,
+        sets: 0,
+        minutes: 0,
+        sessionPlan,
+        title: `${target.label} needs an exercise`,
+        body: `${target.label} is ready for growth-zone work, but your Exercises library has no primary ${target.label} movement. Add one in Exercises before TrainWise can recommend work for it.`
+      };
+    }
     return {
       mode: "growth",
       muscle: target,
@@ -978,7 +1020,7 @@ function recommendations() {
   const daysSinceWorkout = lastWorkout ? daysBetween(lastWorkout.date, todayISO()) : null;
 
   recs.push({
-    tone: action.mode === "minimum" ? "hot" : "",
+    tone: action.mode === "minimum" ? "hot" : action.mode === "library-gap" ? "warn" : "",
     title: action.title,
     body: action.body,
     action
@@ -1569,6 +1611,24 @@ function muscleStrip(meta) {
   `;
 }
 
+function muscleIconChip(muscle, role) {
+  const src = muscleIconPaths[muscle];
+  if (!src) return "";
+  const label = `${muscleLabel(muscle)} ${role}`;
+  return `
+    <span class="muscle-icon-chip ${role}" title="${escapeHtml(label)}" aria-label="${escapeHtml(label)}">
+      <img src="${escapeHtml(`${src}?v=${APP_VERSION}`)}" alt="${escapeHtml(muscleLabel(muscle))}" loading="lazy">
+    </span>
+  `;
+}
+
+function exerciseMuscleIcons(meta) {
+  const primary = (meta.primaryMuscles || []).map((muscle) => ({ muscle, role: "primary" }));
+  const secondary = (meta.secondaryMuscles || []).map((muscle) => ({ muscle, role: "secondary" }));
+  const icons = [...primary, ...secondary].slice(0, 4).map(({ muscle, role }) => muscleIconChip(muscle, role)).join("");
+  return `<div class="exercise-muscle-icons" aria-label="Exercise muscles">${icons || `<span class="muscle-icon-chip empty">?</span>`}</div>`;
+}
+
 function exerciseOptions(selected) {
   return exerciseNames().map((name) => `
     <option value="${escapeHtml(name)}" ${name === selected ? "selected" : ""}>${escapeHtml(name)}</option>
@@ -1588,7 +1648,7 @@ function exerciseDraftTable(draft, index, total) {
     <section class="exercise-draft" data-draft-id="${escapeHtml(draft.draftId)}" data-editing-workout-id="${escapeHtml(draft.editingWorkoutId || "")}">
       <div class="exercise-table-top">
         <div class="exercise-table-title">
-          <div class="exercise-badge">${exerciseInitial(draft.exercise)}</div>
+          ${exerciseMuscleIcons(meta)}
           <div>
             <label for="exercise-${escapeHtml(draft.draftId)}">Exercise</label>
             <select id="exercise-${escapeHtml(draft.draftId)}" data-draft-field="exercise" data-action="draft-exercise-change" data-draft-id="${escapeHtml(draft.draftId)}">
@@ -1834,18 +1894,20 @@ function renderCoach() {
         <p class="hero-copy">Minimum-first coaching: 10 hard sets per muscle, 2 weekly touches, 1-3 RIR, enough protein, and gradual overload.</p>
       </div>
     </section>
-    ${action?.exercise ? `
+    ${action ? `
       <section class="section card coach-action featured-action">
-        <span class="badge">Recommended now</span>
-        <h3>${escapeHtml(action.exercise.name)}</h3>
+        <span class="badge">${action.exercise ? "Recommended now" : "Library gap"}</span>
+        <h3>${escapeHtml(action.exercise?.name || action.title)}</h3>
         <p>${escapeHtml(action.body)}</p>
-        <div class="action-grid">
-          <span><strong>${action.sets}</strong> sets</span>
-          <span><strong>${escapeHtml(action.exercise.reps)}</strong> reps</span>
-          <span><strong>${HYPERTROPHY.idealRirMin}-${HYPERTROPHY.idealRirMax}</strong> RIR</span>
-          <span><strong>${action.minutes}</strong> min</span>
-        </div>
-        <p class="muted small">${escapeHtml(action.exercise.cue)}</p>
+        ${action.exercise ? `
+          <div class="action-grid">
+            <span><strong>${action.sets}</strong> sets</span>
+            <span><strong>${escapeHtml(action.exercise.reps)}</strong> reps</span>
+            <span><strong>${HYPERTROPHY.idealRirMin}-${HYPERTROPHY.idealRirMax}</strong> RIR</span>
+            <span><strong>${action.minutes}</strong> min</span>
+          </div>
+          <p class="muted small">${escapeHtml(action.exercise.cue)}</p>
+        ` : `<p class="muted small">Recommendations only use movements saved in Exercises or the starter library.</p>`}
       </section>
     ` : ""}
     <section class="section card">
@@ -1857,6 +1919,11 @@ function renderCoach() {
             <span>${item.sets} sets - ${escapeHtml(item.exercise.reps)} reps - ${escapeHtml(item.muscle.label)} - ${item.minutes} min</span>
           </div>
         `).join("") : `<div class="empty">No extra work needed right now. Keep sessions short and recover.</div>`}
+        ${sessionPlan.missing?.length ? `
+          <div class="session-plan-gap">
+            No primary exercise in your library for: ${escapeHtml(sessionPlan.missing.map((muscle) => muscle.label).join(", "))}.
+          </div>
+        ` : ""}
       </div>
     </section>
     <section class="section chart-panel">
