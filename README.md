@@ -4,10 +4,10 @@ TrainWise is a free, static, offline-first hypertrophy workout and nutrition PWA
 
 ## What is included
 
-- Hypertrophy logging: exercise, target muscle, per-set reps/load/RIR, and notes
+- Hypertrophy logging: exercise, per-set reps/load/RIR/rest, and notes
 - Personal exercise database with custom primary and secondary muscle mappings
 - Nutrition/body logging: body weight, calories, protein, and notes
-- Interactive progress charts for muscle hard sets, muscle volume, exercise volume, estimated 1RM, body weight, calories, and protein
+- Interactive progress charts for muscle hard sets, load volume/tonnage, estimated 1RM, body weight, calories, and protein
 - Rule-based hypertrophy recommendations capped around 1-hour sessions
 - Day templates for reusing logged exercise days
 - Optional sample chart data for testing the dashboards locally
@@ -19,7 +19,7 @@ TrainWise is a free, static, offline-first hypertrophy workout and nutrition PWA
 
 The app is minimum-first and home-basics focused.
 
-- Weekly volume uses a rolling 7-day window.
+- Hypertrophy volume uses hard sets in a rolling 7-day window.
 - The first target is 10 hard sets per muscle per week.
 - The growth zone is 12-20 hard sets per muscle per week.
 - Muscles should usually be trained at least 2 times per week.
@@ -39,7 +39,7 @@ Sample entries are marked internally and can be removed with "Remove sample data
 
 ## Workout templates and set table
 
-The strength logger uses one row per set so each set can carry its own load, reps, and RIR. Use "Use last session" to fill the table from your previous session for that exercise, then lock it in or update the saved entry later.
+The strength logger uses one row per set so each set can carry its own load, reps, RIR, and rest time. Use "Use last session" to fill the table from your previous session for that exercise, then lock it in or update the saved entry later.
 
 Log can hold multiple exercise tables for the same workout day. Each table can be reordered, removed, filled from the last session, or opened into full exercise history from its menu.
 

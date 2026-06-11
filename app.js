@@ -3,11 +3,12 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 2;
 const STORES = ["workouts", "metrics", "settings"];
-const APP_VERSION = "1.3.5";
+const APP_VERSION = "1.4.0";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 let dbOpenPromise = null;
 let chartId = 0;
 let reloadingForUpdate = false;
+let renderToken = 0;
 const SESSION_LIMIT_MINUTES = 60;
 
 const HYPERTROPHY = {
@@ -252,13 +253,15 @@ const state = {
   logHistoryExercise: "",
   workoutDraft: [],
   historyExercise: "",
+  historySearch: "",
+  draggingDraftId: null,
   templateQueue: [],
   draftDate: todayISO(),
   draftNotes: "",
   setRows: [
-    { weight: "", reps: 10, rir: 2 },
-    { weight: "", reps: 10, rir: 2 },
-    { weight: "", reps: 10, rir: 2 }
+    { weight: "", reps: 10, rir: 2, restSeconds: null },
+    { weight: "", reps: 10, rir: 2, restSeconds: null },
+    { weight: "", reps: 10, rir: 2, restSeconds: null }
   ],
   workouts: [],
   metrics: [],
@@ -307,6 +310,35 @@ function fmt(num, digits = 0) {
 function parseNum(value) {
   const num = Number(value);
   return Number.isFinite(num) ? num : 0;
+}
+
+function parseRestSeconds(value) {
+  if (value === null || value === undefined || value === "") return null;
+  if (Number.isFinite(value)) return Math.max(0, Math.round(value));
+  const text = String(value).trim();
+  if (!text) return null;
+  if (/^\d+:\d{1,2}$/.test(text)) {
+    const [minutes, seconds] = text.split(":").map(Number);
+    return Math.max(0, minutes * 60 + seconds);
+  }
+  const minuteMatch = text.match(/^(\d+(?:\.\d+)?)\s*m(?:in(?:ute)?s?)?$/i);
+  if (minuteMatch) return Math.max(0, Math.round(Number(minuteMatch[1]) * 60));
+  const secondMatch = text.match(/^(\d+(?:\.\d+)?)\s*s(?:ec(?:ond)?s?)?$/i);
+  if (secondMatch) return Math.max(0, Math.round(Number(secondMatch[1])));
+  const number = Number(text);
+  return Number.isFinite(number) ? Math.max(0, Math.round(number)) : null;
+}
+
+function formatRest(seconds) {
+  if (!Number.isFinite(seconds) || seconds <= 0) return "--";
+  const total = Math.round(seconds);
+  const minutes = Math.floor(total / 60);
+  const remainder = String(total % 60).padStart(2, "0");
+  return `${minutes}:${remainder}`;
+}
+
+function restInputValue(seconds) {
+  return Number.isFinite(seconds) && seconds > 0 ? formatRest(seconds) : "";
 }
 
 function escapeHtml(value) {
@@ -588,14 +620,16 @@ function setRowsFromWorkout(workout) {
     return workout.setRows.map((row) => ({
       weight: parseNum(row.weight),
       reps: Math.max(1, parseNum(row.reps)),
-      rir: row.rir === null || row.rir === undefined || row.rir === "" ? null : parseNum(row.rir)
+      rir: row.rir === null || row.rir === undefined || row.rir === "" ? null : parseNum(row.rir),
+      restSeconds: parseRestSeconds(row.restSeconds ?? row.rest ?? row.restTime)
     }));
   }
   const sets = Math.max(1, parseNum(workout.sets));
   return Array.from({ length: sets }, () => ({
     weight: Math.max(0, parseNum(workout.weight)),
     reps: Math.max(1, parseNum(workout.reps)),
-    rir: workout.rir === null || workout.rir === undefined || workout.rir === "" ? null : parseNum(workout.rir)
+    rir: workout.rir === null || workout.rir === undefined || workout.rir === "" ? null : parseNum(workout.rir),
+    restSeconds: parseRestSeconds(workout.restSeconds ?? workout.rest ?? workout.restTime)
   }));
 }
 
@@ -604,10 +638,11 @@ function normalizeSetRows(rows) {
     .map((row) => ({
       weight: Math.max(0, parseNum(row.weight)),
       reps: Math.max(1, parseNum(row.reps)),
-      rir: row.rir === "" || row.rir === null || row.rir === undefined ? null : Math.max(0, parseNum(row.rir))
+      rir: row.rir === "" || row.rir === null || row.rir === undefined ? null : Math.max(0, parseNum(row.rir)),
+      restSeconds: parseRestSeconds(row.restSeconds ?? row.rest ?? row.restTime)
     }))
     .filter((row) => row.reps > 0);
-  return cleaned.length ? cleaned : [{ weight: 0, reps: 10, rir: 2 }];
+  return cleaned.length ? cleaned : [{ weight: 0, reps: 10, rir: 2, restSeconds: null }];
 }
 
 function workoutVolume(workout) {
@@ -641,12 +676,15 @@ function creditedSetsForWorkout(workout) {
 }
 
 function bestSetLabel(workout) {
-  const rows = setRowsFromWorkout(workout);
-  const best = rows.reduce((winner, row) => {
+  const best = bestSet(workout);
+  return best ? `${fmt(best.weight)} x ${fmt(best.reps)}` : "--";
+}
+
+function bestSet(workout) {
+  return setRowsFromWorkout(workout).reduce((winner, row) => {
     const score = row.weight * (1 + row.reps / 30);
     return !winner || score > winner.score ? { ...row, score } : winner;
   }, null);
-  return best ? `${fmt(best.weight)} x ${fmt(best.reps)}` : "--";
 }
 
 function averageRir(workout) {
@@ -655,6 +693,84 @@ function averageRir(workout) {
     .filter((value) => Number.isFinite(value));
   if (!values.length) return null;
   return values.reduce((sum, value) => sum + value, 0) / values.length;
+}
+
+function averageRestSeconds(workout) {
+  const values = setRowsFromWorkout(workout)
+    .map((row) => row.restSeconds)
+    .filter((value) => Number.isFinite(value) && value > 0);
+  if (!values.length) return null;
+  return values.reduce((sum, value) => sum + value, 0) / values.length;
+}
+
+function parseRepRange(value) {
+  const nums = String(value || "").match(/\d+/g)?.map(Number) || [];
+  if (!nums.length) return { low: 8, high: 15 };
+  if (nums.length === 1) return { low: Math.max(1, nums[0] - 2), high: nums[0] };
+  return { low: Math.max(1, nums[0]), high: Math.max(nums[0], nums[1]) };
+}
+
+function exerciseHistoryEntries(exerciseName, newestFirst = true) {
+  const entries = state.workouts
+    .filter((entry) => entry.exercise === exerciseName)
+    .sort((a, b) => a.date.localeCompare(b.date) || String(a.createdAt || "").localeCompare(String(b.createdAt || "")));
+  return newestFirst ? entries.reverse() : entries;
+}
+
+function exerciseStats(exerciseName) {
+  const entries = exerciseHistoryEntries(exerciseName, false);
+  const allSets = entries.flatMap(setRowsFromWorkout);
+  const best = entries.reduce((winner, entry) => {
+    const current = bestSet(entry);
+    return current && (!winner || current.score > winner.score) ? { ...current, date: entry.date } : winner;
+  }, null);
+  const bestVolumeEntry = entries.reduce((winner, entry) => (
+    !winner || workoutVolume(entry) > workoutVolume(winner) ? entry : winner
+  ), null);
+  return {
+    entries,
+    sessions: entries.length,
+    totalLoadVolume: entries.reduce((sum, entry) => sum + workoutVolume(entry), 0),
+    bestSet: best,
+    bestWeight: allSets.reduce((max, row) => Math.max(max, row.weight), 0),
+    bestLoadVolume: bestVolumeEntry ? workoutVolume(bestVolumeEntry) : 0,
+    bestLoadVolumeDate: bestVolumeEntry?.date || "",
+    lastDate: entries[entries.length - 1]?.date || "",
+    firstDate: entries[0]?.date || ""
+  };
+}
+
+function progressiveOverloadIndicator(exerciseName) {
+  const entries = exerciseHistoryEntries(exerciseName);
+  if (entries.length < 2) return { symbol: "-", tone: "flat", label: "Need another session" };
+  const latest = e1rm(entries[0]);
+  const previous = e1rm(entries[1]);
+  if (latest > previous * 1.01) return { symbol: "+", tone: "up", label: `e1RM up ${fmt(latest - previous, 1)} lb` };
+  if (latest < previous * 0.99) return { symbol: "-", tone: "down", label: `e1RM down ${fmt(previous - latest, 1)} lb` };
+  return { symbol: "=", tone: "flat", label: "e1RM steady" };
+}
+
+function progressionTargetForExercise(exerciseName) {
+  const latest = exerciseHistoryEntries(exerciseName)[0];
+  if (!latest) return null;
+  const top = bestSet(latest);
+  if (!top) return null;
+  const meta = resolveExerciseMeta(exerciseName);
+  const range = parseRepRange(meta.reps);
+  const nextRep = Math.min(range.high, top.reps + 1);
+  const loadStep = top.weight >= 50 ? 5 : 2.5;
+  const indicator = progressiveOverloadIndicator(exerciseName);
+  const target = top.reps < range.high
+    ? `${fmt(top.weight, 1)} lb x ${fmt(nextRep)}-${fmt(range.high)}`
+    : `${fmt(top.weight + loadStep, 1)} lb x ${fmt(range.low)}-${fmt(Math.max(range.low, top.reps - 2))}`;
+  return {
+    exercise: exerciseName,
+    latest,
+    top,
+    indicator,
+    target,
+    body: `Last ${exerciseName}: ${fmt(top.weight, 1)} lb x ${fmt(top.reps)}. Next target: ${target}, while keeping ${HYPERTROPHY.idealRirMin}-${HYPERTROPHY.idealRirMax} RIR.`
+  };
 }
 
 function weeklyWorkouts() {
@@ -847,6 +963,21 @@ function nextHypertrophyAction() {
     };
   }
 
+  const progression = progressionTargetForExercise(state.selectedExercise) || progressionTargetForExercise(state.workouts[0]?.exercise);
+  if (progression) {
+    return {
+      mode: "progression",
+      muscle: null,
+      exercise: resolveExerciseMeta(progression.exercise),
+      sets: 0,
+      minutes: 0,
+      sessionPlan,
+      title: "Progress the next session",
+      body: progression.body,
+      progression
+    };
+  }
+
   return {
     mode: "recovery",
     muscle: null,
@@ -1026,6 +1157,15 @@ function recommendations() {
     action
   });
 
+  const progression = action.progression || progressionTargetForExercise(state.workouts[0]?.exercise);
+  if (progression && action.mode !== "progression") {
+    recs.push({
+      tone: progression.indicator.tone === "down" ? "warn" : "good",
+      title: "Progression target",
+      body: progression.body
+    });
+  }
+
   if (daysSinceWorkout === null) {
     recs.push({
       tone: "warn",
@@ -1165,7 +1305,7 @@ function listWorkout(entry) {
     <div class="list-item">
       <div>
         <strong>${escapeHtml(entry.exercise)}</strong>
-        <span class="muted small">${escapeHtml(entry.date)} - ${setRowsFromWorkout(entry).length} sets - best ${bestSetLabel(entry)} - ${fmt(workoutVolume(entry))} lb volume</span>
+        <span class="muted small">${escapeHtml(entry.date)} - ${setRowsFromWorkout(entry).length} sets - best ${bestSetLabel(entry)} - ${fmt(workoutVolume(entry))} lb load volume</span>
         <span class="muted micro">${meta.primaryMuscles.map(muscleLabel).join(", ")}${avgRir !== null ? ` - ${fmt(avgRir, 1)} avg RIR` : ""}</span>
       </div>
       <div class="row-actions">
@@ -1193,7 +1333,7 @@ function listMetric(entry) {
 }
 
 function defaultSetRows(count = 3) {
-  return Array.from({ length: count }, () => ({ weight: "", reps: 10, rir: 2 }));
+  return Array.from({ length: count }, () => ({ weight: "", reps: 10, rir: 2, restSeconds: null }));
 }
 
 function draftExerciseFromState() {
@@ -1258,7 +1398,8 @@ function readWorkoutDraftFromForm() {
       setRows: normalizeSetRows([...section.querySelectorAll(".set-row")].map((row) => ({
         weight: row.querySelector('[data-set-field="weight"]')?.value,
         reps: row.querySelector('[data-set-field="reps"]')?.value,
-        rir: row.querySelector('[data-set-field="rir"]')?.value
+        rir: row.querySelector('[data-set-field="rir"]')?.value,
+        rest: row.querySelector('[data-set-field="rest"]')?.value
       }))),
       order: index
     };
@@ -1298,6 +1439,7 @@ function renderSetRows(draft = draftExerciseFromState()) {
       <td><input data-set-field="weight" type="number" inputmode="decimal" min="0" step="2.5" value="${escapeHtml(row.weight)}" aria-label="Set ${index + 1} weight"></td>
       <td><input data-set-field="reps" type="number" inputmode="numeric" min="1" step="1" value="${escapeHtml(row.reps)}" aria-label="Set ${index + 1} reps"></td>
       <td><input data-set-field="rir" type="number" inputmode="numeric" min="0" max="5" step="1" value="${row.rir ?? ""}" aria-label="Set ${index + 1} RIR"></td>
+      <td><input data-set-field="rest" type="text" inputmode="numeric" value="${escapeHtml(restInputValue(row.restSeconds))}" placeholder="1:30" aria-label="Set ${index + 1} rest"></td>
       <td><button class="ghost-mini" type="button" data-action="remove-set" data-draft-id="${escapeHtml(draft.draftId)}" data-index="${index}" ${rows.length <= 1 ? "disabled" : ""}>x</button></td>
     </tr>
   `).join("");
@@ -1319,7 +1461,7 @@ function exerciseHistoryMarkup() {
         ${sessions.length ? sessions.map((entry) => `
           <div class="list-item simple">
             <strong>${escapeHtml(entry.date)}</strong>
-            <span class="muted small">${setRowsFromWorkout(entry).length} sets - best ${bestSetLabel(entry)} - ${fmt(workoutVolume(entry))} lb</span>
+            <span class="muted small">${setRowsFromWorkout(entry).length} sets - best ${bestSetLabel(entry)} - ${fmt(workoutVolume(entry))} lb load volume</span>
           </div>
         `).join("") : `<div class="empty">No history for this exercise yet.</div>`}
       </div>
@@ -1348,14 +1490,14 @@ function exerciseHistoryScreen(exerciseName) {
           <details class="history-session-card">
             <summary>
               <strong>${escapeHtml(entry.date)}</strong>
-              <span>${rows.length} sets - best ${bestSetLabel(entry)} - ${fmt(workoutVolume(entry))} lb</span>
+              <span>${rows.length} sets - best ${bestSetLabel(entry)} - ${fmt(workoutVolume(entry))} lb load volume</span>
             </summary>
             <div class="history-set-grid">
               ${rows.map((row, index) => `
                 <div class="history-set">
                   <span>Set ${index + 1}</span>
                   <strong>${fmt(row.weight)} lb x ${fmt(row.reps)}</strong>
-                  <small>${row.rir === null ? "--" : fmt(row.rir, 1)} RIR</small>
+                  <small>${row.rir === null ? "--" : fmt(row.rir, 1)} RIR - Rest ${formatRest(row.restSeconds)}</small>
                 </div>
               `).join("")}
             </div>
@@ -1645,9 +1787,10 @@ function exerciseDraftTable(draft, index, total) {
   const meta = resolveExerciseMeta(draft.exercise, draft.targetMuscle);
   const menuOpen = state.openExerciseMenu === draft.draftId;
   return `
-    <section class="exercise-draft" data-draft-id="${escapeHtml(draft.draftId)}" data-editing-workout-id="${escapeHtml(draft.editingWorkoutId || "")}">
+    <section class="exercise-draft ${state.draggingDraftId === draft.draftId ? "is-dragging" : ""}" data-draft-id="${escapeHtml(draft.draftId)}" data-editing-workout-id="${escapeHtml(draft.editingWorkoutId || "")}">
       <div class="exercise-table-top">
         <div class="exercise-table-title">
+          <button class="drag-handle" type="button" aria-label="Drag exercise table" data-drag-handle data-draft-id="${escapeHtml(draft.draftId)}">::</button>
           ${exerciseMuscleIcons(meta)}
           <div>
             <label for="exercise-${escapeHtml(draft.draftId)}">Exercise</label>
@@ -1667,15 +1810,9 @@ function exerciseDraftTable(draft, index, total) {
         </div>
       </div>
       ${muscleStrip(meta)}
-      <div class="field-row draft-meta-row">
-        <div class="field">
-          <label>Primary if custom</label>
-          <select data-draft-field="targetMuscle">${muscleOptions(draft.targetMuscle || meta.primaryMuscles[0] || "chest")}</select>
-        </div>
-        <div class="field">
-          <label>Notes</label>
-          <input data-draft-field="notes" value="${escapeHtml(draft.notes || "")}" placeholder="Optional notes">
-        </div>
+      <div class="field">
+        <label>Notes</label>
+        <input data-draft-field="notes" value="${escapeHtml(draft.notes || "")}" placeholder="Optional notes">
       </div>
       <div class="set-table-wrap">
         <table class="set-table">
@@ -1686,6 +1823,7 @@ function exerciseDraftTable(draft, index, total) {
               <th>lbs</th>
               <th>Reps</th>
               <th>RIR</th>
+              <th>Rest</th>
               <th></th>
             </tr>
           </thead>
@@ -1694,8 +1832,6 @@ function exerciseDraftTable(draft, index, total) {
       </div>
       <div class="log-actions exercise-table-actions">
         <button class="round-add" type="button" aria-label="Add set" data-action="add-set" data-draft-id="${escapeHtml(draft.draftId)}">+</button>
-        <button class="ghost-button" type="button" data-action="move-exercise-up" data-draft-id="${escapeHtml(draft.draftId)}" ${index === 0 ? "disabled" : ""}>Move up</button>
-        <button class="ghost-button" type="button" data-action="move-exercise-down" data-draft-id="${escapeHtml(draft.draftId)}" ${index === total - 1 ? "disabled" : ""}>Move down</button>
         <button class="ghost-button" type="button" data-action="remove-exercise-table" data-draft-id="${escapeHtml(draft.draftId)}" ${total <= 1 ? "disabled" : ""}>Remove</button>
       </div>
     </section>
@@ -1703,9 +1839,6 @@ function exerciseDraftTable(draft, index, total) {
 }
 
 function renderLog() {
-  const exerciseChips = exerciseNames().map((name) => `
-    <button class="pill ${state.selectedExercise === name ? "is-active" : ""}" type="button" data-action="choose-exercise" data-exercise="${escapeHtml(name)}">${escapeHtml(name)}</button>
-  `).join("");
   const templates = getDayTemplates();
   const draft = ensureWorkoutDraft();
   const lockLabel = draft.some((item) => item.editingWorkoutId) ? "Update workout" : "Lock in workout";
@@ -1749,10 +1882,6 @@ function renderLog() {
               <label for="workout-date">Date</label>
               <input id="workout-date" name="date" type="date" required value="${escapeHtml(state.draftDate || todayISO())}">
             </div>
-            <div class="field">
-              <label>Add from library</label>
-              <div class="pill-row">${exerciseChips}</div>
-            </div>
           </div>
 
           <div class="exercise-draft-list">
@@ -1781,18 +1910,146 @@ function renderLog() {
         </form>
       `}
     </section>
+  `;
+}
 
-    <section class="section grid two">
-      <div class="card">
-        <h3>Strength history</h3>
-        <div class="list">${state.workouts.slice(0, 8).map((entry) => listWorkout(entry)).join("") || `<div class="empty">No lifts logged yet.</div>`}</div>
-      </div>
-      <div class="card">
-        <h3>Nutrition history</h3>
-        <div class="list">${state.metrics.slice(0, 8).map((entry) => listMetric(entry)).join("") || `<div class="empty">No metrics logged yet.</div>`}</div>
+function miniSparkline(points, color = "#35d58c") {
+  if (!points.length) return `<div class="history-sparkline empty-spark">No chart yet</div>`;
+  const values = points.map((point) => point.value);
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const range = max - min || 1;
+  const coords = points.map((point, index) => {
+    const x = 6 + (index / Math.max(points.length - 1, 1)) * 88;
+    const y = 82 - ((point.value - min) / range) * 64;
+    return `${x},${y}`;
+  }).join(" ");
+  return `
+    <div class="history-sparkline" aria-label="Mini performance chart">
+      <svg viewBox="0 0 100 100" preserveAspectRatio="none" role="img">
+        <polyline points="${coords}" fill="none" stroke="${color}" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"></polyline>
+      </svg>
+    </div>
+  `;
+}
+
+function historyExerciseNames() {
+  return [...new Set(state.workouts.map((entry) => entry.exercise))]
+    .sort((a, b) => a.localeCompare(b));
+}
+
+function renderHistoryList() {
+  const search = state.historySearch.trim().toLowerCase();
+  const exercises = historyExerciseNames().filter((name) => name.toLowerCase().includes(search));
+  return `
+    <section class="hero">
+      <div>
+        <h2 class="hero-title">History</h2>
+        <p class="hero-copy">Exercise performance, PRs, load volume, and progressive overload from your logged sessions.</p>
       </div>
     </section>
+
+    <section class="section form-panel">
+      <div class="field">
+        <label for="history-search">Search exercises</label>
+        <input id="history-search" class="search-input" data-history-search value="${escapeHtml(state.historySearch)}" placeholder="Bench press, row, squat">
+      </div>
+    </section>
+
+    <section class="section history-exercise-grid">
+      ${exercises.length ? exercises.map((exercise) => {
+        const meta = resolveExerciseMeta(exercise);
+        const stats = exerciseStats(exercise);
+        const indicator = progressiveOverloadIndicator(exercise);
+        const volumeSeries = seriesFromWorkouts(exercise, workoutVolume);
+        return `
+          <button class="history-exercise-card" type="button" data-action="history-select-exercise" data-exercise="${escapeHtml(exercise)}">
+            <div class="history-card-top">
+              <div>
+                <strong>${escapeHtml(exercise)}</strong>
+                ${exerciseMuscleBadges(meta)}
+              </div>
+              <span class="history-overload-indicator ${indicator.tone}" title="${escapeHtml(indicator.label)}">${indicator.symbol}</span>
+            </div>
+            ${miniSparkline(volumeSeries.slice(-8), "#9b8cff")}
+            <div class="history-stats-row">
+              <span class="history-stat"><strong>${stats.sessions}</strong><small>sessions</small></span>
+              <span class="history-stat"><strong>${fmt(stats.totalLoadVolume)}</strong><small>lb tonnage</small></span>
+              <span class="history-stat"><strong>${escapeHtml(bestSetLabel(stats.entries[stats.entries.length - 1] || {}))}</strong><small>latest best</small></span>
+            </div>
+            <div class="history-pr-badge">PR: ${stats.bestSet ? `${fmt(stats.bestSet.weight, 1)} x ${fmt(stats.bestSet.reps)} on ${escapeHtml(stats.bestSet.date)}` : "not yet"}</div>
+          </button>
+        `;
+      }).join("") : `<div class="empty">No exercise history matches that search.</div>`}
+    </section>
   `;
+}
+
+function renderHistoryDetail(exerciseName) {
+  const stats = exerciseStats(exerciseName);
+  const entries = exerciseHistoryEntries(exerciseName);
+  const meta = resolveExerciseMeta(exerciseName);
+  const progression = progressionTargetForExercise(exerciseName);
+  return `
+    <section class="hero">
+      <div>
+        <h2 class="hero-title">${escapeHtml(exerciseName)}</h2>
+        <p class="hero-copy">${progression ? escapeHtml(progression.body) : "Log another session to unlock a progression target."}</p>
+      </div>
+    </section>
+
+    <section class="section history-detail-header">
+      <button class="ghost-button" type="button" data-action="history-back">Back</button>
+      ${exerciseMuscleBadges(meta)}
+    </section>
+
+    <section class="section grid four history-summary-grid">
+      <div class="stat"><span class="label">Sessions</span><strong class="value">${stats.sessions}</strong><span class="hint">${escapeHtml(stats.firstDate || "--")} to ${escapeHtml(stats.lastDate || "--")}</span></div>
+      <div class="stat"><span class="label">Load volume</span><strong class="value">${fmt(stats.totalLoadVolume)}</strong><span class="hint">lb total tonnage</span></div>
+      <div class="stat"><span class="label">Best set</span><strong class="value">${stats.bestSet ? `${fmt(stats.bestSet.weight, 1)} x ${fmt(stats.bestSet.reps)}` : "--"}</strong><span class="hint">${escapeHtml(stats.bestSet?.date || "No PR yet")}</span></div>
+      <div class="stat"><span class="label">Best session</span><strong class="value">${fmt(stats.bestLoadVolume)}</strong><span class="hint">${escapeHtml(stats.bestLoadVolumeDate || "No tonnage yet")}</span></div>
+    </section>
+
+    <section class="section grid two">
+      <div class="chart-panel">
+        <div class="chart-header"><h3>Load volume</h3><span class="muted small">sets x reps x load</span></div>
+        ${lineChart(seriesFromWorkouts(exerciseName, workoutVolume), "#9b8cff", " lb")}
+      </div>
+      <div class="chart-panel">
+        <div class="chart-header"><h3>Estimated 1RM</h3><span class="muted small">best set estimate</span></div>
+        ${lineChart(seriesFromWorkouts(exerciseName, e1rm), "#ff6b5f", " lb")}
+      </div>
+    </section>
+
+    <section class="section history-session-list">
+      ${entries.length ? entries.map((entry) => {
+        const rows = setRowsFromWorkout(entry);
+        return `
+          <details class="history-session-card">
+            <summary>
+              <strong>${escapeHtml(entry.date)}</strong>
+              <span>${rows.length} sets - best ${bestSetLabel(entry)} - ${fmt(workoutVolume(entry))} lb load volume</span>
+            </summary>
+            <div class="history-set-grid">
+              ${rows.map((row, index) => `
+                <div class="history-set">
+                  <span>Set ${index + 1}</span>
+                  <strong>${fmt(row.weight)} lb x ${fmt(row.reps)}</strong>
+                  <small>${row.rir === null ? "--" : fmt(row.rir, 1)} RIR - Rest ${formatRest(row.restSeconds)}</small>
+                </div>
+              `).join("")}
+            </div>
+            ${entry.notes ? `<p class="muted small">${escapeHtml(entry.notes)}</p>` : ""}
+          </details>
+        `;
+      }).join("") : `<div class="empty">No recorded sessions for this exercise yet.</div>`}
+    </section>
+  `;
+}
+
+function renderHistory() {
+  if (state.historyExercise) return renderHistoryDetail(state.historyExercise);
+  return renderHistoryList();
 }
 
 function renderTrends() {
@@ -1810,8 +2067,8 @@ function renderTrends() {
     <section class="trend-section">
       <div class="trend-section-header">
         <div>
-          <h2>Muscle volume</h2>
-          <p class="muted small">Hard sets and load credited to a muscle group.</p>
+          <h2>Muscle trends</h2>
+          <p class="muted small">Hypertrophy volume is hard-set credit; load volume is tonnage.</p>
         </div>
         <div class="field compact-field">
           <label for="trend-muscle">Muscle</label>
@@ -1824,15 +2081,10 @@ function renderTrends() {
           ${lineChart(muscleSetSeries, "#f2d06b", " sets")}
         </div>
         <div class="chart-panel">
-          <div class="chart-header"><h3>${escapeHtml(selectedMuscleLabel)} volume</h3><span class="muted small">credited load</span></div>
+          <div class="chart-header"><h3>${escapeHtml(selectedMuscleLabel)} load volume</h3><span class="muted small">credited tonnage</span></div>
           ${lineChart(muscleVolumeSeries, "#35d58c", " lb")}
         </div>
       </div>
-    </section>
-
-    <section class="section chart-panel">
-      <div class="chart-header"><h3>Weekly hard sets by muscle</h3><span class="muted small">rolling 7 days</span></div>
-      ${muscleProgressMarkup(muscleSetStats())}
     </section>
 
     <section class="section trend-section">
@@ -1848,7 +2100,7 @@ function renderTrends() {
       </div>
       <div class="grid two">
         <div class="chart-panel">
-          <div class="chart-header"><h3>${escapeHtml(state.selectedExercise)} volume</h3><span class="muted small">sets x reps x load</span></div>
+          <div class="chart-header"><h3>${escapeHtml(state.selectedExercise)} load volume</h3><span class="muted small">sets x reps x load</span></div>
           ${lineChart(volumeSeries, "#9b8cff", " lb")}
         </div>
         <div class="chart-panel">
@@ -1896,10 +2148,10 @@ function renderCoach() {
     </section>
     ${action ? `
       <section class="section card coach-action featured-action">
-        <span class="badge">${action.exercise ? "Recommended now" : "Library gap"}</span>
+        <span class="badge">${action.mode === "progression" ? "Progression target" : action.exercise ? "Recommended now" : "Library gap"}</span>
         <h3>${escapeHtml(action.exercise?.name || action.title)}</h3>
         <p>${escapeHtml(action.body)}</p>
-        ${action.exercise ? `
+        ${action.exercise && action.mode !== "progression" ? `
           <div class="action-grid">
             <span><strong>${action.sets}</strong> sets</span>
             <span><strong>${escapeHtml(action.exercise.reps)}</strong> reps</span>
@@ -1907,6 +2159,13 @@ function renderCoach() {
             <span><strong>${action.minutes}</strong> min</span>
           </div>
           <p class="muted small">${escapeHtml(action.exercise.cue)}</p>
+        ` : action.mode === "progression" ? `
+          <div class="action-grid">
+            <span><strong>${escapeHtml(action.progression?.target || "--")}</strong> target</span>
+            <span><strong>${escapeHtml(action.progression?.indicator?.symbol || "=")}</strong> trend</span>
+            <span><strong>${escapeHtml(action.exercise?.reps || "8-15")}</strong> range</span>
+            <span><strong>${HYPERTROPHY.idealRirMin}-${HYPERTROPHY.idealRirMax}</strong> RIR</span>
+          </div>
         ` : `<p class="muted small">Recommendations only use movements saved in Exercises or the starter library.</p>`}
       </section>
     ` : ""}
@@ -2052,7 +2311,22 @@ async function renderSettings() {
   `;
 }
 
+function applyStaggerAnimations() {
+  const animated = els.app.querySelectorAll(".card, .chart-panel, .stat, .coach-card, .exercise-definition, .exercise-draft, .history-exercise-card, .history-session-card, .form-panel, .settings-panel");
+  animated.forEach((element, index) => {
+    element.style.setProperty("--i", String(Math.min(index, 12)));
+  });
+}
+
 async function render() {
+  const token = ++renderToken;
+  if (els.app.children.length) {
+    els.app.classList.remove("content-enter");
+    els.app.classList.add("content-exit");
+    await sleep(100);
+    if (token !== renderToken) return;
+  }
+
   document.querySelectorAll(".tab").forEach((tab) => {
     tab.classList.toggle("is-active", tab.dataset.tab === state.activeTab);
   });
@@ -2062,7 +2336,12 @@ async function render() {
   if (state.activeTab === "trends") els.app.innerHTML = renderTrends();
   if (state.activeTab === "coach") els.app.innerHTML = renderCoach();
   if (state.activeTab === "exercises") els.app.innerHTML = renderExercises();
+  if (state.activeTab === "history") els.app.innerHTML = renderHistory();
   if (state.activeTab === "settings") els.app.innerHTML = await renderSettings();
+  if (token !== renderToken) return;
+  els.app.classList.remove("content-exit");
+  els.app.classList.add("content-enter");
+  applyStaggerAnimations();
 }
 
 async function saveExercise(form) {
@@ -2184,7 +2463,8 @@ function sampleWorkout({ exercise, daysAgo, sets, reps, weight, rir, note }) {
   const setRows = Array.from({ length: sets }, (_, index) => ({
     weight: Math.max(0, weight - index * (weight ? 2.5 : 0)),
     reps: Math.max(1, reps - (index % 3)),
-    rir
+    rir,
+    restSeconds: weight >= 30 ? 120 : 75
   }));
   return {
     id: `${SAMPLE_BATCH}-workout-${date}-${meta.id}`,
@@ -2523,6 +2803,16 @@ async function handleAction(action, target) {
     await render();
     return;
   }
+  if (action === "history-select-exercise") {
+    state.historyExercise = target.dataset.exercise || "";
+    await render();
+    return;
+  }
+  if (action === "history-back") {
+    state.historyExercise = "";
+    await render();
+    return;
+  }
   if (action === "add-exercise-table") {
     readDraftFromForm();
     state.workoutDraft.push(defaultDraftExercise(exerciseNames()[0] || "Push-up"));
@@ -2532,19 +2822,6 @@ async function handleAction(action, target) {
   if (action === "remove-exercise-table") {
     readDraftFromForm();
     state.workoutDraft = ensureWorkoutDraft().filter((draft) => draft.draftId !== target.dataset.draftId);
-    syncLegacyDraftFromFirst();
-    await render();
-    return;
-  }
-  if (action === "move-exercise-up" || action === "move-exercise-down") {
-    readDraftFromForm();
-    const index = state.workoutDraft.findIndex((draft) => draft.draftId === target.dataset.draftId);
-    const offset = action === "move-exercise-up" ? -1 : 1;
-    const nextIndex = index + offset;
-    if (index >= 0 && nextIndex >= 0 && nextIndex < state.workoutDraft.length) {
-      const [item] = state.workoutDraft.splice(index, 1);
-      state.workoutDraft.splice(nextIndex, 0, item);
-    }
     syncLegacyDraftFromFirst();
     await render();
     return;
@@ -2692,6 +2969,50 @@ async function handleAction(action, target) {
   if (action === "clear-all") await clearAll();
 }
 
+const dragState = {
+  id: null,
+  startY: 0,
+  currentY: 0,
+  active: false
+};
+
+function startExerciseDrag(handle, event) {
+  const section = handle.closest(".exercise-draft");
+  if (!section) return;
+  readDraftFromForm();
+  dragState.id = section.dataset.draftId;
+  dragState.startY = event.clientY;
+  dragState.currentY = event.clientY;
+  dragState.active = true;
+  state.draggingDraftId = dragState.id;
+  section.classList.add("is-dragging");
+  handle.setPointerCapture?.(event.pointerId);
+}
+
+async function finishExerciseDrag(event) {
+  if (!dragState.active || !dragState.id) return;
+  dragState.currentY = event.clientY;
+  const sections = [...document.querySelectorAll(".exercise-draft")];
+  const sourceIndex = state.workoutDraft.findIndex((draft) => draft.draftId === dragState.id);
+  if (sourceIndex >= 0 && sections.length > 1 && Math.abs(dragState.currentY - dragState.startY) > 8) {
+    let targetIndex = sections.length - 1;
+    for (let index = 0; index < sections.length; index += 1) {
+      const rect = sections[index].getBoundingClientRect();
+      if (dragState.currentY < rect.top + rect.height / 2) {
+        targetIndex = index;
+        break;
+      }
+    }
+    const [item] = state.workoutDraft.splice(sourceIndex, 1);
+    state.workoutDraft.splice(Math.min(targetIndex, state.workoutDraft.length), 0, item);
+    syncLegacyDraftFromFirst();
+  }
+  dragState.id = null;
+  dragState.active = false;
+  state.draggingDraftId = null;
+  await render();
+}
+
 function updateInteractiveChart(chart, event) {
   const stage = chart.querySelector(".chart-stage");
   const marker = chart.querySelector(".chart-marker");
@@ -2766,14 +3087,47 @@ document.addEventListener("change", async (event) => {
   }
 });
 
+document.addEventListener("input", async (event) => {
+  try {
+    if (event.target.matches("[data-history-search]")) {
+      const caret = event.target.selectionStart || 0;
+      state.historySearch = event.target.value;
+      await render();
+      const input = document.getElementById("history-search");
+      input?.focus();
+      input?.setSelectionRange?.(caret, caret);
+    }
+  } catch (error) {
+    toast(error.message || "Something went wrong.");
+  }
+});
+
 document.addEventListener("pointermove", (event) => {
+  if (dragState.active) {
+    dragState.currentY = event.clientY;
+    return;
+  }
   const chart = event.target.closest(".interactive-chart");
   if (chart) updateInteractiveChart(chart, event);
 });
 
 document.addEventListener("pointerdown", (event) => {
+  const handle = event.target.closest("[data-drag-handle]");
+  if (handle) {
+    event.preventDefault();
+    startExerciseDrag(handle, event);
+    return;
+  }
   const chart = event.target.closest(".interactive-chart");
   if (chart) updateInteractiveChart(chart, event);
+});
+
+document.addEventListener("pointerup", async (event) => {
+  try {
+    await finishExerciseDrag(event);
+  } catch (error) {
+    toast(error.message || "Could not reorder exercise.");
+  }
 });
 
 document.addEventListener("submit", async (event) => {
