@@ -3,7 +3,7 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 2;
 const STORES = ["workouts", "metrics", "settings"];
-const APP_VERSION = "1.4.0";
+const APP_VERSION = "1.4.1";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 let dbOpenPromise = null;
 let chartId = 0;
@@ -2318,9 +2318,9 @@ function applyStaggerAnimations() {
   });
 }
 
-async function render() {
+async function render({ animate = false } = {}) {
   const token = ++renderToken;
-  if (els.app.children.length) {
+  if (animate && els.app.children.length) {
     els.app.classList.remove("content-enter");
     els.app.classList.add("content-exit");
     await sleep(100);
@@ -2339,8 +2339,8 @@ async function render() {
   if (state.activeTab === "history") els.app.innerHTML = renderHistory();
   if (state.activeTab === "settings") els.app.innerHTML = await renderSettings();
   if (token !== renderToken) return;
-  els.app.classList.remove("content-exit");
-  els.app.classList.add("content-enter");
+  els.app.classList.remove("content-exit", "content-enter");
+  if (animate) els.app.classList.add("content-enter");
   applyStaggerAnimations();
 }
 
@@ -2973,7 +2973,8 @@ const dragState = {
   id: null,
   startY: 0,
   currentY: 0,
-  active: false
+  active: false,
+  moved: false
 };
 
 function startExerciseDrag(handle, event) {
@@ -2984,6 +2985,7 @@ function startExerciseDrag(handle, event) {
   dragState.startY = event.clientY;
   dragState.currentY = event.clientY;
   dragState.active = true;
+  dragState.moved = false;
   state.draggingDraftId = dragState.id;
   section.classList.add("is-dragging");
   handle.setPointerCapture?.(event.pointerId);
@@ -2992,10 +2994,13 @@ function startExerciseDrag(handle, event) {
 async function finishExerciseDrag(event) {
   if (!dragState.active || !dragState.id) return;
   dragState.currentY = event.clientY;
+  const draggedId = dragState.id;
+  const movedEnough = Math.abs(dragState.currentY - dragState.startY) > 8;
   const sections = [...document.querySelectorAll(".exercise-draft")];
-  const sourceIndex = state.workoutDraft.findIndex((draft) => draft.draftId === dragState.id);
-  if (sourceIndex >= 0 && sections.length > 1 && Math.abs(dragState.currentY - dragState.startY) > 8) {
-    let targetIndex = sections.length - 1;
+  const sourceIndex = state.workoutDraft.findIndex((draft) => draft.draftId === draggedId);
+  let changed = false;
+  if (sourceIndex >= 0 && sections.length > 1 && movedEnough) {
+    let targetIndex = state.workoutDraft.length - 1;
     for (let index = 0; index < sections.length; index += 1) {
       const rect = sections[index].getBoundingClientRect();
       if (dragState.currentY < rect.top + rect.height / 2) {
@@ -3003,14 +3008,22 @@ async function finishExerciseDrag(event) {
         break;
       }
     }
-    const [item] = state.workoutDraft.splice(sourceIndex, 1);
-    state.workoutDraft.splice(Math.min(targetIndex, state.workoutDraft.length), 0, item);
-    syncLegacyDraftFromFirst();
+    const nextDraft = [...state.workoutDraft];
+    const [item] = nextDraft.splice(sourceIndex, 1);
+    const insertIndex = Math.min(targetIndex, nextDraft.length);
+    nextDraft.splice(insertIndex, 0, item);
+    changed = nextDraft.some((draft, index) => draft.draftId !== state.workoutDraft[index]?.draftId);
+    if (changed) {
+      state.workoutDraft = nextDraft;
+      syncLegacyDraftFromFirst();
+    }
   }
   dragState.id = null;
   dragState.active = false;
+  dragState.moved = false;
   state.draggingDraftId = null;
-  await render();
+  document.querySelectorAll(".exercise-draft.is-dragging").forEach((section) => section.classList.remove("is-dragging"));
+  if (changed) await render();
 }
 
 function updateInteractiveChart(chart, event) {
@@ -3044,7 +3057,7 @@ document.addEventListener("click", async (event) => {
   try {
     if (tab) {
       state.activeTab = tab.dataset.tab;
-      await render();
+      await render({ animate: true });
     }
     if (logMode) {
       state.logMode = logMode.dataset.logMode;
@@ -3105,6 +3118,7 @@ document.addEventListener("input", async (event) => {
 document.addEventListener("pointermove", (event) => {
   if (dragState.active) {
     dragState.currentY = event.clientY;
+    if (Math.abs(dragState.currentY - dragState.startY) > 8) dragState.moved = true;
     return;
   }
   const chart = event.target.closest(".interactive-chart");
@@ -3127,6 +3141,18 @@ document.addEventListener("pointerup", async (event) => {
     await finishExerciseDrag(event);
   } catch (error) {
     toast(error.message || "Could not reorder exercise.");
+  }
+});
+
+document.addEventListener("pointercancel", async (event) => {
+  try {
+    await finishExerciseDrag(event);
+  } catch {
+    dragState.id = null;
+    dragState.active = false;
+    dragState.moved = false;
+    state.draggingDraftId = null;
+    document.querySelectorAll(".exercise-draft.is-dragging").forEach((section) => section.classList.remove("is-dragging"));
   }
 });
 
