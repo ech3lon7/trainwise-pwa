@@ -254,6 +254,7 @@ const state = {
   workoutDraft: [],
   historyExercise: "",
   historySearch: "",
+  historyDate: "",
   draggingDraftId: null,
   templateQueue: [],
   draftDate: todayISO(),
@@ -1941,6 +1942,9 @@ function historyExerciseNames() {
 function renderHistoryList() {
   const search = state.historySearch.trim().toLowerCase();
   const exercises = historyExerciseNames().filter((name) => name.toLowerCase().includes(search));
+  const dateWorkouts = state.historyDate
+    ? state.workouts.filter((w) => w.date === state.historyDate).sort((a, b) => String(a.createdAt || "").localeCompare(String(b.createdAt || "")))
+    : [];
   return `
     <section class="hero">
       <div>
@@ -1954,6 +1958,21 @@ function renderHistoryList() {
         <label for="history-search">Search exercises</label>
         <input id="history-search" class="search-input" data-history-search value="${escapeHtml(state.historySearch)}" placeholder="Bench press, row, squat">
       </div>
+      <div class="field-row">
+        <div class="field">
+          <label for="history-date">Browse by date</label>
+          <input id="history-date" type="date" data-history-date value="${escapeHtml(state.historyDate)}">
+        </div>
+        ${state.historyDate ? `<div class="field"><label>&nbsp;</label><button class="ghost-button" type="button" data-action="clear-history-date">Clear date</button></div>` : ""}
+      </div>
+      ${dateWorkouts.length ? `
+        <div class="history-date-results">
+          <h3>${escapeHtml(state.historyDate)} — ${dateWorkouts.length} workout${dateWorkouts.length === 1 ? "" : "s"}</h3>
+          <div class="list">
+            ${dateWorkouts.map((entry) => listWorkout(entry)).join("")}
+          </div>
+        </div>
+      ` : state.historyDate ? `<div class="empty">No workouts logged on ${escapeHtml(state.historyDate)}.</div>` : ""}
     </section>
 
     <section class="section history-exercise-grid">
@@ -2813,6 +2832,11 @@ async function handleAction(action, target) {
     await render();
     return;
   }
+  if (action === "clear-history-date") {
+    state.historyDate = "";
+    await render();
+    return;
+  }
   if (action === "add-exercise-table") {
     readDraftFromForm();
     state.workoutDraft.push(defaultDraftExercise(exerciseNames()[0] || "Push-up"));
@@ -3083,8 +3107,36 @@ document.addEventListener("change", async (event) => {
       syncLegacyDraftFromFirst();
       await render();
     }
+    if (event.target.matches("#workout-date")) {
+      readDraftFromForm();
+      const newDate = event.target.value || todayISO();
+      state.draftDate = newDate;
+      const workoutsForDate = state.workouts.filter((w) => w.date === newDate);
+      if (workoutsForDate.length) {
+        const first = workoutsForDate[0];
+        state.editingWorkoutId = first.id;
+        state.workoutDraft = workoutsForDate.map((entry) => ({
+          draftId: uid(),
+          editingWorkoutId: entry.id,
+          exercise: entry.exercise,
+          targetMuscle: entry.primaryMuscles?.[0] || "chest",
+          notes: entry.notes || "",
+          setRows: setRowsFromWorkout(entry)
+        }));
+        syncLegacyDraftFromFirst();
+      } else {
+        state.editingWorkoutId = null;
+        state.workoutDraft = ensureWorkoutDraft().map((d) => ({ ...d, editingWorkoutId: null }));
+        syncLegacyDraftFromFirst();
+      }
+      await render();
+    }
     if (event.target.matches("#trend-exercise")) {
       state.selectedExercise = event.target.value;
+      await render();
+    }
+    if (event.target.matches("#history-date")) {
+      state.historyDate = event.target.value || "";
       await render();
     }
     if (event.target.matches("#trend-muscle")) {
@@ -3154,6 +3206,40 @@ document.addEventListener("pointercancel", async (event) => {
     state.draggingDraftId = null;
     document.querySelectorAll(".exercise-draft.is-dragging").forEach((section) => section.classList.remove("is-dragging"));
   }
+});
+
+document.addEventListener("touchstart", (event) => {
+  const handle = event.target.closest("[data-drag-handle]");
+  if (handle) {
+    event.preventDefault();
+    const touch = event.touches[0];
+    startExerciseDrag(handle, { clientY: touch.clientY, pointerId: touch.identifier });
+  }
+}, { passive: false });
+
+document.addEventListener("touchmove", (event) => {
+  if (dragState.active) {
+    event.preventDefault();
+    const touch = event.touches[0];
+    dragState.currentY = touch.clientY;
+    if (Math.abs(dragState.currentY - dragState.startY) > 8) dragState.moved = true;
+  }
+}, { passive: false });
+
+document.addEventListener("touchend", async (event) => {
+  try {
+    await finishExerciseDrag({ clientY: dragState.currentY });
+  } catch (error) {
+    toast(error.message || "Could not reorder exercise.");
+  }
+});
+
+document.addEventListener("touchcancel", () => {
+  dragState.id = null;
+  dragState.active = false;
+  dragState.moved = false;
+  state.draggingDraftId = null;
+  document.querySelectorAll(".exercise-draft.is-dragging").forEach((section) => section.classList.remove("is-dragging"));
 });
 
 document.addEventListener("submit", async (event) => {

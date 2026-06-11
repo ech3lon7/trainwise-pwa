@@ -861,8 +861,8 @@ textarea {
 .exercise-table-top {
   display: grid;
   grid-template-columns: 1fr auto;
-  gap: 12px;
-  align-items: start;
+  gap: 10px;
+  align-items: center;
   min-width: 0;
 }
 
@@ -900,8 +900,8 @@ textarea {
 .icon-button {
   display: grid;
   place-items: center;
-  width: 42px;
-  height: 42px;
+  width: 44px;
+  height: 44px;
   border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: 8px;
   background: rgba(255, 255, 255, 0.04);
@@ -1225,6 +1225,15 @@ textarea {
 
 .search-input {
   min-height: 48px;
+}
+
+.history-date-results {
+  margin-top: 10px;
+}
+
+.history-date-results h3 {
+  font-size: 14px;
+  margin-bottom: 8px;
 }
 
 .history-exercise-grid {
