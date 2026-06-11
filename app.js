@@ -560,10 +560,20 @@ function getCustomExercises() {
     .sort((a, b) => a.name.localeCompare(b.name));
 }
 
+function getHiddenExercises() {
+  return Array.isArray(state.settings.hiddenExercises) ? state.settings.hiddenExercises : [];
+}
+
+function isExerciseHidden(exerciseId) {
+  return getHiddenExercises().includes(exerciseId);
+}
+
 function exerciseDatabase() {
+  const hidden = new Set(getHiddenExercises());
   const seen = new Set();
   return [...getCustomExercises(), ...exerciseLibrary]
     .filter((exercise) => {
+      if (hidden.has(exercise.id)) return false;
       const key = normalizeName(exercise.name);
       if (!key || seen.has(key)) return false;
       seen.add(key);
@@ -1643,22 +1653,24 @@ function exerciseMuscleBadges(exercise) {
   return `<div class="badge-row">${primary}${secondary}</div>`;
 }
 
-function exerciseCard(exercise, editable = false) {
+function exerciseCard(exercise, editable = false, hidden = false) {
   return `
-    <div class="exercise-definition ${editable ? "custom" : ""}">
+    <div class="exercise-definition ${editable ? "custom" : ""} ${hidden ? "removed-exercise" : ""}">
       <div>
         <div class="exercise-definition-title">
           <strong>${escapeHtml(exercise.name)}</strong>
-          <span>${editable ? "Yours" : "Starter"}</span>
+          <span>${editable ? "Yours" : hidden ? "Removed" : "Starter"}</span>
         </div>
         ${exerciseMuscleBadges(exercise)}
         <p class="muted small">${escapeHtml(exercise.equipment || "custom")} - ${escapeHtml(exercise.reps || "8-15")} reps - ${escapeHtml(exercise.rest || "60-120 sec")}</p>
         <p class="muted micro">${escapeHtml(exercise.cue || "Keep form strict and progress gradually.")}</p>
       </div>
       <div class="row-actions">
-        <button class="ghost-mini" type="button" data-action="log-exercise" data-exercise="${escapeHtml(exercise.name)}">Log</button>
+        ${!hidden ? `<button class="ghost-mini" type="button" data-action="log-exercise" data-exercise="${escapeHtml(exercise.name)}">Log</button>` : ""}
         ${editable ? `<button class="ghost-mini" type="button" data-action="edit-exercise" data-id="${escapeHtml(exercise.id)}">Edit</button>` : ""}
         ${editable ? `<button class="delete-small" type="button" aria-label="Delete exercise" data-action="delete-exercise" data-id="${escapeHtml(exercise.id)}">x</button>` : ""}
+        ${!editable && !hidden ? `<button class="ghost-mini" type="button" data-action="hide-exercise" data-id="${escapeHtml(exercise.id)}">Remove</button>` : ""}
+        ${hidden ? `<button class="ghost-mini" type="button" data-action="unhide-exercise" data-id="${escapeHtml(exercise.id)}">Unhide</button>` : ""}
       </div>
     </div>
   `;
@@ -1671,7 +1683,8 @@ function renderExercises() {
   const primaryOptions = muscleGroups.map((muscle) => `
     <option value="${muscle.id}" ${primary === muscle.id ? "selected" : ""}>${escapeHtml(muscle.label)}</option>
   `).join("");
-  const builtInPreview = exerciseLibrary.slice(0, 12);
+  const builtInPreview = exerciseLibrary.filter((exercise) => !isExerciseHidden(exercise.id)).slice(0, 12);
+  const hiddenExercises = exerciseLibrary.filter((exercise) => isExerciseHidden(exercise.id));
 
   return `
     <section class="hero">
@@ -1741,6 +1754,15 @@ function renderExercises() {
       <div class="exercise-list">
         ${builtInPreview.map((exercise) => exerciseCard(exercise, false)).join("")}
       </div>
+      ${hiddenExercises.length ? `
+        <div class="chart-header" style="margin-top: 14px;">
+          <h3>Removed exercises</h3>
+          <span class="muted small">${hiddenExercises.length} removed</span>
+        </div>
+        <div class="exercise-list">
+          ${hiddenExercises.map((exercise) => exerciseCard(exercise, false, true)).join("")}
+        </div>
+      ` : ""}
     </section>
   `;
 }
@@ -2887,6 +2909,25 @@ async function handleAction(action, target) {
     if (state.editingExerciseId === exercise.id) state.editingExerciseId = null;
     await render();
     toast("Exercise deleted.");
+    return;
+  }
+  if (action === "hide-exercise") {
+    const exercise = exerciseLibrary.find((item) => item.id === target.dataset.id);
+    if (!exercise) throw new Error("Exercise not found.");
+    const hidden = getHiddenExercises();
+    if (!hidden.includes(exercise.id)) {
+      await saveSetting("hiddenExercises", [...hidden, exercise.id]);
+    }
+    await render();
+    toast(`"${exercise.name}" removed from library.`);
+    return;
+  }
+  if (action === "unhide-exercise") {
+    const hidden = getHiddenExercises();
+    const id = target.dataset.id;
+    await saveSetting("hiddenExercises", hidden.filter((itemId) => itemId !== id));
+    await render();
+    toast("Exercise restored to library.");
     return;
   }
   if (action === "log-exercise") {
