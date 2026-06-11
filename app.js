@@ -1879,7 +1879,7 @@ function renderLog() {
           <div class="log-top-actions">
             <button class="ghost-button" type="button" data-action="toggle-template-panel">Templates</button>
             <button class="ghost-button" type="button" data-action="add-exercise-table">Add exercise</button>
-            ${draft.some((item) => item.editingWorkoutId) ? `<button class="ghost-button" type="button" data-action="new-log">New log</button>` : ""}
+            ${draft.some((item) => item.editingWorkoutId) ? `<button class="ghost-button" type="button" data-action="new-log">Clear all logged info</button>` : ""}
           </div>
 
           ${state.showTemplatePanel ? `
@@ -2976,6 +2976,7 @@ async function handleAction(action, target) {
     await render();
   }
   if (action === "new-log") {
+    if (!confirm("Clear all logged info? This will discard your current draft.")) return;
     readDraftFromForm();
     clearWorkoutDraft();
     await render();
