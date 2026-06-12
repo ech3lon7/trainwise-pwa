@@ -855,7 +855,59 @@ textarea {
 .exercise-draft.is-dragging {
   border-color: rgba(155, 140, 255, 0.5);
   box-shadow: 0 18px 48px rgba(155, 140, 255, 0.16);
-  opacity: 0.82;
+  opacity: 0.9;
+  transform: scale(1.02);
+  z-index: 10;
+}
+
+.reorder-arrows {
+  display: flex;
+  gap: 4px;
+  margin-left: auto;
+}
+
+.reorder-arrows button {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.reorder-arrows button:hover:not(:disabled) {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.reorder-arrows button:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+
+.add-exercise-bottom {
+  display: flex;
+  justify-content: center;
+  padding: 10px 0 4px;
+}
+
+.add-exercise-bottom img {
+  width: 40px;
+  height: 40px;
+  cursor: pointer;
+  transition: transform 0.15s ease, opacity 0.15s ease;
+}
+
+.add-exercise-bottom img:hover {
+  opacity: 0.8;
+}
+
+.add-exercise-bottom img:active {
+  transform: scale(0.9);
 }
 
 .exercise-table-top {
@@ -1536,5 +1588,29 @@ textarea {
 
   .tab {
     font-size: 9px;
+  }
+
+  .set-table {
+    min-width: 0;
+  }
+
+  .set-table th,
+  .set-table td {
+    padding: 5px 3px;
+  }
+
+  .set-table th.set-type-cell,
+  .set-table td.set-type {
+    display: none;
+  }
+
+  .set-table input {
+    min-width: 52px;
+    font-size: 16px;
+    padding: 6px 4px;
+  }
+
+  .set-table input[data-set-field="rest"] {
+    min-width: 48px;
   }
 }
