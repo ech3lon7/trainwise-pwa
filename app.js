@@ -3,7 +3,7 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 2;
 const STORES = ["workouts", "metrics", "settings"];
-const APP_VERSION = "1.4.4";
+const APP_VERSION = "1.4.5";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 let dbOpenPromise = null;
 let chartId = 0;
@@ -889,32 +889,171 @@ function estimateExerciseMinutes(exercise, sets) {
   return Math.ceil(3 + sets * perSetMinutes);
 }
 
-function buildSessionPlan(limitMinutes = SESSION_LIMIT_MINUTES) {
+function lastWorkoutForMuscle(muscleId) {
+  return state.workouts.find((workout) => muscleCreditFactor(workout, muscleId) > 0) || null;
+}
+
+function muscleReadiness(stat) {
+  const lastWorkout = lastWorkoutForMuscle(stat.id);
+  const daysSince = lastWorkout ? daysBetween(lastWorkout.date, todayISO()) : null;
+  let readiness = "ready";
+  let reason = lastWorkout ? `Last trained ${daysSince} day${daysSince === 1 ? "" : "s"} ago.` : "No recent work logged.";
+  if (daysSince !== null && daysSince <= 1) {
+    readiness = "recent";
+    reason = `Trained ${daysSince === 0 ? "today" : "yesterday"}, so it can wait if another gap is useful.`;
+  } else if (stat.sessions < 2 && stat.sets >= 5) {
+    readiness = "needs-touch";
+    reason = `${stat.sessions}/2 weekly touches; a second exposure would help.`;
+  } else if (stat.sets > HYPERTROPHY.growthHigh) {
+    readiness = "high";
+    reason = `Above ${HYPERTROPHY.growthHigh} weekly sets; watch recovery.`;
+  }
+  return { ...stat, lastWorkout, daysSince, readiness, readinessReason: reason };
+}
+
+function rankedCoachMuscles() {
+  return muscleSetStats()
+    .map(muscleReadiness)
+    .sort((a, b) => {
+      const aRecentlyTrained = a.daysSince !== null && a.daysSince <= 1;
+      const bRecentlyTrained = b.daysSince !== null && b.daysSince <= 1;
+      return (aRecentlyTrained - bRecentlyTrained)
+        || (b.deficit - a.deficit)
+        || (a.sessions - b.sessions)
+        || (a.sets - b.sets);
+    });
+}
+
+function planPriorityReason(item) {
+  const parts = [
+    `${item.muscle.label} is ${fmt(item.muscle.sets, 1)}/${HYPERTROPHY.minimumSets} hard sets`,
+    `${item.muscle.sessions}/2 touches`
+  ];
+  if (item.muscle.daysSince !== null) parts.push(`last hit ${item.muscle.daysSince}d ago`);
+  return parts.join(" - ");
+}
+
+function buildSessionPlan(limitMinutes = SESSION_LIMIT_MINUTES, options = {}) {
+  const restart = options.restart || false;
+  const maxItems = restart ? 3 : 4;
   const stats = muscleSetStats()
+    .map(muscleReadiness)
     .filter((stat) => stat.sets < HYPERTROPHY.minimumSets)
-    .sort((a, b) => a.sets - b.sets);
+    .sort((a, b) => {
+      const aRecentlyTrained = a.daysSince !== null && a.daysSince <= 1;
+      const bRecentlyTrained = b.daysSince !== null && b.daysSince <= 1;
+      return (aRecentlyTrained - bRecentlyTrained)
+        || (b.deficit - a.deficit)
+        || (a.sessions - b.sessions)
+        || (a.sets - b.sets);
+    });
   const items = [];
   const missing = [];
+  const deprioritized = [];
   let totalMinutes = 0;
   const usedExercises = new Set();
 
   for (const target of stats) {
+    const hasAlternative = stats.some((stat) => stat.id !== target.id && stat.deficit > 0 && !(stat.daysSince !== null && stat.daysSince <= 1));
+    if (target.daysSince !== null && target.daysSince <= 1 && hasAlternative) {
+      deprioritized.push({ muscle: target, reason: `${target.label} was trained ${target.daysSince === 0 ? "today" : "yesterday"}.` });
+      continue;
+    }
     const exercise = chooseExerciseForMuscle(target.id);
     if (!exercise) {
       missing.push(target);
       continue;
     }
     if (usedExercises.has(exercise.id)) continue;
-    const sets = Math.min(3, Math.max(2, Math.ceil(target.deficit)));
+    const sets = restart ? 2 : Math.min(3, Math.max(2, Math.ceil(target.deficit)));
     const minutes = estimateExerciseMinutes(exercise, sets);
     if (items.length && totalMinutes + minutes > limitMinutes) continue;
-    items.push({ muscle: target, exercise, sets, minutes });
+    items.push({ muscle: target, exercise, sets, minutes, reason: "" });
     usedExercises.add(exercise.id);
     totalMinutes += minutes;
-    if (totalMinutes >= limitMinutes - 8) break;
+    if (items.length >= maxItems || totalMinutes >= limitMinutes - 8) break;
   }
 
-  return { items, missing, totalMinutes, limitMinutes };
+  return {
+    items: items.map((item) => ({ ...item, reason: planPriorityReason(item) })),
+    missing,
+    deprioritized,
+    totalMinutes,
+    limitMinutes,
+    restart
+  };
+}
+
+function buildTodayPlan() {
+  const lastWorkout = state.workouts[0] || null;
+  const daysSinceWorkout = lastWorkout ? daysBetween(lastWorkout.date, todayISO()) : null;
+  const restart = daysSinceWorkout === null || daysSinceWorkout >= 4;
+  const ranked = rankedCoachMuscles();
+  const sessionPlan = buildSessionPlan(restart ? 45 : SESSION_LIMIT_MINUTES, { restart });
+  const proteinAvg = getAverage("protein", 7);
+  const protein = proteinTargets();
+  const highVolume = ranked.filter((stat) => stat.sets > HYPERTROPHY.growthHigh);
+  const belowMinimum = ranked.filter((stat) => stat.sets < HYPERTROPHY.minimumSets);
+  const progression = progressionTargetForExercise(state.selectedExercise) || progressionTargetForExercise(state.workouts[0]?.exercise);
+  const why = [];
+  const notes = [];
+
+  if (restart) {
+    why.push(daysSinceWorkout === null
+      ? "No lifting baseline yet, so the plan starts with a small session."
+      : `${daysSinceWorkout} days since your last lift, so volume is capped for a restart.`);
+  }
+  if (sessionPlan.items.length) {
+    why.push(...sessionPlan.items.slice(0, 3).map((item) => item.reason));
+  }
+  if (sessionPlan.deprioritized.length) {
+    why.push(...sessionPlan.deprioritized.slice(0, 2).map((item) => `${item.reason} Coach picked another gap first.`));
+  }
+  if (sessionPlan.missing.length) {
+    why.push(`Add a primary exercise for ${sessionPlan.missing.map((muscle) => muscle.label).join(", ")} to unlock better plans.`);
+  }
+  if (protein.bodyWeightLb && proteinAvg && proteinAvg < protein.floor) {
+    notes.push(`Protein is under target: ${fmt(proteinAvg)}g avg vs ${fmt(protein.floor)}g floor.`);
+  } else if (!protein.bodyWeightLb || !proteinAvg) {
+    notes.push("Log body weight and protein for nutrition-aware coaching.");
+  }
+  if (highVolume.length) {
+    notes.push(`${highVolume.map((stat) => stat.label).join(", ")} are above the growth zone; hold volume if performance dips.`);
+  }
+
+  if (sessionPlan.items.length) {
+    return {
+      mode: restart ? "restart" : "session",
+      title: restart ? "Restart session" : "Today Plan",
+      subtitle: restart ? "Small, useful work without chasing every missed set." : "Best gaps to train next, capped for the session.",
+      sessionPlan,
+      why,
+      notes,
+      progression
+    };
+  }
+
+  if (belowMinimum.length && sessionPlan.missing.length) {
+    return {
+      mode: "library-gap",
+      title: "Add exercise coverage",
+      subtitle: "Coach needs more movement options before it can build a full plan.",
+      sessionPlan,
+      why,
+      notes,
+      progression
+    };
+  }
+
+  return {
+    mode: progression ? "progression" : "recovery",
+    title: progression ? "Progression focus" : "Recovery or maintenance",
+    subtitle: progression ? progression.body : "Minimums are covered. Progress slowly or recover if joints feel beat up.",
+    sessionPlan,
+    why: why.length ? why : ["Weekly minimums are covered, so Coach is not forcing extra volume."],
+    notes,
+    progression
+  };
 }
 
 function nextHypertrophyAction() {
@@ -2249,10 +2388,77 @@ function renderTrends() {
   `;
 }
 
+function renderTodayPlan(plan) {
+  const items = plan.sessionPlan.items;
+  const muscles = [...new Set(items.map((item) => item.muscle.label))];
+  return `
+    <section class="section card coach-action featured-action today-plan-card">
+      <span class="badge">${escapeHtml(plan.mode === "restart" ? "Restart plan" : plan.mode === "progression" ? "Progression" : plan.mode === "library-gap" ? "Library gap" : "Today plan")}</span>
+      <div class="today-plan-header">
+        <div>
+          <h3>${escapeHtml(plan.title)}</h3>
+          <p>${escapeHtml(plan.subtitle)}</p>
+        </div>
+        <span class="today-plan-time"><strong>${plan.sessionPlan.totalMinutes || "--"}</strong><small>min</small></span>
+      </div>
+      ${items.length ? `
+        <div class="today-plan-list">
+          ${items.map((item) => `
+            <div class="today-plan-item">
+              <div>
+                <strong>${escapeHtml(item.exercise.name)}</strong>
+                <span>${escapeHtml(item.muscle.label)} - ${escapeHtml(item.exercise.reps)} reps - ${HYPERTROPHY.idealRirMin}-${HYPERTROPHY.idealRirMax} RIR</span>
+              </div>
+              <span class="today-plan-dose">${item.sets} sets</span>
+            </div>
+          `).join("")}
+        </div>
+        <div class="action-grid today-plan-summary">
+          <span><strong>${items.length}</strong> lifts</span>
+          <span><strong>${items.reduce((sum, item) => sum + item.sets, 0)}</strong> sets</span>
+          <span><strong>${escapeHtml(muscles.join(", ") || "--")}</strong> muscles</span>
+          <span><strong>${plan.sessionPlan.totalMinutes}</strong> min</span>
+        </div>
+      ` : plan.mode === "progression" && plan.progression ? `
+        <div class="action-grid today-plan-summary">
+          <span><strong>${escapeHtml(plan.progression.target)}</strong> target</span>
+          <span><strong>${escapeHtml(plan.progression.indicator.symbol)}</strong> trend</span>
+          <span><strong>${escapeHtml(plan.progression.exercise)}</strong> lift</span>
+          <span><strong>${HYPERTROPHY.idealRirMin}-${HYPERTROPHY.idealRirMax}</strong> RIR</span>
+        </div>
+      ` : `
+        <div class="empty compact-empty">${escapeHtml(plan.subtitle)}</div>
+      `}
+      ${plan.sessionPlan.missing.length ? `
+        <div class="session-plan-gap">
+          Missing primary exercise: ${escapeHtml(plan.sessionPlan.missing.map((muscle) => muscle.label).join(", "))}.
+        </div>
+      ` : ""}
+    </section>
+  `;
+}
+
+function renderCoachWhy(plan) {
+  const items = [
+    ...plan.why,
+    ...plan.notes
+  ].filter(Boolean).slice(0, 6);
+  return `
+    <section class="section card coach-why-card">
+      <div class="chart-header"><h3>Why this?</h3><span class="muted small">readiness + gaps</span></div>
+      ${items.length ? `
+        <div class="coach-why-list">
+          ${items.map((item) => `<span>${escapeHtml(item)}</span>`).join("")}
+        </div>
+      ` : `<div class="empty compact-empty">No priority issues right now.</div>`}
+    </section>
+  `;
+}
+
 function renderCoach() {
   const recs = recommendations();
-  const action = recs[0]?.action;
-  const sessionPlan = action?.sessionPlan || buildSessionPlan();
+  const todayPlan = buildTodayPlan();
+  const sessionPlan = todayPlan.sessionPlan;
   return `
     <section class="hero">
       <div>
@@ -2260,29 +2466,8 @@ function renderCoach() {
         <p class="hero-copy">Minimum-first coaching: 10 hard sets per muscle, 2 weekly touches, 1-3 RIR, enough protein, and gradual overload.</p>
       </div>
     </section>
-    ${action ? `
-      <section class="section card coach-action featured-action">
-        <span class="badge">${action.mode === "progression" ? "Progression target" : action.exercise ? "Recommended now" : "Library gap"}</span>
-        <h3>${escapeHtml(action.exercise?.name || action.title)}</h3>
-        <p>${escapeHtml(action.body)}</p>
-        ${action.exercise && action.mode !== "progression" ? `
-          <div class="action-grid">
-            <span><strong>${action.sets}</strong> sets</span>
-            <span><strong>${escapeHtml(action.exercise.reps)}</strong> reps</span>
-            <span><strong>${HYPERTROPHY.idealRirMin}-${HYPERTROPHY.idealRirMax}</strong> RIR</span>
-            <span><strong>${action.minutes}</strong> min</span>
-          </div>
-          <p class="muted small">${escapeHtml(action.exercise.cue)}</p>
-        ` : action.mode === "progression" ? `
-          <div class="action-grid">
-            <span><strong>${escapeHtml(action.progression?.target || "--")}</strong> target</span>
-            <span><strong>${escapeHtml(action.progression?.indicator?.symbol || "=")}</strong> trend</span>
-            <span><strong>${escapeHtml(action.exercise?.reps || "8-15")}</strong> range</span>
-            <span><strong>${HYPERTROPHY.idealRirMin}-${HYPERTROPHY.idealRirMax}</strong> RIR</span>
-          </div>
-        ` : `<p class="muted small">Recommendations only use movements saved in Exercises or the starter library.</p>`}
-      </section>
-    ` : ""}
+    ${renderTodayPlan(todayPlan)}
+    ${renderCoachWhy(todayPlan)}
     <section class="section card">
       <div class="chart-header"><h3>Under 1 hour plan</h3><span class="muted small">${sessionPlan.totalMinutes}/${SESSION_LIMIT_MINUTES} min estimate</span></div>
       <div class="session-plan-list">
@@ -2304,6 +2489,7 @@ function renderCoach() {
       ${muscleProgressMarkup(muscleSetStats())}
     </section>
     <section class="section grid">
+      <div class="chart-header coach-notes-header"><h3>Coach notes</h3><span class="muted small">secondary checks</span></div>
       ${recs.map((rec) => `<div class="coach-card ${rec.tone}"><strong>${escapeHtml(rec.title)}</strong><p>${escapeHtml(rec.body)}</p></div>`).join("")}
     </section>
   `;

@@ -574,6 +574,107 @@ textarea {
   border-color: rgba(53, 213, 140, 0.22);
 }
 
+.today-plan-card {
+  display: grid;
+  gap: 12px;
+}
+
+.today-plan-header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: start;
+}
+
+.today-plan-header h3 {
+  margin-top: 8px;
+}
+
+.today-plan-time {
+  display: grid;
+  place-items: center;
+  min-width: 62px;
+  min-height: 62px;
+  padding: 8px;
+  border-radius: 8px;
+  background: rgba(53, 213, 140, 0.12);
+  color: var(--green);
+  text-align: center;
+}
+
+.today-plan-time strong {
+  color: var(--text);
+  font-size: 20px;
+  line-height: 1;
+}
+
+.today-plan-time small {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.today-plan-list,
+.coach-why-list {
+  display: grid;
+  gap: 8px;
+}
+
+.today-plan-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  min-height: 58px;
+  padding: 10px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.045);
+}
+
+.today-plan-item span,
+.coach-why-list span {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.today-plan-dose {
+  display: grid;
+  place-items: center;
+  min-width: 58px;
+  min-height: 40px;
+  padding: 0 8px;
+  border-radius: 8px;
+  background: rgba(155, 140, 255, 0.14);
+  color: #c7bfff !important;
+  font-weight: 900;
+  white-space: nowrap;
+}
+
+.today-plan-summary span {
+  overflow-wrap: anywhere;
+}
+
+.coach-why-card {
+  border-color: rgba(155, 140, 255, 0.18);
+}
+
+.coach-why-list span {
+  display: block;
+  padding: 10px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.045);
+}
+
+.coach-notes-header {
+  grid-column: 1 / -1;
+  margin-bottom: 0;
+}
+
+.compact-empty {
+  min-height: 76px;
+}
+
 .badge {
   display: inline-flex;
   align-items: center;
