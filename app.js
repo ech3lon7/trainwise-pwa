@@ -3,13 +3,20 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 2;
 const STORES = ["workouts", "metrics", "settings"];
-const APP_VERSION = "1.4.5";
+const APP_VERSION = "1.4.6";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 let dbOpenPromise = null;
 let chartId = 0;
 let reloadingForUpdate = false;
 let renderToken = 0;
 const SESSION_LIMIT_MINUTES = 60;
+const COACH_TIMEFRAME_OPTIONS = [
+  { label: "30 min", minutes: 30 },
+  { label: "40 min", minutes: 40 },
+  { label: "50 min", minutes: 50 },
+  { label: "1 hour", minutes: 60 },
+  { label: "1 hour+", minutes: 75 }
+];
 
 const HYPERTROPHY = {
   minimumSets: 10,
@@ -256,6 +263,7 @@ const state = {
   historyExercise: "",
   historySearch: "",
   historyDate: "",
+  coachTimeframeMinutes: SESSION_LIMIT_MINUTES,
   draggingDraftId: null,
   templateQueue: [],
   draftDate: todayISO(),
@@ -933,6 +941,19 @@ function planPriorityReason(item) {
   return parts.join(" - ");
 }
 
+function selectedCoachTimeframeMinutes() {
+  const selected = Number(state.coachTimeframeMinutes) || SESSION_LIMIT_MINUTES;
+  return COACH_TIMEFRAME_OPTIONS.some((option) => option.minutes === selected) ? selected : SESSION_LIMIT_MINUTES;
+}
+
+function coachTimeframeLabel(minutes = selectedCoachTimeframeMinutes()) {
+  return COACH_TIMEFRAME_OPTIONS.find((option) => option.minutes === minutes)?.label || "1 hour";
+}
+
+function coachTimeframeHeading(minutes = selectedCoachTimeframeMinutes()) {
+  return minutes > SESSION_LIMIT_MINUTES ? "Up to 1 hour+ plan" : `Up to ${coachTimeframeLabel(minutes)} plan`;
+}
+
 function buildSessionPlan(limitMinutes = SESSION_LIMIT_MINUTES, options = {}) {
   const restart = options.restart || false;
   const maxItems = restart ? 3 : 4;
@@ -984,12 +1005,12 @@ function buildSessionPlan(limitMinutes = SESSION_LIMIT_MINUTES, options = {}) {
   };
 }
 
-function buildTodayPlan() {
+function buildTodayPlan(limitMinutes = selectedCoachTimeframeMinutes()) {
   const lastWorkout = state.workouts[0] || null;
   const daysSinceWorkout = lastWorkout ? daysBetween(lastWorkout.date, todayISO()) : null;
   const restart = daysSinceWorkout === null || daysSinceWorkout >= 4;
   const ranked = rankedCoachMuscles();
-  const sessionPlan = buildSessionPlan(restart ? 45 : SESSION_LIMIT_MINUTES, { restart });
+  const sessionPlan = buildSessionPlan(limitMinutes, { restart });
   const proteinAvg = getAverage("protein", 7);
   const protein = proteinTargets();
   const highVolume = ranked.filter((stat) => stat.sets > HYPERTROPHY.growthHigh);
@@ -1025,7 +1046,7 @@ function buildTodayPlan() {
     return {
       mode: restart ? "restart" : "session",
       title: restart ? "Restart session" : "Today Plan",
-      subtitle: restart ? "Small, useful work without chasing every missed set." : "Best gaps to train next, capped for the session.",
+      subtitle: restart ? `Small, useful work capped at ${coachTimeframeLabel(limitMinutes)}.` : `Best gaps to train next, capped at ${coachTimeframeLabel(limitMinutes)}.`,
       sessionPlan,
       why,
       notes,
@@ -1058,7 +1079,7 @@ function buildTodayPlan() {
 
 function nextHypertrophyAction() {
   const stats = muscleSetStats();
-  const sessionPlan = buildSessionPlan();
+  const sessionPlan = buildSessionPlan(selectedCoachTimeframeMinutes());
   const underMinimum = stats
     .filter((stat) => stat.sets < HYPERTROPHY.minimumSets)
     .sort((a, b) => a.sets - b.sets || muscleGroups.findIndex((muscle) => muscle.id === a.id) - muscleGroups.findIndex((muscle) => muscle.id === b.id));
@@ -2438,6 +2459,22 @@ function renderTodayPlan(plan) {
   `;
 }
 
+function renderCoachTimeframeSelector() {
+  const selected = selectedCoachTimeframeMinutes();
+  return `
+    <section class="section card coach-timeframe-card">
+      <div class="chart-header"><h3>Workout time</h3><span class="muted small">${escapeHtml(coachTimeframeHeading(selected))}</span></div>
+      <div class="coach-timeframe-options" aria-label="Workout timeframe">
+        ${COACH_TIMEFRAME_OPTIONS.map((option) => `
+          <button class="timeframe-chip ${option.minutes === selected ? "is-active" : ""}" type="button" data-action="coach-timeframe" data-coach-minutes="${option.minutes}" aria-pressed="${option.minutes === selected}">
+            ${escapeHtml(option.label)}
+          </button>
+        `).join("")}
+      </div>
+    </section>
+  `;
+}
+
 function renderCoachWhy(plan) {
   const items = [
     ...plan.why,
@@ -2457,7 +2494,8 @@ function renderCoachWhy(plan) {
 
 function renderCoach() {
   const recs = recommendations();
-  const todayPlan = buildTodayPlan();
+  const timeframeMinutes = selectedCoachTimeframeMinutes();
+  const todayPlan = buildTodayPlan(timeframeMinutes);
   const sessionPlan = todayPlan.sessionPlan;
   return `
     <section class="hero">
@@ -2466,10 +2504,11 @@ function renderCoach() {
         <p class="hero-copy">Minimum-first coaching: 10 hard sets per muscle, 2 weekly touches, 1-3 RIR, enough protein, and gradual overload.</p>
       </div>
     </section>
+    ${renderCoachTimeframeSelector()}
     ${renderTodayPlan(todayPlan)}
     ${renderCoachWhy(todayPlan)}
     <section class="section card">
-      <div class="chart-header"><h3>Under 1 hour plan</h3><span class="muted small">${sessionPlan.totalMinutes}/${SESSION_LIMIT_MINUTES} min estimate</span></div>
+      <div class="chart-header"><h3>${escapeHtml(coachTimeframeHeading(timeframeMinutes))}</h3><span class="muted small">${sessionPlan.totalMinutes}/${timeframeMinutes} min estimate</span></div>
       <div class="session-plan-list">
         ${sessionPlan.items.length ? sessionPlan.items.map((item) => `
           <div class="session-plan-item">
@@ -3128,6 +3167,14 @@ async function handleAction(action, target) {
   }
   if (action === "clear-history-date") {
     state.historyDate = "";
+    await render();
+    return;
+  }
+  if (action === "coach-timeframe") {
+    const minutes = Number(target.dataset.coachMinutes);
+    state.coachTimeframeMinutes = COACH_TIMEFRAME_OPTIONS.some((option) => option.minutes === minutes)
+      ? minutes
+      : SESSION_LIMIT_MINUTES;
     await render();
     return;
   }

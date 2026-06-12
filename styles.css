@@ -671,6 +671,45 @@ textarea {
   margin-bottom: 0;
 }
 
+.coach-timeframe-card {
+  display: grid;
+  gap: 10px;
+}
+
+.coach-timeframe-options {
+  display: flex;
+  gap: 8px;
+  width: 100%;
+  max-width: 100%;
+  overflow-x: auto;
+  padding-bottom: 2px;
+  scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
+}
+
+.coach-timeframe-options::-webkit-scrollbar {
+  display: none;
+}
+
+.timeframe-chip {
+  flex: 0 0 auto;
+  min-width: 72px;
+  min-height: 44px;
+  padding: 0 12px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--muted);
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.timeframe-chip.is-active {
+  border-color: rgba(53, 213, 140, 0.45);
+  background: rgba(53, 213, 140, 0.16);
+  color: var(--green);
+}
+
 .compact-empty {
   min-height: 76px;
 }
