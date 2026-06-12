@@ -20,7 +20,8 @@ const ASSETS = [
   "./assets/muscles/quads.png?v=1.4.1",
   "./assets/muscles/shoulders.png?v=1.4.1",
   "./assets/muscles/triceps.png?v=1.4.1",
-  "./assets/dumbbell.png?v=1.4.1"
+  "./assets/dumbbell.png?v=1.4.1",
+  "./assets/dumbbell.svg?v=1.4.1"
 ];
 
 self.addEventListener("install", (event) => {

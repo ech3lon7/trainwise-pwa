@@ -1860,18 +1860,12 @@ function exerciseDraftTable(draft, index, total) {
       <div class="log-actions exercise-table-actions">
         <button class="round-add" type="button" aria-label="Add set" data-action="add-set" data-draft-id="${escapeHtml(draft.draftId)}">+</button>
         <button class="ghost-button" type="button" data-action="remove-exercise-table" data-draft-id="${escapeHtml(draft.draftId)}" ${total <= 1 ? "disabled" : ""}>Remove</button>
+        ${index === total - 1 ? `<button class="add-exercise-icon-btn" type="button" data-action="add-exercise-table" aria-label="Add exercise"><img src="./assets/dumbbell.svg" alt="" width="36" height="36"></button>` : ""}
         <div class="reorder-arrows">
           <button type="button" aria-label="Move up" data-action="move-exercise-up" data-draft-id="${escapeHtml(draft.draftId)}" ${index === 0 ? "disabled" : ""}>&#9650;</button>
           <button type="button" aria-label="Move down" data-action="move-exercise-down" data-draft-id="${escapeHtml(draft.draftId)}" ${index === total - 1 ? "disabled" : ""}>&#9660;</button>
         </div>
       </div>
-      ${index === total - 1 ? `
-        <div class="add-exercise-bottom">
-          <button type="button" data-action="add-exercise-table" aria-label="Add exercise">
-            <img src="./assets/dumbbell.png" alt="" width="40" height="40">
-          </button>
-        </div>
-      ` : ""}
     </section>
   `;
 }
@@ -2109,6 +2103,8 @@ function renderHistoryDetail(exerciseName) {
     </section>
   `;
 }
+
+function renderHistory() {
   if (state.historyExercise) return renderHistoryDetail(state.historyExercise);
   return renderHistoryList();
 }

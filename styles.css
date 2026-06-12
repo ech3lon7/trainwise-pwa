@@ -22,6 +22,7 @@ html,
 body {
   margin: 0;
   min-height: 100%;
+  overflow-x: hidden;
   background: var(--bg);
   color: var(--text);
 }
@@ -66,6 +67,7 @@ button {
 .app-shell {
   min-height: 100svh;
   padding: max(14px, env(safe-area-inset-top)) 14px calc(88px + env(safe-area-inset-bottom));
+  overflow-x: hidden;
   background:
     radial-gradient(circle at 16% -10%, rgba(53, 213, 140, 0.28), transparent 29%),
     radial-gradient(circle at 110% 18%, rgba(255, 107, 95, 0.23), transparent 28%),
@@ -115,6 +117,7 @@ h3 {
 .app-content {
   max-width: 920px;
   margin: 0 auto;
+  min-width: 0;
 }
 
 .app-content.content-enter {
@@ -185,6 +188,7 @@ h3 {
   background: rgba(23, 27, 23, 0.88);
   border-radius: 8px;
   box-shadow: 0 12px 34px rgba(0, 0, 0, 0.18);
+  overflow: hidden;
 }
 
 .card,
@@ -192,6 +196,7 @@ h3 {
 .chart-panel,
 .settings-panel {
   padding: 14px;
+  word-break: break-word;
 }
 
 .content-enter .card,
@@ -889,24 +894,31 @@ textarea {
   cursor: default;
 }
 
-.add-exercise-bottom {
-  display: flex;
-  justify-content: center;
-  padding: 10px 0 4px;
-}
-
-.add-exercise-bottom img {
-  width: 40px;
-  height: 40px;
+.add-exercise-icon-btn {
+  display: grid;
+  place-items: center;
+  width: 42px;
+  height: 42px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  padding: 0;
   cursor: pointer;
   transition: transform 0.15s ease, opacity 0.15s ease;
 }
 
-.add-exercise-bottom img:hover {
-  opacity: 0.8;
+.add-exercise-icon-btn img {
+  display: block;
+  width: 36px;
+  height: 36px;
+  pointer-events: none;
 }
 
-.add-exercise-bottom img:active {
+.add-exercise-icon-btn:hover {
+  opacity: 0.75;
+}
+
+.add-exercise-icon-btn:active {
   transform: scale(0.9);
 }
 
@@ -1033,7 +1045,7 @@ textarea {
 
 .set-table {
   width: 100%;
-  min-width: 760px;
+  min-width: 600px;
   border-collapse: separate;
   border-spacing: 0;
 }
@@ -1086,7 +1098,7 @@ textarea {
 }
 
 .prev-cell {
-  min-width: 96px;
+  min-width: 80px;
   color: var(--muted);
   font-weight: 800;
 }
@@ -1494,13 +1506,17 @@ textarea {
   }
 
   .log-date-row,
-  .draft-meta-row,
-  .exercise-table-top {
+  .draft-meta-row {
     grid-template-columns: 1fr;
+  }
+
+  .exercise-table-top {
+    grid-template-columns: 1fr auto;
   }
 
   .exercise-table-title {
     grid-template-columns: auto auto minmax(0, 1fr);
+    gap: 8px;
   }
 
   .history-set-grid {
@@ -1537,12 +1553,27 @@ textarea {
     grid-template-columns: auto 1fr;
   }
 
-  .exercise-table-title {
-    grid-template-columns: 1fr;
+  .exercise-table-top {
+    grid-template-columns: 1fr auto;
+    gap: 6px;
   }
 
-  .exercise-table-title .exercise-muscle-icons {
-    grid-column: auto;
+  .exercise-table-title {
+    grid-template-columns: auto auto minmax(0, 1fr);
+    gap: 6px;
+  }
+
+  .exercise-muscle-icons {
+    grid-template-columns: repeat(2, 22px);
+    grid-auto-rows: 22px;
+    gap: 2px;
+    width: 48px;
+    min-width: 48px;
+  }
+
+  .muscle-icon-chip {
+    width: 22px;
+    height: 22px;
   }
 
   .history-session-card summary {
@@ -1559,8 +1590,8 @@ textarea {
   }
 
   .row-actions {
-    flex-direction: column;
-    align-items: flex-end;
+    flex-wrap: wrap;
+    gap: 6px;
   }
 
   .exercise-definition {
@@ -1568,7 +1599,8 @@ textarea {
   }
 
   .exercise-definition .row-actions {
-    align-items: stretch;
+    align-items: center;
+    justify-content: flex-start;
   }
 
   .checkbox-grid {
@@ -1596,7 +1628,8 @@ textarea {
 
   .set-table th,
   .set-table td {
-    padding: 5px 3px;
+    padding: 4px 3px;
+    font-size: 12px;
   }
 
   .set-table th.set-type-cell,
@@ -1604,13 +1637,32 @@ textarea {
     display: none;
   }
 
+  .set-table th.prev-cell,
+  .set-table td.prev-cell {
+    display: none;
+  }
+
   .set-table input {
-    min-width: 52px;
+    min-width: 48px;
     font-size: 16px;
-    padding: 6px 4px;
+    padding: 5px 3px;
   }
 
   .set-table input[data-set-field="rest"] {
-    min-width: 48px;
+    min-width: 44px;
+    font-size: 14px;
+  }
+
+  .set-number {
+    width: 24px;
+    height: 24px;
+    font-size: 11px;
+    margin-right: 4px;
+  }
+
+  .set-table .delete-set-btn {
+    font-size: 14px;
+    min-width: 28px;
+    min-height: 28px;
   }
 }
