@@ -3,7 +3,7 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 2;
 const STORES = ["workouts", "metrics", "settings"];
-const APP_VERSION = "1.4.3";
+const APP_VERSION = "1.4.4";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 let dbOpenPromise = null;
 let chartId = 0;
@@ -252,6 +252,7 @@ const state = {
   openExerciseMenu: null,
   logHistoryExercise: "",
   workoutDraft: [],
+  historyMode: "exercises",
   historyExercise: "",
   historySearch: "",
   historyDate: "",
@@ -306,6 +307,13 @@ function parseLocalDate(value) {
 function fmt(num, digits = 0) {
   if (!Number.isFinite(num)) return "--";
   return new Intl.NumberFormat(undefined, { maximumFractionDigits: digits }).format(num);
+}
+
+function formatShortDate(value) {
+  if (!value) return "";
+  const date = parseLocalDate(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
 function parseNum(value) {
@@ -1973,40 +1981,32 @@ function historyExerciseNames() {
     .sort((a, b) => a.localeCompare(b));
 }
 
-function renderHistoryList() {
-  const search = state.historySearch.trim().toLowerCase();
-  const exercises = historyExerciseNames().filter((name) => name.toLowerCase().includes(search));
-  const dateWorkouts = state.historyDate
-    ? state.workouts.filter((w) => w.date === state.historyDate).sort((a, b) => String(a.createdAt || "").localeCompare(String(b.createdAt || "")))
-    : [];
-  return `
-    <section class="hero">
-      <div>
-        <h2 class="hero-title">History</h2>
-        <p class="hero-copy">Exercise performance, PRs, load volume, and progressive overload from your logged sessions.</p>
-      </div>
-    </section>
+function recentHistoryDates(limit = 7) {
+  return [...new Set(state.workouts.map((entry) => entry.date).filter(Boolean))]
+    .sort((a, b) => b.localeCompare(a))
+    .slice(0, limit);
+}
 
-    <section class="section form-panel">
-      <div class="field">
+function effectiveHistoryDate(recentDates = recentHistoryDates()) {
+  return state.historyDate || recentDates[0] || "";
+}
+
+function renderHistoryModeSegment() {
+  return `
+    <div class="segment history-mode-segment" role="tablist" aria-label="History view">
+      <button class="${state.historyMode === "exercises" ? "is-active" : ""}" type="button" role="tab" aria-selected="${state.historyMode === "exercises"}" data-action="history-set-mode" data-history-mode="exercises">Exercises</button>
+      <button class="${state.historyMode === "dates" ? "is-active" : ""}" type="button" role="tab" aria-selected="${state.historyMode === "dates"}" data-action="history-set-mode" data-history-mode="dates">Dates</button>
+    </div>
+  `;
+}
+
+function renderHistoryExercisesMode(exercises) {
+  return `
+    <section class="section form-panel history-filter-panel">
+      <div class="field history-search-field">
         <label for="history-search">Search exercises</label>
         <input id="history-search" class="search-input" data-history-search value="${escapeHtml(state.historySearch)}" placeholder="Bench press, row, squat">
       </div>
-      <div class="history-date-controls">
-        <div class="field history-date-field">
-          <label for="history-date">Browse by date</label>
-          <input id="history-date" class="history-date-input" type="date" data-history-date value="${escapeHtml(state.historyDate)}">
-        </div>
-        ${state.historyDate ? `<button class="ghost-button history-clear-button" type="button" data-action="clear-history-date">Clear date</button>` : ""}
-      </div>
-      ${dateWorkouts.length ? `
-        <div class="history-date-results">
-          <h3>${escapeHtml(state.historyDate)} — ${dateWorkouts.length} workout${dateWorkouts.length === 1 ? "" : "s"}</h3>
-          <div class="list">
-            ${dateWorkouts.map((entry) => listWorkout(entry)).join("")}
-          </div>
-        </div>
-      ` : state.historyDate ? `<div class="empty">No workouts logged on ${escapeHtml(state.historyDate)}.</div>` : ""}
     </section>
 
     <section class="section history-exercise-grid">
@@ -2035,6 +2035,63 @@ function renderHistoryList() {
         `;
       }).join("") : `<div class="empty">No exercise history matches that search.</div>`}
     </section>
+  `;
+}
+
+function renderHistoryDatesMode() {
+  const recentDates = recentHistoryDates();
+  const selectedDate = effectiveHistoryDate(recentDates);
+  const dateWorkouts = selectedDate
+    ? state.workouts.filter((w) => w.date === selectedDate).sort((a, b) => String(a.createdAt || "").localeCompare(String(b.createdAt || "")))
+    : [];
+  return `
+    <section class="section form-panel history-date-panel">
+      ${recentDates.length ? `
+        <div class="history-date-chip-row" aria-label="Recent workout dates">
+          ${recentDates.map((date) => `
+            <button class="date-chip ${date === selectedDate ? "is-active" : ""}" type="button" data-action="history-date-chip" data-history-date-value="${escapeHtml(date)}" aria-pressed="${date === selectedDate}">
+              ${escapeHtml(date === todayISO() ? "Today" : formatShortDate(date))}
+            </button>
+          `).join("")}
+        </div>
+      ` : ""}
+      <div class="history-date-controls">
+        <div class="field history-date-field">
+          <label for="history-date">Browse by date</label>
+          <input id="history-date" class="history-date-input" type="date" data-history-date value="${escapeHtml(selectedDate)}">
+        </div>
+        ${state.historyDate ? `<button class="ghost-button history-clear-button" type="button" data-action="clear-history-date">Clear date</button>` : ""}
+      </div>
+      ${selectedDate ? `
+        <div class="history-date-results">
+          <h3>${escapeHtml(formatShortDate(selectedDate))} - ${dateWorkouts.length} workout${dateWorkouts.length === 1 ? "" : "s"}</h3>
+          ${dateWorkouts.length ? `
+            <div class="list">
+              ${dateWorkouts.map((entry) => listWorkout(entry)).join("")}
+            </div>
+          ` : `<div class="empty">No workouts logged on ${escapeHtml(selectedDate)}.</div>`}
+        </div>
+      ` : `<div class="empty">No workouts logged yet.</div>`}
+    </section>
+  `;
+}
+
+function renderHistoryList() {
+  const search = state.historySearch.trim().toLowerCase();
+  const exercises = historyExerciseNames().filter((name) => name.toLowerCase().includes(search));
+  return `
+    <section class="hero">
+      <div>
+        <h2 class="hero-title">History</h2>
+        <p class="hero-copy">Exercise performance, PRs, load volume, and progressive overload from your logged sessions.</p>
+      </div>
+    </section>
+
+    <section class="section history-mode-shell">
+      ${renderHistoryModeSegment()}
+    </section>
+
+    ${state.historyMode === "dates" ? renderHistoryDatesMode() : renderHistoryExercisesMode(exercises)}
   `;
 }
 
@@ -2862,11 +2919,24 @@ async function handleAction(action, target) {
   }
   if (action === "history-select-exercise") {
     state.historyExercise = target.dataset.exercise || "";
+    state.historyMode = "exercises";
     await render();
     return;
   }
   if (action === "history-back") {
     state.historyExercise = "";
+    state.historyMode = "exercises";
+    await render();
+    return;
+  }
+  if (action === "history-set-mode") {
+    state.historyMode = target.dataset.historyMode === "dates" ? "dates" : "exercises";
+    await render();
+    return;
+  }
+  if (action === "history-date-chip") {
+    state.historyMode = "dates";
+    state.historyDate = target.dataset.historyDateValue || "";
     await render();
     return;
   }
@@ -3264,6 +3334,7 @@ document.addEventListener("change", async (event) => {
       await render();
     }
     if (event.target.matches("#history-date")) {
+      state.historyMode = "dates";
       state.historyDate = event.target.value || "";
       await render();
     }

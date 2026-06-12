@@ -1296,6 +1296,63 @@ textarea {
   min-height: 48px;
 }
 
+.history-mode-shell {
+  padding-bottom: 0;
+}
+
+.history-mode-segment {
+  margin-bottom: 0;
+}
+
+.history-mode-segment button {
+  min-height: 44px;
+  font-weight: 800;
+}
+
+.history-filter-panel,
+.history-date-panel {
+  overflow: hidden;
+}
+
+.history-search-field {
+  margin-bottom: 0;
+}
+
+.history-date-chip-row {
+  display: flex;
+  gap: 8px;
+  width: 100%;
+  max-width: 100%;
+  margin-bottom: 12px;
+  padding-bottom: 4px;
+  overflow-x: auto;
+  scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
+}
+
+.history-date-chip-row::-webkit-scrollbar {
+  display: none;
+}
+
+.date-chip {
+  flex: 0 0 auto;
+  min-width: 76px;
+  min-height: 44px;
+  padding: 0 12px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--muted);
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.date-chip.is-active {
+  border-color: rgba(53, 213, 140, 0.45);
+  background: rgba(53, 213, 140, 0.16);
+  color: var(--green);
+}
+
 .history-date-controls {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
