@@ -3,7 +3,7 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 2;
 const STORES = ["workouts", "metrics", "settings"];
-const APP_VERSION = "1.4.2";
+const APP_VERSION = "1.4.3";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 let dbOpenPromise = null;
 let chartId = 0;
@@ -1992,12 +1992,12 @@ function renderHistoryList() {
         <label for="history-search">Search exercises</label>
         <input id="history-search" class="search-input" data-history-search value="${escapeHtml(state.historySearch)}" placeholder="Bench press, row, squat">
       </div>
-      <div class="field-row history-date-row">
-        <div class="field">
+      <div class="history-date-controls">
+        <div class="field history-date-field">
           <label for="history-date">Browse by date</label>
           <input id="history-date" class="history-date-input" type="date" data-history-date value="${escapeHtml(state.historyDate)}">
         </div>
-        ${state.historyDate ? `<div class="field"><label>&nbsp;</label><button class="ghost-button" type="button" data-action="clear-history-date">Clear date</button></div>` : ""}
+        ${state.historyDate ? `<button class="ghost-button history-clear-button" type="button" data-action="clear-history-date">Clear date</button>` : ""}
       </div>
       ${dateWorkouts.length ? `
         <div class="history-date-results">
