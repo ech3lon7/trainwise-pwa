@@ -3,7 +3,7 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 2;
 const STORES = ["workouts", "metrics", "settings"];
-const APP_VERSION = "1.4.8";
+const APP_VERSION = "1.4.9";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 let dbOpenPromise = null;
 let chartId = 0;
@@ -961,14 +961,14 @@ function sessionPlanCaps(limitMinutes, restart = false) {
       maxItems: limit <= 30 ? 2 : limit <= 40 ? 3 : limit <= 50 ? 4 : 5,
       minSets: 2,
       maxSets: limit <= 40 ? 2 : limit <= 60 ? 3 : 4,
-      finishBuffer: limit <= 30 ? 4 : 8
+      finishBuffer: limit <= 30 ? 4 : limit <= 40 ? 6 : 3
     };
   }
   return {
-    maxItems: limit <= 30 ? 2 : limit <= 40 ? 3 : limit <= 60 ? 4 : 5,
+    maxItems: limit <= 30 ? 2 : limit <= 40 ? 3 : limit <= 50 ? 4 : 5,
     minSets: 2,
-    maxSets: limit <= 40 ? 3 : limit <= 60 ? 4 : 5,
-    finishBuffer: limit <= 30 ? 4 : 8
+    maxSets: limit <= 40 ? 3 : limit <= 50 ? 4 : 5,
+    finishBuffer: limit <= 30 ? 4 : limit <= 40 ? 6 : 3
   };
 }
 
