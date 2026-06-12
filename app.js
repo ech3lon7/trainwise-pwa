@@ -3,7 +3,7 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 2;
 const STORES = ["workouts", "metrics", "settings"];
-const APP_VERSION = "1.4.6";
+const APP_VERSION = "1.4.7";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 let dbOpenPromise = null;
 let chartId = 0;
@@ -954,9 +954,32 @@ function coachTimeframeHeading(minutes = selectedCoachTimeframeMinutes()) {
   return minutes > SESSION_LIMIT_MINUTES ? "Up to 1 hour+ plan" : `Up to ${coachTimeframeLabel(minutes)} plan`;
 }
 
+function sessionPlanCaps(limitMinutes, restart = false) {
+  const limit = Math.min(75, Math.max(30, Number(limitMinutes) || SESSION_LIMIT_MINUTES));
+  if (restart) {
+    return {
+      maxItems: limit <= 30 ? 2 : limit <= 40 ? 3 : limit <= 50 ? 4 : 5,
+      minSets: 2,
+      maxSets: limit <= 40 ? 2 : limit <= 60 ? 3 : 4,
+      finishBuffer: limit <= 30 ? 4 : 8
+    };
+  }
+  return {
+    maxItems: limit <= 30 ? 2 : limit <= 40 ? 3 : limit <= 60 ? 4 : 5,
+    minSets: 2,
+    maxSets: limit <= 40 ? 3 : limit <= 60 ? 4 : 5,
+    finishBuffer: limit <= 30 ? 4 : 8
+  };
+}
+
+function plannedExerciseMinutes(item, sets = item.sets) {
+  return estimateExerciseMinutes(item.exercise, sets);
+}
+
 function buildSessionPlan(limitMinutes = SESSION_LIMIT_MINUTES, options = {}) {
   const restart = options.restart || false;
-  const maxItems = restart ? 3 : 4;
+  const cappedLimit = Math.min(75, Math.max(30, Number(limitMinutes) || SESSION_LIMIT_MINUTES));
+  const caps = sessionPlanCaps(cappedLimit, restart);
   const stats = muscleSetStats()
     .map(muscleReadiness)
     .filter((stat) => stat.sets < HYPERTROPHY.minimumSets)
@@ -986,13 +1009,35 @@ function buildSessionPlan(limitMinutes = SESSION_LIMIT_MINUTES, options = {}) {
       continue;
     }
     if (usedExercises.has(exercise.id)) continue;
-    const sets = restart ? 2 : Math.min(3, Math.max(2, Math.ceil(target.deficit)));
-    const minutes = estimateExerciseMinutes(exercise, sets);
-    if (items.length && totalMinutes + minutes > limitMinutes) continue;
+    const desiredSets = Math.min(caps.maxSets, Math.max(caps.minSets, Math.ceil(target.deficit)));
+    let sets = desiredSets;
+    let minutes = estimateExerciseMinutes(exercise, sets);
+    while (sets > caps.minSets && items.length && totalMinutes + minutes > cappedLimit) {
+      sets -= 1;
+      minutes = estimateExerciseMinutes(exercise, sets);
+    }
+    if (items.length && totalMinutes + minutes > cappedLimit) continue;
     items.push({ muscle: target, exercise, sets, minutes, reason: "" });
     usedExercises.add(exercise.id);
     totalMinutes += minutes;
-    if (items.length >= maxItems || totalMinutes >= limitMinutes - 8) break;
+    if (items.length >= caps.maxItems || totalMinutes >= cappedLimit - caps.finishBuffer) break;
+  }
+
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const item of items) {
+      const targetMaxSets = Math.min(caps.maxSets, Math.ceil(item.muscle.deficit));
+      if (item.sets >= targetMaxSets) continue;
+      const nextMinutes = plannedExerciseMinutes(item, item.sets + 1);
+      const extraMinutes = nextMinutes - item.minutes;
+      if (totalMinutes + extraMinutes > cappedLimit) continue;
+      item.sets += 1;
+      item.minutes = nextMinutes;
+      totalMinutes += extraMinutes;
+      changed = true;
+      if (totalMinutes >= cappedLimit - caps.finishBuffer) break;
+    }
   }
 
   return {
@@ -1000,7 +1045,7 @@ function buildSessionPlan(limitMinutes = SESSION_LIMIT_MINUTES, options = {}) {
     missing,
     deprioritized,
     totalMinutes,
-    limitMinutes,
+    limitMinutes: cappedLimit,
     restart
   };
 }
