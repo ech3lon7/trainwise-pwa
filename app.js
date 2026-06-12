@@ -3,7 +3,7 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 2;
 const STORES = ["workouts", "metrics", "settings"];
-const APP_VERSION = "1.4.7";
+const APP_VERSION = "1.4.8";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 let dbOpenPromise = null;
 let chartId = 0;
@@ -950,8 +950,8 @@ function coachTimeframeLabel(minutes = selectedCoachTimeframeMinutes()) {
   return COACH_TIMEFRAME_OPTIONS.find((option) => option.minutes === minutes)?.label || "1 hour";
 }
 
-function coachTimeframeHeading(minutes = selectedCoachTimeframeMinutes()) {
-  return minutes > SESSION_LIMIT_MINUTES ? "Up to 1 hour+ plan" : `Up to ${coachTimeframeLabel(minutes)} plan`;
+function coachTimeframeSelectionLabel(minutes = selectedCoachTimeframeMinutes()) {
+  return `Selected: ${coachTimeframeLabel(minutes)}`;
 }
 
 function sessionPlanCaps(limitMinutes, restart = false) {
@@ -1090,7 +1090,7 @@ function buildTodayPlan(limitMinutes = selectedCoachTimeframeMinutes()) {
   if (sessionPlan.items.length) {
     return {
       mode: restart ? "restart" : "session",
-      title: restart ? "Restart session" : "Today Plan",
+      title: restart ? "Restart session" : "Today's Plan",
       subtitle: restart ? `Small, useful work capped at ${coachTimeframeLabel(limitMinutes)}.` : `Best gaps to train next, capped at ${coachTimeframeLabel(limitMinutes)}.`,
       sessionPlan,
       why,
@@ -2459,7 +2459,7 @@ function renderTodayPlan(plan) {
   const muscles = [...new Set(items.map((item) => item.muscle.label))];
   return `
     <section class="section card coach-action featured-action today-plan-card">
-      <span class="badge">${escapeHtml(plan.mode === "restart" ? "Restart plan" : plan.mode === "progression" ? "Progression" : plan.mode === "library-gap" ? "Library gap" : "Today plan")}</span>
+      <span class="badge">${escapeHtml(plan.mode === "restart" ? "Restart plan" : plan.mode === "progression" ? "Progression" : plan.mode === "library-gap" ? "Library gap" : "Today's plan")}</span>
       <div class="today-plan-header">
         <div>
           <h3>${escapeHtml(plan.title)}</h3>
@@ -2508,7 +2508,7 @@ function renderCoachTimeframeSelector() {
   const selected = selectedCoachTimeframeMinutes();
   return `
     <section class="section card coach-timeframe-card">
-      <div class="chart-header"><h3>Workout time</h3><span class="muted small">${escapeHtml(coachTimeframeHeading(selected))}</span></div>
+      <div class="chart-header"><h3>Workout time</h3><span class="muted small">${escapeHtml(coachTimeframeSelectionLabel(selected))}</span></div>
       <div class="coach-timeframe-options" aria-label="Workout timeframe">
         ${COACH_TIMEFRAME_OPTIONS.map((option) => `
           <button class="timeframe-chip ${option.minutes === selected ? "is-active" : ""}" type="button" data-action="coach-timeframe" data-coach-minutes="${option.minutes}" aria-pressed="${option.minutes === selected}">
@@ -2541,7 +2541,6 @@ function renderCoach() {
   const recs = recommendations();
   const timeframeMinutes = selectedCoachTimeframeMinutes();
   const todayPlan = buildTodayPlan(timeframeMinutes);
-  const sessionPlan = todayPlan.sessionPlan;
   return `
     <section class="hero">
       <div>
@@ -2552,22 +2551,6 @@ function renderCoach() {
     ${renderCoachTimeframeSelector()}
     ${renderTodayPlan(todayPlan)}
     ${renderCoachWhy(todayPlan)}
-    <section class="section card">
-      <div class="chart-header"><h3>${escapeHtml(coachTimeframeHeading(timeframeMinutes))}</h3><span class="muted small">${sessionPlan.totalMinutes}/${timeframeMinutes} min estimate</span></div>
-      <div class="session-plan-list">
-        ${sessionPlan.items.length ? sessionPlan.items.map((item) => `
-          <div class="session-plan-item">
-            <strong>${escapeHtml(item.exercise.name)}</strong>
-            <span>${item.sets} sets - ${escapeHtml(item.exercise.reps)} reps - ${escapeHtml(item.muscle.label)} - ${item.minutes} min</span>
-          </div>
-        `).join("") : `<div class="empty">No extra work needed right now. Keep sessions short and recover.</div>`}
-        ${sessionPlan.missing?.length ? `
-          <div class="session-plan-gap">
-            No primary exercise in your library for: ${escapeHtml(sessionPlan.missing.map((muscle) => muscle.label).join(", "))}.
-          </div>
-        ` : ""}
-      </div>
-    </section>
     <section class="section chart-panel">
       <div class="chart-header"><h3>Muscle set audit</h3><span class="muted small">10 set floor, 12-20 growth zone</span></div>
       ${muscleProgressMarkup(muscleSetStats())}

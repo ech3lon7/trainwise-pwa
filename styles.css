@@ -752,25 +752,6 @@ textarea {
   font-size: 15px;
 }
 
-.session-plan-list {
-  display: grid;
-  gap: 8px;
-}
-
-.session-plan-item {
-  display: grid;
-  gap: 4px;
-  min-height: 58px;
-  padding: 10px;
-  border-radius: 8px;
-  background: rgba(255, 255, 255, 0.045);
-}
-
-.session-plan-item span {
-  color: var(--muted);
-  font-size: 12px;
-}
-
 .session-plan-gap {
   padding: 12px;
   border: 1px solid rgba(242, 208, 107, 0.24);
