@@ -3,7 +3,7 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 2;
 const STORES = ["workouts", "metrics", "settings"];
-const APP_VERSION = "1.4.9";
+const APP_VERSION = "1.5.0";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 let dbOpenPromise = null;
 let chartId = 0;
@@ -886,8 +886,8 @@ function setZone(sets) {
   return { key: "high", label: "High fatigue", tone: "warn" };
 }
 
-function chooseExerciseForMuscle(muscleId) {
-  return exerciseDatabase().find((exercise) => exercise.primaryMuscles.includes(muscleId)) || null;
+function chooseExerciseForMuscle(muscleId, usedExerciseIds = new Set()) {
+  return exerciseDatabase().find((exercise) => exercise.primaryMuscles.includes(muscleId) && !usedExerciseIds.has(exercise.id)) || null;
 }
 
 function estimateExerciseMinutes(exercise, sets) {
@@ -993,22 +993,20 @@ function buildSessionPlan(limitMinutes = SESSION_LIMIT_MINUTES, options = {}) {
     });
   const items = [];
   const missing = [];
+  const missingIds = new Set();
   const deprioritized = [];
   let totalMinutes = 0;
   const usedExercises = new Set();
 
-  for (const target of stats) {
-    const hasAlternative = stats.some((stat) => stat.id !== target.id && stat.deficit > 0 && !(stat.daysSince !== null && stat.daysSince <= 1));
-    if (target.daysSince !== null && target.daysSince <= 1 && hasAlternative) {
-      deprioritized.push({ muscle: target, reason: `${target.label} was trained ${target.daysSince === 0 ? "today" : "yesterday"}.` });
-      continue;
-    }
-    const exercise = chooseExerciseForMuscle(target.id);
+  const addTargetToPlan = (target) => {
+    const exercise = chooseExerciseForMuscle(target.id, usedExercises);
     if (!exercise) {
-      missing.push(target);
-      continue;
+      if (!missingIds.has(target.id)) {
+        missing.push(target);
+        missingIds.add(target.id);
+      }
+      return false;
     }
-    if (usedExercises.has(exercise.id)) continue;
     const desiredSets = Math.min(caps.maxSets, Math.max(caps.minSets, Math.ceil(target.deficit)));
     let sets = desiredSets;
     let minutes = estimateExerciseMinutes(exercise, sets);
@@ -1016,11 +1014,29 @@ function buildSessionPlan(limitMinutes = SESSION_LIMIT_MINUTES, options = {}) {
       sets -= 1;
       minutes = estimateExerciseMinutes(exercise, sets);
     }
-    if (items.length && totalMinutes + minutes > cappedLimit) continue;
+    if (items.length && totalMinutes + minutes > cappedLimit) return false;
     items.push({ muscle: target, exercise, sets, minutes, reason: "" });
     usedExercises.add(exercise.id);
     totalMinutes += minutes;
+    return true;
+  };
+
+  for (const target of stats) {
+    const hasAlternative = stats.some((stat) => stat.id !== target.id && stat.deficit > 0 && !(stat.daysSince !== null && stat.daysSince <= 1));
+    if (target.daysSince !== null && target.daysSince <= 1 && hasAlternative) {
+      deprioritized.push({ muscle: target, reason: `${target.label} was trained ${target.daysSince === 0 ? "today" : "yesterday"}.` });
+      continue;
+    }
+    addTargetToPlan(target);
     if (items.length >= caps.maxItems || totalMinutes >= cappedLimit - caps.finishBuffer) break;
+  }
+
+  if (items.length < caps.maxItems && totalMinutes < cappedLimit - caps.finishBuffer) {
+    for (const target of stats) {
+      if (items.some((item) => item.muscle.id === target.id)) continue;
+      addTargetToPlan(target);
+      if (items.length >= caps.maxItems || totalMinutes >= cappedLimit - caps.finishBuffer) break;
+    }
   }
 
   let changed = true;
