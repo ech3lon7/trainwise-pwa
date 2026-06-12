@@ -3,7 +3,7 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 2;
 const STORES = ["workouts", "metrics", "settings"];
-const APP_VERSION = "1.5.2";
+const APP_VERSION = "1.5.3";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 let dbOpenPromise = null;
 let chartId = 0;
@@ -97,6 +97,7 @@ const state = {
   historyDate: "",
   coachTimeframeMinutes: SESSION_LIMIT_MINUTES,
   draggingDraftId: null,
+  dismissedRecordTrophies: new Set(),
   templateQueue: [],
   draftDate: todayISO(),
   draftNotes: "",
@@ -1633,25 +1634,57 @@ function setRecordReasons(row, stats) {
   return reasons;
 }
 
+function recordTrophyKey(parts = []) {
+  return parts.map((part) => String(part ?? "")).join("|");
+}
+
+function isRecordTrophyDismissed(key) {
+  return !!key && state.dismissedRecordTrophies instanceof Set && state.dismissedRecordTrophies.has(key);
+}
+
+function setRecordTrophyKey(draft, index, row, reasons) {
+  return recordTrophyKey([
+    "set",
+    draft.draftId,
+    index,
+    recordWeightKey(row.weight),
+    parseNum(row.reps),
+    reasons.join("/")
+  ]);
+}
+
+function volumeRecordTrophyKey(draft, reason) {
+  return recordTrophyKey([
+    "volume",
+    draft.draftId,
+    recordWeightKey(draftVolume(draft)),
+    reason
+  ]);
+}
+
 function exerciseVolumeRecordReason(draft, stats) {
   const volume = draftVolume(draft);
   if (!stats?.hasHistory || stats.bestVolume <= 0 || volume <= stats.bestVolume) return "";
   return `Exercise volume record: ${fmt(volume)} lb vs previous ${fmt(stats.bestVolume)} lb`;
 }
 
-function recordTrophyMarkup(label, className = "") {
-  if (!label) return "";
-  return `<span class="record-trophy ${className}" role="img" aria-label="${escapeHtml(label)}" title="${escapeHtml(label)}">&#127942;</span>`;
+function recordTrophyMarkup(label, className = "", key = "") {
+  if (!label || isRecordTrophyDismissed(key)) return "";
+  const title = `Hide trophy: ${label}`;
+  return `<button class="record-trophy ${className}" type="button" data-action="dismiss-record-trophy" data-record-key="${escapeHtml(key)}" aria-label="${escapeHtml(title)}" title="${escapeHtml(title)}">&#127942;</button>`;
 }
 
 function renderSetRows(draft = draftExerciseFromState()) {
   const rows = normalizeSetRows(draft.setRows);
   const recordStats = exerciseRecordStats(draft.exercise, draft.editingWorkoutId);
-  return rows.map((row, index) => `
+  return rows.map((row, index) => {
+    const reasons = setRecordReasons(row, recordStats);
+    const trophyKey = setRecordTrophyKey(draft, index, row, reasons);
+    return `
     <tr class="set-row" data-index="${index}">
       <td class="set-type">
         <span class="set-number">${index + 1}</span>
-        <span class="set-label-wrap"><strong>Set</strong>${recordTrophyMarkup(setRecordReasons(row, recordStats).join(" / "), "set-record-trophy")}</span>
+        <span class="set-label-wrap"><strong>Set</strong>${recordTrophyMarkup(reasons.join(" / "), "set-record-trophy", trophyKey)}</span>
       </td>
       <td class="prev-cell">${escapeHtml(previousSetLabel(draft.exercise, index, draft.editingWorkoutId))}</td>
       <td><input data-set-field="weight" type="number" inputmode="decimal" min="0" step="2.5" value="${escapeHtml(row.weight)}" aria-label="Set ${index + 1} weight"></td>
@@ -1660,7 +1693,8 @@ function renderSetRows(draft = draftExerciseFromState()) {
       <td><input data-set-field="rest" type="text" inputmode="text" value="${escapeHtml(restInputValue(row.restSeconds))}" placeholder="1:30" aria-label="Set ${index + 1} rest"></td>
       <td><button class="ghost-mini" type="button" data-action="remove-set" data-draft-id="${escapeHtml(draft.draftId)}" data-index="${index}" ${rows.length <= 1 ? "disabled" : ""}>x</button></td>
     </tr>
-  `).join("");
+  `;
+  }).join("");
 }
 
 function exerciseInitial(name) {
@@ -1998,6 +2032,7 @@ function exerciseDraftTable(draft, index, total) {
   const menuOpen = state.openExerciseMenu === draft.draftId;
   const recordStats = exerciseRecordStats(draft.exercise, draft.editingWorkoutId);
   const volumeRecordReason = exerciseVolumeRecordReason(draft, recordStats);
+  const volumeTrophyKey = volumeRecordTrophyKey(draft, volumeRecordReason);
   return `
     <section class="exercise-draft ${state.draggingDraftId === draft.draftId ? "is-dragging" : ""}" data-draft-id="${escapeHtml(draft.draftId)}" data-editing-workout-id="${escapeHtml(draft.editingWorkoutId || "")}">
       <div class="exercise-table-top">
@@ -2005,7 +2040,7 @@ function exerciseDraftTable(draft, index, total) {
           <button class="drag-handle" type="button" aria-label="Drag exercise table" data-drag-handle data-draft-id="${escapeHtml(draft.draftId)}">::</button>
           <span class="exercise-record-icon-wrap">
             <img class="exercise-title-dumbbell" src="./assets/dumbbell.svg?v=${APP_VERSION}" alt="" width="26" height="26">
-            ${recordTrophyMarkup(volumeRecordReason, "volume-record-trophy")}
+            ${recordTrophyMarkup(volumeRecordReason, "volume-record-trophy", volumeTrophyKey)}
           </span>
           ${exerciseMuscleIcons(meta)}
           <div>
@@ -3224,6 +3259,12 @@ async function handleAction(action, target) {
       state.coachTimeframeMinutes = COACH_TIMEFRAME_OPTIONS.some((option) => option.minutes === minutes)
         ? minutes
         : SESSION_LIMIT_MINUTES;
+      await render();
+    },
+    async "dismiss-record-trophy"() {
+      readDraftFromForm();
+      const key = target.dataset.recordKey;
+      if (key) state.dismissedRecordTrophies.add(key);
       await render();
     },
     async "return-to-today"() {

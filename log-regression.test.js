@@ -84,6 +84,7 @@ const reset = `
   state.draftNotes = "";
   state.editingWorkoutId = null;
   state.workoutDraft = [];
+  state.dismissedRecordTrophies = new Set();
   var makeWorkout = (overrides = {}) => ({
     id: overrides.id || "workout-" + Math.random(),
     date: overrides.date || "2026-06-10",
@@ -116,7 +117,7 @@ const setRecords = runScenario(`
     repPr: setRecordReasons({ weight: 100, reps: 12 }, stats),
     weightPr: setRecordReasons({ weight: 105, reps: 8 }, stats),
     lowRepWeight: setRecordReasons({ weight: 105, reps: 7 }, stats),
-    markup: recordTrophyMarkup("New record")
+    markup: recordTrophyMarkup("New record", "set-record-trophy", "record-key")
   });
 `);
 
@@ -124,6 +125,37 @@ assert(setRecords.repPr.some((reason) => reason.includes("Rep record")), `Expect
 assert(setRecords.weightPr.some((reason) => reason.includes("Weight record")), `Expected 8+ rep weight PR, got ${setRecords.weightPr.join(", ")}`);
 assert(!setRecords.lowRepWeight.some((reason) => reason.includes("Weight record")), `Expected sub-8 rep weight PR to be ignored, got ${setRecords.lowRepWeight.join(", ")}`);
 assert(setRecords.markup.includes("&#127942;"), "Expected trophy markup to use an ASCII-safe HTML entity.");
+assert(setRecords.markup.includes('data-action="dismiss-record-trophy"'), "Expected trophy markup to be dismissible.");
+
+const setTrophyDismissal = runScenario(`
+  ${reset}
+  state.workouts = [
+    makeWorkout({ id: "prior", setRows: [{ weight: 100, reps: 11, rir: 2, restSeconds: 120 }] })
+  ];
+  var draft = {
+    draftId: "draft-record",
+    exercise: "Bench Press",
+    editingWorkoutId: null,
+    setRows: [{ weight: 100, reps: 12, rir: 2, restSeconds: 120 }]
+  };
+  var stats = exerciseRecordStats("Bench Press");
+  var reasons = setRecordReasons(draft.setRows[0], stats);
+  var key = setRecordTrophyKey(draft, 0, draft.setRows[0], reasons);
+  var before = renderSetRows(draft);
+  state.dismissedRecordTrophies.add(key);
+  var afterDismiss = renderSetRows(draft);
+  draft.setRows[0].reps = 13;
+  var afterChange = renderSetRows(draft);
+  ({
+    beforeVisible: before.includes("set-record-trophy"),
+    afterDismissHidden: !afterDismiss.includes("set-record-trophy"),
+    afterChangeVisible: afterChange.includes("set-record-trophy")
+  });
+`);
+
+assert(setTrophyDismissal.beforeVisible, "Expected set trophy before dismissal.");
+assert(setTrophyDismissal.afterDismissHidden, "Expected dismissed set trophy to hide.");
+assert(setTrophyDismissal.afterChangeVisible, "Expected set trophy to return after weight/reps change.");
 
 const volumeRecord = runScenario(`
   ${reset}
@@ -149,6 +181,43 @@ const volumeRecord = runScenario(`
 `);
 
 assert(volumeRecord.includes("Exercise volume record"), `Expected exercise volume PR reason, got ${volumeRecord}`);
+
+const volumeTrophyDismissal = runScenario(`
+  ${reset}
+  state.workouts = [
+    makeWorkout({
+      id: "prior-volume",
+      setRows: [
+        { weight: 100, reps: 10, rir: 2, restSeconds: 120 },
+        { weight: 90, reps: 10, rir: 2, restSeconds: 120 }
+      ]
+    })
+  ];
+  var draft = {
+    draftId: "draft-volume",
+    exercise: "Bench Press",
+    targetMuscle: "chest",
+    editingWorkoutId: null,
+    notes: "",
+    setRows: [
+      { weight: 105, reps: 10, rir: 2, restSeconds: 120 },
+      { weight: 100, reps: 10, rir: 2, restSeconds: 120 }
+    ]
+  };
+  var stats = exerciseRecordStats("Bench Press");
+  var reason = exerciseVolumeRecordReason(draft, stats);
+  var key = volumeRecordTrophyKey(draft, reason);
+  var before = exerciseDraftTable(draft, 0, 1);
+  state.dismissedRecordTrophies.add(key);
+  var afterDismiss = exerciseDraftTable(draft, 0, 1);
+  ({
+    beforeVisible: before.includes("volume-record-trophy"),
+    afterDismissHidden: !afterDismiss.includes("volume-record-trophy")
+  });
+`);
+
+assert(volumeTrophyDismissal.beforeVisible, "Expected volume trophy before dismissal.");
+assert(volumeTrophyDismissal.afterDismissHidden, "Expected dismissed volume trophy to hide.");
 
 const editExclusion = runScenario(`
   ${reset}

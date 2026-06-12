@@ -1258,14 +1258,22 @@ textarea {
   place-items: center;
   width: 22px;
   height: 22px;
+  padding: 0;
+  border: 0;
+  background: transparent;
   color: var(--gold);
   font-size: 15px;
+  font-family: inherit;
+  font-weight: inherit;
   line-height: 1;
+  cursor: pointer;
   filter: drop-shadow(0 0 8px rgba(242, 208, 107, 0.45));
   animation: trophyPop 0.7s cubic-bezier(0.2, 0.9, 0.2, 1.15) both;
+  -webkit-tap-highlight-color: transparent;
 }
 
 .record-trophy::after {
+  pointer-events: none;
   content: "";
   position: absolute;
   inset: -4px;
@@ -1279,6 +1287,11 @@ textarea {
   width: 24px;
   height: 24px;
   font-size: 16px;
+}
+
+.record-trophy:focus-visible {
+  outline: 2px solid rgba(242, 208, 107, 0.75);
+  outline-offset: 3px;
 }
 
 @keyframes trophyPop {
