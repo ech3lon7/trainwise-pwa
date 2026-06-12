@@ -1072,20 +1072,6 @@ textarea {
   min-width: 0;
 }
 
-.exercise-record-icon-wrap {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  min-width: 32px;
-}
-
-.exercise-title-dumbbell {
-  display: block;
-  width: 26px;
-  height: 26px;
-  opacity: 0.86;
-}
-
 .drag-handle {
   display: grid;
   place-items: center;
