@@ -3,7 +3,7 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 2;
 const STORES = ["workouts", "metrics", "settings"];
-const APP_VERSION = "1.5.1";
+const APP_VERSION = "1.5.2";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 let dbOpenPromise = null;
 let chartId = 0;
@@ -339,6 +339,25 @@ function sortByDateDesc(items) {
   });
 }
 
+function workoutOrderValue(entry) {
+  const order = Number(entry?.order);
+  return Number.isFinite(order) ? order : Number.POSITIVE_INFINITY;
+}
+
+function sortWorkoutsForDate(entries = []) {
+  return [...entries].sort((a, b) => {
+    const orderCompare = workoutOrderValue(a) - workoutOrderValue(b);
+    if (orderCompare) return orderCompare;
+    const createdCompare = String(a.createdAt || "").localeCompare(String(b.createdAt || ""));
+    if (createdCompare) return createdCompare;
+    return String(a.exercise || "").localeCompare(String(b.exercise || ""));
+  });
+}
+
+function workoutsForDate(date) {
+  return sortWorkoutsForDate(state.workouts.filter((workout) => workout.date === date));
+}
+
 async function loadState() {
   const [workouts, metrics, settingsRows] = await Promise.all([
     dbAll("workouts"),
@@ -514,6 +533,10 @@ function normalizeSetRows(rows) {
 
 function workoutVolume(workout) {
   return setRowsFromWorkout(workout).reduce((sum, row) => sum + row.weight * row.reps, 0);
+}
+
+function draftVolume(draft) {
+  return normalizeSetRows(draft.setRows).reduce((sum, row) => sum + row.weight * row.reps, 0);
 }
 
 function e1rm(workout) {
@@ -1566,11 +1589,70 @@ function previousSetLabel(exercise, index, excludeId = state.editingWorkoutId) {
   return row ? `${fmt(row.weight)} x ${fmt(row.reps)}` : "--";
 }
 
+function recordWeightKey(weight) {
+  return String(Math.round(parseNum(weight) * 100) / 100);
+}
+
+function exerciseRecordStats(exercise, excludeId = null) {
+  const entries = state.workouts.filter((entry) => entry.exercise === exercise && entry.id !== excludeId);
+  const bestRepsByWeight = new Map();
+  let maxWeight = 0;
+  let bestVolume = 0;
+
+  for (const entry of entries) {
+    bestVolume = Math.max(bestVolume, workoutVolume(entry));
+    for (const row of setRowsFromWorkout(entry)) {
+      if (row.weight <= 0 || row.reps <= 0) continue;
+      maxWeight = Math.max(maxWeight, row.weight);
+      const key = recordWeightKey(row.weight);
+      bestRepsByWeight.set(key, Math.max(bestRepsByWeight.get(key) || 0, row.reps));
+    }
+  }
+
+  return {
+    hasHistory: entries.length > 0,
+    bestRepsByWeight,
+    maxWeight,
+    bestVolume
+  };
+}
+
+function setRecordReasons(row, stats) {
+  const reasons = [];
+  const weight = parseNum(row.weight);
+  const reps = parseNum(row.reps);
+  if (!stats?.hasHistory || weight <= 0 || reps <= 0) return reasons;
+
+  const previousReps = stats.bestRepsByWeight.get(recordWeightKey(weight)) || 0;
+  if (previousReps > 0 && reps > previousReps) {
+    reasons.push(`Rep record at ${fmt(weight, 1)} lb: ${fmt(previousReps)} to ${fmt(reps)}`);
+  }
+  if (stats.maxWeight > 0 && weight > stats.maxWeight && reps >= 8) {
+    reasons.push(`Weight record: ${fmt(weight, 1)} lb for ${fmt(reps)} reps`);
+  }
+  return reasons;
+}
+
+function exerciseVolumeRecordReason(draft, stats) {
+  const volume = draftVolume(draft);
+  if (!stats?.hasHistory || stats.bestVolume <= 0 || volume <= stats.bestVolume) return "";
+  return `Exercise volume record: ${fmt(volume)} lb vs previous ${fmt(stats.bestVolume)} lb`;
+}
+
+function recordTrophyMarkup(label, className = "") {
+  if (!label) return "";
+  return `<span class="record-trophy ${className}" role="img" aria-label="${escapeHtml(label)}" title="${escapeHtml(label)}">&#127942;</span>`;
+}
+
 function renderSetRows(draft = draftExerciseFromState()) {
   const rows = normalizeSetRows(draft.setRows);
+  const recordStats = exerciseRecordStats(draft.exercise, draft.editingWorkoutId);
   return rows.map((row, index) => `
     <tr class="set-row" data-index="${index}">
-      <td class="set-type"><span class="set-number">${index + 1}</span><strong>Set</strong></td>
+      <td class="set-type">
+        <span class="set-number">${index + 1}</span>
+        <span class="set-label-wrap"><strong>Set</strong>${recordTrophyMarkup(setRecordReasons(row, recordStats).join(" / "), "set-record-trophy")}</span>
+      </td>
       <td class="prev-cell">${escapeHtml(previousSetLabel(draft.exercise, index, draft.editingWorkoutId))}</td>
       <td><input data-set-field="weight" type="number" inputmode="decimal" min="0" step="2.5" value="${escapeHtml(row.weight)}" aria-label="Set ${index + 1} weight"></td>
       <td><input data-set-field="reps" type="number" inputmode="numeric" min="1" step="1" value="${escapeHtml(row.reps)}" aria-label="Set ${index + 1} reps"></td>
@@ -1715,7 +1797,7 @@ async function saveDayTemplate() {
     notes: draft.notes || "",
     setRows: normalizeSetRows(draft.setRows)
   }));
-  if (!exercises.length) exercises = state.workouts.filter((entry) => entry.date === date).map(workoutToTemplateExercise);
+  if (!exercises.length) exercises = workoutsForDate(date).map(workoutToTemplateExercise);
   if (!exercises.length) exercises = [currentDraftTemplateExercise()];
   const defaultName = `Hypertrophy day ${getDayTemplates().length + 1}`;
   const name = (document.getElementById("template-name")?.value || defaultName).trim();
@@ -1914,11 +1996,17 @@ function muscleOptions(selected) {
 function exerciseDraftTable(draft, index, total) {
   const meta = resolveExerciseMeta(draft.exercise, draft.targetMuscle);
   const menuOpen = state.openExerciseMenu === draft.draftId;
+  const recordStats = exerciseRecordStats(draft.exercise, draft.editingWorkoutId);
+  const volumeRecordReason = exerciseVolumeRecordReason(draft, recordStats);
   return `
     <section class="exercise-draft ${state.draggingDraftId === draft.draftId ? "is-dragging" : ""}" data-draft-id="${escapeHtml(draft.draftId)}" data-editing-workout-id="${escapeHtml(draft.editingWorkoutId || "")}">
       <div class="exercise-table-top">
         <div class="exercise-table-title">
           <button class="drag-handle" type="button" aria-label="Drag exercise table" data-drag-handle data-draft-id="${escapeHtml(draft.draftId)}">::</button>
+          <span class="exercise-record-icon-wrap">
+            <img class="exercise-title-dumbbell" src="./assets/dumbbell.svg?v=${APP_VERSION}" alt="" width="26" height="26">
+            ${recordTrophyMarkup(volumeRecordReason, "volume-record-trophy")}
+          </span>
           ${exerciseMuscleIcons(meta)}
           <div>
             <label for="exercise-${escapeHtml(draft.draftId)}">Exercise</label>
@@ -2134,9 +2222,7 @@ function renderHistoryExercisesMode(exercises) {
 function renderHistoryDatesMode() {
   const recentDates = recentHistoryDates();
   const selectedDate = effectiveHistoryDate(recentDates);
-  const dateWorkouts = selectedDate
-    ? state.workouts.filter((w) => w.date === selectedDate).sort((a, b) => String(a.createdAt || "").localeCompare(String(b.createdAt || "")))
-    : [];
+  const dateWorkouts = selectedDate ? workoutsForDate(selectedDate) : [];
   return `
     <section class="section form-panel history-date-panel">
       ${recentDates.length ? `
@@ -2650,7 +2736,7 @@ async function saveWorkout(form) {
   readWorkoutDraftFromForm();
   const data = Object.fromEntries(new FormData(form));
   const hadExisting = ensureWorkoutDraft().some((draft) => draft.editingWorkoutId);
-  const entries = ensureWorkoutDraft().map((draft) => {
+  const entries = ensureWorkoutDraft().map((draft, index) => {
     const exerciseName = draft.exercise.trim();
     const meta = resolveExerciseMeta(exerciseName, draft.targetMuscle);
     const setRows = normalizeSetRows(draft.setRows);
@@ -2673,6 +2759,7 @@ async function saveWorkout(form) {
       weight: best?.weight || 0,
       rir: averageRir({ setRows }),
       notes: draft.notes.trim(),
+      order: Number.isFinite(Number(draft.order)) ? Number(draft.order) : index,
       createdAt: existing?.createdAt || new Date().toISOString(),
       updatedAt: new Date().toISOString()
     };
@@ -2692,7 +2779,8 @@ async function saveWorkout(form) {
     exercise: entry.exercise,
     targetMuscle: entry.primaryMuscles[0] || "chest",
     notes: entry.notes || "",
-    setRows: setRowsFromWorkout(entry)
+    setRows: setRowsFromWorkout(entry),
+    order: entry.order
   }));
   await loadState();
   await render();
@@ -3037,18 +3125,53 @@ function editWorkout(id) {
     exercise: entry.exercise,
     targetMuscle: meta.primaryMuscles[0] || "chest",
     notes: entry.notes || "",
-    setRows: setRowsFromWorkout(entry)
+    setRows: setRowsFromWorkout(entry),
+    order: entry.order
   }];
   state.logHistoryExercise = "";
 }
 
-function clearWorkoutDraft() {
+function defaultLogExerciseName() {
+  return exerciseNames()[0] || "Custom exercise";
+}
+
+function workoutEntryToDraft(entry) {
+  return {
+    draftId: uid(),
+    editingWorkoutId: entry.id,
+    exercise: entry.exercise,
+    targetMuscle: entry.primaryMuscles?.[0] || "chest",
+    notes: entry.notes || "",
+    setRows: setRowsFromWorkout(entry),
+    order: entry.order
+  };
+}
+
+function clearWorkoutDraft(date = todayISO()) {
+  const exercise = defaultLogExerciseName();
+  const meta = resolveExerciseMeta(exercise);
   state.editingWorkoutId = null;
-  state.draftDate = todayISO();
+  state.draftDate = date;
   state.draftNotes = "";
+  state.selectedExercise = exercise;
+  state.draftTargetMuscle = meta.primaryMuscles[0] || "chest";
   state.setRows = defaultSetRows();
-  state.workoutDraft = [defaultDraftExercise(state.selectedExercise)];
+  state.workoutDraft = [defaultDraftExercise(exercise)];
   state.logHistoryExercise = "";
+  syncLegacyDraftFromFirst();
+}
+
+function loadWorkoutDateDraft(date) {
+  state.draftDate = date;
+  const entries = workoutsForDate(date);
+  if (entries.length) {
+    const first = entries[0];
+    state.editingWorkoutId = first.id;
+    state.workoutDraft = entries.map(workoutEntryToDraft);
+    syncLegacyDraftFromFirst();
+    return;
+  }
+  clearWorkoutDraft(date);
 }
 
 async function moveExerciseDraft(draftId, direction) {
@@ -3106,30 +3229,12 @@ async function handleAction(action, target) {
     async "return-to-today"() {
       readDraftFromForm();
       const today = todayISO();
-      state.draftDate = today;
-      const workoutsForDate = state.workouts.filter((w) => w.date === today);
-      if (workoutsForDate.length) {
-        const first = workoutsForDate[0];
-        state.editingWorkoutId = first.id;
-        state.workoutDraft = workoutsForDate.map((entry) => ({
-          draftId: uid(),
-          editingWorkoutId: entry.id,
-          exercise: entry.exercise,
-          targetMuscle: entry.primaryMuscles?.[0] || "chest",
-          notes: entry.notes || "",
-          setRows: setRowsFromWorkout(entry)
-        }));
-        syncLegacyDraftFromFirst();
-      } else {
-        state.editingWorkoutId = null;
-        state.workoutDraft = ensureWorkoutDraft().map((d) => ({ ...d, editingWorkoutId: null }));
-        syncLegacyDraftFromFirst();
-      }
+      loadWorkoutDateDraft(today);
       await render();
     },
     async "add-exercise-table"() {
       readDraftFromForm();
-      state.workoutDraft.push(defaultDraftExercise(exerciseNames()[0] || "Push-up"));
+      state.workoutDraft.push(defaultDraftExercise(defaultLogExerciseName()));
       await render();
     },
     async "remove-exercise-table"() {
@@ -3429,25 +3534,7 @@ document.addEventListener("change", async (event) => {
     if (event.target.matches("#workout-date")) {
       readDraftFromForm();
       const newDate = event.target.value || todayISO();
-      state.draftDate = newDate;
-      const workoutsForDate = state.workouts.filter((w) => w.date === newDate);
-      if (workoutsForDate.length) {
-        const first = workoutsForDate[0];
-        state.editingWorkoutId = first.id;
-        state.workoutDraft = workoutsForDate.map((entry) => ({
-          draftId: uid(),
-          editingWorkoutId: entry.id,
-          exercise: entry.exercise,
-          targetMuscle: entry.primaryMuscles?.[0] || "chest",
-          notes: entry.notes || "",
-          setRows: setRowsFromWorkout(entry)
-        }));
-        syncLegacyDraftFromFirst();
-      } else {
-        state.editingWorkoutId = null;
-        state.workoutDraft = ensureWorkoutDraft().map((d) => ({ ...d, editingWorkoutId: null }));
-        syncLegacyDraftFromFirst();
-      }
+      loadWorkoutDateDraft(newDate);
       await render();
     }
     if (event.target.matches("#trend-exercise")) {

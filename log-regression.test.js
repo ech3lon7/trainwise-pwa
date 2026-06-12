@@ -1,0 +1,228 @@
+const assert = require("assert");
+const fs = require("fs");
+const vm = require("vm");
+
+let appCode = fs.readFileSync("app.js", "utf8");
+appCode = appCode.replace(/init\(\)\.catch\([\s\S]*?\n\}\);\s*$/, "");
+
+const context = {
+  console,
+  crypto: { randomUUID: () => `id-${Math.random().toString(16).slice(2)}` },
+  Date,
+  Intl,
+  Math,
+  Number,
+  String,
+  Array,
+  Object,
+  Set,
+  Map,
+  Promise,
+  setTimeout,
+  clearTimeout,
+  navigator: { storage: {} },
+  localStorage: { getItem() { return null; }, setItem() {}, removeItem() {} },
+  window: {
+    clearTimeout,
+    setTimeout,
+    location: { reload() {} },
+    matchMedia: () => ({ matches: false, addEventListener() {}, removeEventListener() {} })
+  },
+  document: {
+    getElementById: () => ({
+      innerHTML: "",
+      addEventListener() {},
+      classList: { toggle() {}, add() {}, remove() {} },
+      dataset: {},
+      style: {},
+      querySelectorAll: () => []
+    }),
+    addEventListener() {},
+    querySelectorAll: () => [],
+    querySelector: () => null,
+    documentElement: { scrollWidth: 390, clientWidth: 390 }
+  }
+};
+context.window.document = context.document;
+
+vm.createContext(context);
+vm.runInContext(appCode, context);
+
+function runScenario(source) {
+  return vm.runInContext(source, context);
+}
+
+const reset = `
+  state.workouts = [];
+  state.metrics = [];
+  state.settings = {
+    customExercises: [
+      {
+        id: "custom-bench",
+        name: "Bench Press",
+        primaryMuscles: ["chest"],
+        secondaryMuscles: ["triceps"],
+        equipment: "barbell",
+        reps: "6-12",
+        rest: "90-180 sec",
+        cue: "Test bench."
+      },
+      {
+        id: "custom-row",
+        name: "Cable Row",
+        primaryMuscles: ["back"],
+        secondaryMuscles: ["biceps"],
+        equipment: "cable",
+        reps: "8-15",
+        rest: "90-180 sec",
+        cue: "Test row."
+      }
+    ]
+  };
+  state.selectedExercise = "Bench Press";
+  state.draftTargetMuscle = "chest";
+  state.draftNotes = "";
+  state.editingWorkoutId = null;
+  state.workoutDraft = [];
+  var makeWorkout = (overrides = {}) => ({
+    id: overrides.id || "workout-" + Math.random(),
+    date: overrides.date || "2026-06-10",
+    exercise: overrides.exercise || "Bench Press",
+    exerciseId: overrides.exerciseId || "custom-bench",
+    primaryMuscles: overrides.primaryMuscles || ["chest"],
+    secondaryMuscles: overrides.secondaryMuscles || ["triceps"],
+    setRows: overrides.setRows || [
+      { weight: 100, reps: 11, rir: 2, restSeconds: 120 },
+      { weight: 95, reps: 10, rir: 2, restSeconds: 120 }
+    ],
+    sets: overrides.sets || 2,
+    reps: overrides.reps || 11,
+    weight: overrides.weight || 100,
+    rir: overrides.rir || 2,
+    notes: overrides.notes || "",
+    order: overrides.order,
+    createdAt: overrides.createdAt || "2026-06-10T12:00:00.000Z",
+    updatedAt: overrides.updatedAt || "2026-06-10T12:00:00.000Z"
+  });
+`;
+
+const setRecords = runScenario(`
+  ${reset}
+  state.workouts = [
+    makeWorkout({ id: "prior", setRows: [{ weight: 100, reps: 11, rir: 2, restSeconds: 120 }] })
+  ];
+  var stats = exerciseRecordStats("Bench Press");
+  ({
+    repPr: setRecordReasons({ weight: 100, reps: 12 }, stats),
+    weightPr: setRecordReasons({ weight: 105, reps: 8 }, stats),
+    lowRepWeight: setRecordReasons({ weight: 105, reps: 7 }, stats),
+    markup: recordTrophyMarkup("New record")
+  });
+`);
+
+assert(setRecords.repPr.some((reason) => reason.includes("Rep record")), `Expected same-weight rep PR, got ${setRecords.repPr.join(", ")}`);
+assert(setRecords.weightPr.some((reason) => reason.includes("Weight record")), `Expected 8+ rep weight PR, got ${setRecords.weightPr.join(", ")}`);
+assert(!setRecords.lowRepWeight.some((reason) => reason.includes("Weight record")), `Expected sub-8 rep weight PR to be ignored, got ${setRecords.lowRepWeight.join(", ")}`);
+assert(setRecords.markup.includes("&#127942;"), "Expected trophy markup to use an ASCII-safe HTML entity.");
+
+const volumeRecord = runScenario(`
+  ${reset}
+  state.workouts = [
+    makeWorkout({
+      id: "prior-volume",
+      setRows: [
+        { weight: 100, reps: 10, rir: 2, restSeconds: 120 },
+        { weight: 90, reps: 10, rir: 2, restSeconds: 120 }
+      ]
+    })
+  ];
+  var stats = exerciseRecordStats("Bench Press");
+  var draft = {
+    exercise: "Bench Press",
+    editingWorkoutId: null,
+    setRows: [
+      { weight: 105, reps: 10, rir: 2, restSeconds: 120 },
+      { weight: 100, reps: 10, rir: 2, restSeconds: 120 }
+    ]
+  };
+  exerciseVolumeRecordReason(draft, stats);
+`);
+
+assert(volumeRecord.includes("Exercise volume record"), `Expected exercise volume PR reason, got ${volumeRecord}`);
+
+const editExclusion = runScenario(`
+  ${reset}
+  state.workouts = [
+    makeWorkout({ id: "edit-me", setRows: [{ weight: 100, reps: 11, rir: 2, restSeconds: 120 }] })
+  ];
+  var stats = exerciseRecordStats("Bench Press", "edit-me");
+  setRecordReasons({ weight: 100, reps: 12 }, stats);
+`);
+
+assert.strictEqual(editExclusion.length, 0, `Expected active edit to be excluded from PR baseline, got ${editExclusion.join(", ")}`);
+
+const orderPreserved = runScenario(`
+  ${reset}
+  state.workouts = [
+    makeWorkout({ exercise: "Third", order: 2, createdAt: "2026-06-10T09:00:00.000Z" }),
+    makeWorkout({ exercise: "First", order: 0, createdAt: "2026-06-10T11:00:00.000Z" }),
+    makeWorkout({ exercise: "Second", order: 1, createdAt: "2026-06-10T10:00:00.000Z" })
+  ];
+  workoutsForDate("2026-06-10").map((entry) => entry.exercise);
+`);
+
+assert.deepEqual(orderPreserved, ["First", "Second", "Third"], `Expected saved exercise order, got ${orderPreserved.join(", ")}`);
+
+const emptyDateReset = runScenario(`
+  ${reset}
+  state.workouts = [makeWorkout({ date: "2026-06-10" })];
+  state.draftNotes = "stale notes";
+  state.selectedExercise = "Cable Row";
+  state.draftTargetMuscle = "back";
+  state.setRows = [{ weight: 200, reps: 4, rir: 0, restSeconds: 240 }];
+  state.workoutDraft = [{
+    draftId: "stale",
+    editingWorkoutId: "stale-workout",
+    exercise: "Cable Row",
+    targetMuscle: "back",
+    notes: "stale notes",
+    setRows: [{ weight: 200, reps: 4, rir: 0, restSeconds: 240 }],
+    order: 0
+  }];
+  state.editingWorkoutId = "stale-workout";
+  loadWorkoutDateDraft("2026-06-12");
+  ({
+    date: state.draftDate,
+    editingWorkoutId: state.editingWorkoutId,
+    notes: state.draftNotes,
+    draftCount: state.workoutDraft.length,
+    firstExercise: state.workoutDraft[0].exercise,
+    firstNotes: state.workoutDraft[0].notes,
+    firstRows: state.workoutDraft[0].setRows,
+    selectedExercise: state.selectedExercise
+  });
+`);
+
+assert.strictEqual(emptyDateReset.date, "2026-06-12", "Expected empty date to stay selected.");
+assert.strictEqual(emptyDateReset.editingWorkoutId, null, "Expected empty date to clear edit mode.");
+assert.strictEqual(emptyDateReset.notes, "", "Expected empty date to clear stale notes.");
+assert.strictEqual(emptyDateReset.draftCount, 1, "Expected empty date to reset to one fresh draft.");
+assert.strictEqual(emptyDateReset.firstExercise, "Bench Press", `Expected fresh default library exercise, got ${emptyDateReset.firstExercise}`);
+assert.strictEqual(emptyDateReset.firstNotes, "", "Expected fresh draft notes.");
+assert.strictEqual(emptyDateReset.firstRows.length, 3, "Expected default fresh set rows.");
+assert(emptyDateReset.firstRows.every((row) => row.weight === "" || row.weight === 0), "Expected empty date not to keep stale weight setup.");
+assert.strictEqual(emptyDateReset.selectedExercise, "Bench Press", "Expected selected exercise to match fresh default draft.");
+
+const populatedDateLoad = runScenario(`
+  ${reset}
+  state.workouts = [
+    makeWorkout({ id: "second", exercise: "Cable Row", primaryMuscles: ["back"], secondaryMuscles: ["biceps"], order: 1 }),
+    makeWorkout({ id: "first", exercise: "Bench Press", primaryMuscles: ["chest"], secondaryMuscles: ["triceps"], order: 0 })
+  ];
+  loadWorkoutDateDraft("2026-06-10");
+  state.workoutDraft.map((draft) => draft.exercise);
+`);
+
+assert.deepEqual(populatedDateLoad, ["Bench Press", "Cable Row"], `Expected populated date to load in saved order, got ${populatedDateLoad.join(", ")}`);
+
+console.log("log regression tests passed");

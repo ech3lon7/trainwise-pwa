@@ -1066,10 +1066,24 @@ textarea {
 
 .exercise-table-title {
   display: grid;
-  grid-template-columns: auto auto minmax(0, 1fr);
+  grid-template-columns: auto auto auto minmax(0, 1fr);
   gap: 12px;
   align-items: center;
   min-width: 0;
+}
+
+.exercise-record-icon-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 32px;
+}
+
+.exercise-title-dumbbell {
+  display: block;
+  width: 26px;
+  height: 26px;
+  opacity: 0.86;
 }
 
 .drag-handle {
@@ -1229,6 +1243,61 @@ textarea {
   background: rgba(155, 140, 255, 0.12);
   color: var(--text);
   font-weight: 900;
+}
+
+.set-label-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+}
+
+.record-trophy {
+  position: relative;
+  display: inline-grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  color: var(--gold);
+  font-size: 15px;
+  line-height: 1;
+  filter: drop-shadow(0 0 8px rgba(242, 208, 107, 0.45));
+  animation: trophyPop 0.7s cubic-bezier(0.2, 0.9, 0.2, 1.15) both;
+}
+
+.record-trophy::after {
+  content: "";
+  position: absolute;
+  inset: -4px;
+  border-radius: 999px;
+  border: 1px solid rgba(242, 208, 107, 0.55);
+  opacity: 0;
+  animation: trophyRing 0.7s ease-out both;
+}
+
+.volume-record-trophy {
+  width: 24px;
+  height: 24px;
+  font-size: 16px;
+}
+
+@keyframes trophyPop {
+  0% { transform: scale(0.35) rotate(-18deg); opacity: 0; }
+  45% { transform: scale(1.18) rotate(8deg); opacity: 1; }
+  72% { transform: scale(0.94) rotate(-3deg); }
+  100% { transform: scale(1) rotate(0deg); opacity: 1; }
+}
+
+@keyframes trophyRing {
+  0% { transform: scale(0.3); opacity: 0.9; }
+  100% { transform: scale(1.65); opacity: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .record-trophy,
+  .record-trophy::after {
+    animation: none;
+  }
 }
 
 .prev-cell {
