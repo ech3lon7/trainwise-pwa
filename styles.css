@@ -1296,6 +1296,16 @@ textarea {
   min-height: 48px;
 }
 
+.history-date-row > .field {
+  min-width: 0;
+}
+
+.history-date-input {
+  display: block;
+  min-width: 0;
+  max-width: 100%;
+}
+
 .history-date-results {
   margin-top: 10px;
 }
@@ -1491,6 +1501,10 @@ textarea {
 
   .field-row {
     grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .history-date-row {
+    grid-template-columns: 1fr;
   }
 
   .trend-section-header {
