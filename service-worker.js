@@ -62,7 +62,7 @@ self.addEventListener("message", (event) => {
 
 async function networkFirst(request) {
   try {
-    const response = await fetch(request, { cache: "reload" });
+    const response = await fetch(request, { cache: "default" });
     if (response?.ok) {
       const cache = await caches.open(CACHE_NAME);
       await cache.put(request, response.clone());

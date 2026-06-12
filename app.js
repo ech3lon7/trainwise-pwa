@@ -69,188 +69,6 @@ const muscleIconPaths = {
   abs: "./assets/muscles/abs.png"
 };
 
-const exerciseLibrary = [
-  {
-    id: "push-up",
-    name: "Push-up",
-    primaryMuscles: ["chest"],
-    secondaryMuscles: ["triceps", "shoulders"],
-    equipment: "bodyweight",
-    reps: "8-20",
-    rest: "60-120 sec",
-    cue: "Add a backpack or slow eccentric when 20 reps gets easy."
-  },
-  {
-    id: "dumbbell-bench-press",
-    name: "Dumbbell Bench Press",
-    primaryMuscles: ["chest"],
-    secondaryMuscles: ["triceps", "shoulders"],
-    equipment: "dumbbells, bench",
-    reps: "8-15",
-    rest: "90-180 sec",
-    cue: "Use a deep, controlled stretch and stop 1-3 reps short of failure."
-  },
-  {
-    id: "dumbbell-fly",
-    name: "Dumbbell Fly",
-    primaryMuscles: ["chest"],
-    secondaryMuscles: ["shoulders"],
-    equipment: "dumbbells, bench",
-    reps: "10-20",
-    rest: "60-120 sec",
-    cue: "Keep the load light enough to control the stretched position."
-  },
-  {
-    id: "dumbbell-row",
-    name: "Dumbbell Row",
-    primaryMuscles: ["back"],
-    secondaryMuscles: ["biceps"],
-    equipment: "dumbbell",
-    reps: "8-15",
-    rest: "90-180 sec",
-    cue: "Pull the elbow toward your hip and pause briefly near the top."
-  },
-  {
-    id: "band-row",
-    name: "Band Row",
-    primaryMuscles: ["back"],
-    secondaryMuscles: ["biceps"],
-    equipment: "band",
-    reps: "12-25",
-    rest: "60-120 sec",
-    cue: "Use higher reps and a hard squeeze if the band is light."
-  },
-  {
-    id: "pull-up-inverted-row",
-    name: "Pull-up / Inverted Row",
-    primaryMuscles: ["back"],
-    secondaryMuscles: ["biceps"],
-    equipment: "bar or sturdy table",
-    reps: "6-15",
-    rest: "90-180 sec",
-    cue: "Choose the variation that keeps reps controlled and near failure."
-  },
-  {
-    id: "dumbbell-shoulder-press",
-    name: "Dumbbell Shoulder Press",
-    primaryMuscles: ["shoulders"],
-    secondaryMuscles: ["triceps"],
-    equipment: "dumbbells",
-    reps: "8-15",
-    rest: "90-180 sec",
-    cue: "Press in a pain-free path and avoid grinding every set."
-  },
-  {
-    id: "lateral-raise",
-    name: "Lateral Raise",
-    primaryMuscles: ["shoulders"],
-    secondaryMuscles: [],
-    equipment: "dumbbells or bands",
-    reps: "12-25",
-    rest: "45-90 sec",
-    cue: "Use strict reps; small load jumps go a long way here."
-  },
-  {
-    id: "rear-delt-fly",
-    name: "Rear Delt Fly",
-    primaryMuscles: ["shoulders"],
-    secondaryMuscles: ["back"],
-    equipment: "dumbbells or bands",
-    reps: "12-25",
-    rest: "45-90 sec",
-    cue: "Lead with elbows and keep traps from taking over."
-  },
-  {
-    id: "dumbbell-curl",
-    name: "Dumbbell Curl",
-    primaryMuscles: ["biceps"],
-    secondaryMuscles: [],
-    equipment: "dumbbells",
-    reps: "8-15",
-    rest: "45-90 sec",
-    cue: "Control the lowering phase and avoid swinging."
-  },
-  {
-    id: "hammer-curl",
-    name: "Hammer Curl",
-    primaryMuscles: ["biceps"],
-    secondaryMuscles: [],
-    equipment: "dumbbells",
-    reps: "8-15",
-    rest: "45-90 sec",
-    cue: "Keep wrists neutral and elbows pinned."
-  },
-  {
-    id: "overhead-triceps-extension",
-    name: "Overhead Triceps Extension",
-    primaryMuscles: ["triceps"],
-    secondaryMuscles: [],
-    equipment: "dumbbell or band",
-    reps: "10-20",
-    rest: "45-90 sec",
-    cue: "Use the overhead stretch, but keep elbows comfortable."
-  },
-  {
-    id: "goblet-squat",
-    name: "Goblet Squat",
-    primaryMuscles: ["quads"],
-    secondaryMuscles: ["glutes", "abs"],
-    equipment: "dumbbell",
-    reps: "8-20",
-    rest: "90-180 sec",
-    cue: "Keep depth consistent so progression means something."
-  },
-  {
-    id: "bulgarian-split-squat",
-    name: "Bulgarian Split Squat",
-    primaryMuscles: ["quads", "glutes"],
-    secondaryMuscles: ["hamstrings"],
-    equipment: "dumbbells, bench",
-    reps: "8-15",
-    rest: "90-180 sec",
-    cue: "Count one set after both legs are complete."
-  },
-  {
-    id: "romanian-deadlift",
-    name: "Romanian Deadlift",
-    primaryMuscles: ["hamstrings"],
-    secondaryMuscles: ["glutes", "back"],
-    equipment: "dumbbells",
-    reps: "8-15",
-    rest: "90-180 sec",
-    cue: "Push hips back and keep tension in the hamstrings."
-  },
-  {
-    id: "hip-thrust-glute-bridge",
-    name: "Hip Thrust / Glute Bridge",
-    primaryMuscles: ["glutes"],
-    secondaryMuscles: ["hamstrings"],
-    equipment: "bodyweight or dumbbell",
-    reps: "10-20",
-    rest: "60-120 sec",
-    cue: "Pause at lockout and add load once reps get easy."
-  },
-  {
-    id: "standing-calf-raise",
-    name: "Standing Calf Raise",
-    primaryMuscles: ["calves"],
-    secondaryMuscles: [],
-    equipment: "bodyweight or dumbbells",
-    reps: "10-25",
-    rest: "45-90 sec",
-    cue: "Use a full stretch and pause at the top."
-  },
-  {
-    id: "plank-dead-bug",
-    name: "Plank / Dead Bug",
-    primaryMuscles: ["abs"],
-    secondaryMuscles: [],
-    equipment: "bodyweight",
-    reps: "30-60 sec",
-    rest: "45-90 sec",
-    cue: "Progress by adding time, control, or harder variations."
-  }
-];
 
 const legacyExerciseMetadata = [
   { name: "Bench Press", primaryMuscles: ["chest"], secondaryMuscles: ["triceps", "shoulders"], equipment: "barbell", reps: "6-12", rest: "90-180 sec" },
@@ -493,6 +311,18 @@ async function dbPut(name, value) {
   return value;
 }
 
+async function dbPutBatch(name, values) {
+  if (!values.length) return;
+  const db = await ensureDB();
+  const tx = db.transaction(name, "readwrite");
+  const store = tx.objectStore(name);
+  for (const value of values) store.put(value);
+  await new Promise((resolve, reject) => {
+    tx.oncomplete = resolve;
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
 async function dbDelete(name, id) {
   await runStoreRequest(name, "readwrite", (store) => store.delete(id));
 }
@@ -594,14 +424,10 @@ function getHiddenExercises() {
   return Array.isArray(state.settings.hiddenExercises) ? state.settings.hiddenExercises : [];
 }
 
-function isExerciseHidden(exerciseId) {
-  return getHiddenExercises().includes(exerciseId);
-}
-
 function exerciseDatabase() {
   const hidden = new Set(getHiddenExercises());
   const seen = new Set();
-  return [...getCustomExercises(), ...exerciseLibrary]
+  return getCustomExercises()
     .filter((exercise) => {
       if (hidden.has(exercise.id)) return false;
       const key = normalizeName(exercise.name);
@@ -930,7 +756,17 @@ function scoreExerciseForMuscle(exercise, muscleId) {
   const specificityScore = (exercise.primaryMuscles || []).length === 1 ? 1 : 0;
   const targetIndex = (exercise.primaryMuscles || []).indexOf(muscleId);
   const targetScore = targetIndex === 0 ? 1 : 0;
-  return usageScore + recencyScore + customScore + selectedScore + specificityScore + targetScore;
+  const effortScore = last ? Math.max(0, 4 - (averageRir(last) ?? 2)) : 0;
+  let progressionScore = 0;
+  if (history.length >= 2) {
+    const recent3 = history.slice(0, 3);
+    const prior3 = history.slice(3, 6);
+    const recentE1rm = recent3.reduce((sum, w) => sum + e1rm(w), 0) / recent3.length;
+    const priorE1rm = prior3.length ? prior3.reduce((sum, w) => sum + e1rm(w), 0) / prior3.length : recentE1rm;
+    if (recentE1rm > priorE1rm) progressionScore = 3;
+    else if (recentE1rm === priorE1rm && prior3.length) progressionScore = 1;
+  }
+  return usageScore + recencyScore + customScore + selectedScore + specificityScore + targetScore + effortScore + progressionScore;
 }
 
 function chooseExerciseForMuscle(muscleId, usedExerciseIds = new Set()) {
@@ -949,7 +785,9 @@ function estimateExerciseMinutes(exercise, sets) {
   const restMatch = String(exercise.rest || "90 sec").match(/(\d+)(?:-(\d+))?/);
   const restSeconds = personalRestSeconds
     || (restMatch ? (Number(restMatch[2] || restMatch[1]) + Number(restMatch[1])) / 2 : 90);
-  const perSetMinutes = 0.75 + restSeconds / 60;
+  const isCompound = (exercise.secondaryMuscles || []).length > 0;
+  const compoundMultiplier = isCompound ? 1.15 : 1;
+  const perSetMinutes = (0.75 + restSeconds / 60) * compoundMultiplier;
   return Math.ceil(3 + sets * perSetMinutes);
 }
 
@@ -980,7 +818,16 @@ function muscleReadiness(stat) {
   const secondaryDaysSince = lastSecondaryWorkout ? daysBetween(lastSecondaryWorkout.date, todayISO()) : null;
   const daysSince = primaryDaysSince ?? secondaryDaysSince;
   let readiness = "ready";
-  let reason = lastWorkout ? `Last trained ${daysSince} day${daysSince === 1 ? "" : "s"} ago.` : "No recent work logged.";
+  let reason;
+  if (!lastPrimaryWorkout && !lastSecondaryWorkout) {
+    reason = "No recent work logged.";
+  } else if (lastPrimaryWorkout && lastSecondaryWorkout) {
+    reason = `Directly trained ${primaryDaysSince} day${primaryDaysSince === 1 ? "" : "s"} ago, secondary work ${secondaryDaysSince} day${secondaryDaysSince === 1 ? "" : "s"} ago.`;
+  } else if (lastPrimaryWorkout) {
+    reason = `Directly trained ${primaryDaysSince} day${primaryDaysSince === 1 ? "" : "s"} ago.`;
+  } else {
+    reason = `Secondary work ${secondaryDaysSince} day${secondaryDaysSince === 1 ? "" : "s"} ago.`;
+  }
   if (primaryDaysSince !== null && primaryDaysSince <= 1) {
     readiness = "recent";
     reason = `Directly trained ${primaryDaysSince === 0 ? "today" : "yesterday"}, so it can wait if another gap is useful.`;
@@ -1146,9 +993,10 @@ function buildSessionPlan(limitMinutes = SESSION_LIMIT_MINUTES, options = {}) {
   let changed = true;
   while (changed) {
     changed = false;
-    for (const item of items) {
-      const targetMaxSets = maxSetsForPlanTarget(item.muscle, caps);
-      if (item.sets >= targetMaxSets) continue;
+    const eligible = items
+      .filter((item) => item.sets < maxSetsForPlanTarget(item.muscle, caps))
+      .sort((a, b) => (b.muscle.deficit - a.muscle.deficit) || (a.sets - b.sets) || (plannedExerciseMinutes(a, a.sets + 1) - plannedExerciseMinutes(b, b.sets + 1)));
+    for (const item of eligible) {
       const nextMinutes = plannedExerciseMinutes(item, item.sets + 1);
       const extraMinutes = nextMinutes - item.minutes;
       if (totalMinutes + extraMinutes > cappedLimit) continue;
@@ -1156,6 +1004,7 @@ function buildSessionPlan(limitMinutes = SESSION_LIMIT_MINUTES, options = {}) {
       item.minutes = nextMinutes;
       totalMinutes += extraMinutes;
       changed = true;
+      break;
     }
   }
 
@@ -1255,100 +1104,16 @@ function buildTodayPlan(limitMinutes = selectedCoachTimeframeMinutes()) {
   };
 }
 
-function nextHypertrophyAction() {
-  const stats = muscleSetStats();
-  const sessionPlan = buildSessionPlan(selectedCoachTimeframeMinutes());
-  const underMinimum = stats
-    .filter((stat) => stat.sets < HYPERTROPHY.minimumSets)
-    .sort((a, b) => a.sets - b.sets || muscleGroups.findIndex((muscle) => muscle.id === a.id) - muscleGroups.findIndex((muscle) => muscle.id === b.id));
-
-  if (underMinimum.length) {
-    const target = underMinimum[0];
-    const exercise = chooseExerciseForMuscle(target.id);
-    const recommendedSets = Math.min(3, Math.max(2, Math.ceil(target.deficit)));
-    if (!exercise) {
-      return {
-        mode: "library-gap",
-        muscle: target,
-        exercise: null,
-        sets: 0,
-        minutes: 0,
-        sessionPlan,
-        title: `${target.label} needs an exercise`,
-        body: `${target.label} is at ${fmt(target.sets, 1)}/${HYPERTROPHY.minimumSets} hard sets, but your Exercises library has no primary ${target.label} movement. Add one in Exercises before TrainWise can recommend work for it.`
-      };
-    }
-    return {
-      mode: "minimum",
-      muscle: target,
-      exercise,
-      sets: recommendedSets,
-      minutes: estimateExerciseMinutes(exercise, recommendedSets),
-      sessionPlan,
-      title: `${target.label} is below the hypertrophy floor`,
-      body: `${target.label} is at ${fmt(target.sets, 1)}/${HYPERTROPHY.minimumSets} hard sets. Do ${recommendedSets} sets of ${exercise.name}, ${exercise.reps} reps, ${HYPERTROPHY.idealRirMin}-${HYPERTROPHY.idealRirMax} RIR. About ${estimateExerciseMinutes(exercise, recommendedSets)} min.`
-    };
-  }
-
-  const belowGrowth = stats
-    .filter((stat) => stat.sets < HYPERTROPHY.growthLow)
-    .sort((a, b) => a.sets - b.sets);
-  if (belowGrowth.length) {
-    const target = belowGrowth[0];
-    const exercise = chooseExerciseForMuscle(target.id);
-    if (!exercise) {
-      return {
-        mode: "library-gap",
-        muscle: target,
-        exercise: null,
-        sets: 0,
-        minutes: 0,
-        sessionPlan,
-        title: `${target.label} needs an exercise`,
-        body: `${target.label} is ready for growth-zone work, but your Exercises library has no primary ${target.label} movement. Add one in Exercises before TrainWise can recommend work for it.`
-      };
-    }
-    return {
-      mode: "growth",
-      muscle: target,
-      exercise,
-      sets: 2,
-      minutes: estimateExerciseMinutes(exercise, 2),
-      sessionPlan,
-      title: `${target.label} met the floor`,
-      body: `${target.label} has ${fmt(target.sets, 1)} hard sets. Add 2 careful sets of ${exercise.name} if recovery feels good. About ${estimateExerciseMinutes(exercise, 2)} min.`
-    };
-  }
-
-  const progression = progressionTargetForExercise(state.selectedExercise) || progressionTargetForExercise(latestWorkout()?.exercise);
-  if (progression) {
-    return {
-      mode: "progression",
-      muscle: null,
-      exercise: resolveExerciseMeta(progression.exercise),
-      sets: 0,
-      minutes: 0,
-      sessionPlan,
-      title: "Progress the next session",
-      body: progression.body,
-      progression
-    };
-  }
-
-  return {
-    mode: "recovery",
-    muscle: null,
-    exercise: null,
-    sets: 0,
-    minutes: 0,
-    sessionPlan,
-    title: "Minimums are covered",
-    body: "All tracked muscles are at the weekly hypertrophy floor. Progress by adding reps or load, or recover if joints or soreness are talking back."
-  };
-}
-
 function actionFromSessionPlan(plan) {
   const items = plan.sessionPlan.items;
+  if (!items.length) {
+    return {
+      mode: plan.mode,
+      sessionPlan: plan.sessionPlan,
+      title: plan.title,
+      body: plan.subtitle
+    };
+  }
   const sets = items.reduce((sum, item) => sum + item.sets, 0);
   const muscles = [...new Set(items.map((item) => item.muscle.label))].join(", ");
   return {
@@ -1509,7 +1274,7 @@ function topUnderTargetMuscles(limit = 4) {
 function recommendations(todayPlan = null) {
   const recs = [];
   const stats = muscleSetStats();
-  const action = todayPlan?.sessionPlan?.items?.length ? actionFromSessionPlan(todayPlan) : nextHypertrophyAction();
+  const action = actionFromSessionPlan(todayPlan);
   const proteinAvg = getAverage("protein", 7);
   const protein = proteinTargets();
   const trend = weightTrend(14);
@@ -1603,7 +1368,7 @@ function recommendations(todayPlan = null) {
     });
   }
 
-  return recs.slice(0, 6);
+  return recs.slice(0, 8);
 }
 
 function renderDashboard() {
@@ -1614,7 +1379,9 @@ function renderDashboard() {
   const stats = muscleSetStats();
   const covered = stats.filter((stat) => stat.sets >= HYPERTROPHY.minimumSets).length;
   const underTarget = topUnderTargetMuscles(4);
-  const action = nextHypertrophyAction();
+  const todayPlan = buildTodayPlan();
+  const action = actionFromSessionPlan(todayPlan);
+  const firstExercise = todayPlan.sessionPlan.items[0]?.exercise;
 
   return `
     <section class="hero">
@@ -1634,7 +1401,7 @@ function renderDashboard() {
         <span class="badge">Next best lift</span>
         <h3>${escapeHtml(action.title)}</h3>
         <p>${escapeHtml(action.body)}</p>
-        ${action.exercise ? `<p class="muted small">Rest ${escapeHtml(action.exercise.rest)}. ${escapeHtml(action.exercise.cue)}</p>` : ""}
+        ${firstExercise ? `<p class="muted small">Rest ${escapeHtml(firstExercise.rest)}. ${escapeHtml(firstExercise.cue)}</p>` : ""}
       </div>
       <div class="card">
         <h3>Lowest set counts</h3>
@@ -2015,24 +1782,21 @@ function exerciseMuscleBadges(exercise) {
   return `<div class="badge-row">${primary}${secondary}</div>`;
 }
 
-function exerciseCard(exercise, editable = false, hidden = false) {
+function exerciseCard(exercise, editable = false) {
   return `
-    <div class="exercise-definition ${editable ? "custom" : ""} ${hidden ? "removed-exercise" : ""}">
+    <div class="exercise-definition ${editable ? "custom" : ""}">
       <div>
         <div class="exercise-definition-title">
           <strong>${escapeHtml(exercise.name)}</strong>
-          <span>${editable ? "Yours" : hidden ? "Removed" : "Starter"}</span>
         </div>
         ${exerciseMuscleBadges(exercise)}
         <p class="muted small">${escapeHtml(exercise.equipment || "custom")} - ${escapeHtml(exercise.reps || "8-15")} reps - ${escapeHtml(exercise.rest || "60-120 sec")}</p>
         <p class="muted micro">${escapeHtml(exercise.cue || "Keep form strict and progress gradually.")}</p>
       </div>
       <div class="row-actions">
-        ${!hidden ? `<button class="ghost-mini" type="button" data-action="log-exercise" data-exercise="${escapeHtml(exercise.name)}">Log</button>` : ""}
+        <button class="ghost-mini" type="button" data-action="log-exercise" data-exercise="${escapeHtml(exercise.name)}">Log</button>
         ${editable ? `<button class="ghost-mini" type="button" data-action="edit-exercise" data-id="${escapeHtml(exercise.id)}">Edit</button>` : ""}
         ${editable ? `<button class="delete-small" type="button" aria-label="Delete exercise" data-action="delete-exercise" data-id="${escapeHtml(exercise.id)}">x</button>` : ""}
-        ${!editable && !hidden ? `<button class="ghost-mini" type="button" data-action="hide-exercise" data-id="${escapeHtml(exercise.id)}">Remove</button>` : ""}
-        ${hidden ? `<button class="ghost-mini" type="button" data-action="unhide-exercise" data-id="${escapeHtml(exercise.id)}">Unhide</button>` : ""}
       </div>
     </div>
   `;
@@ -2045,8 +1809,6 @@ function renderExercises() {
   const primaryOptions = muscleGroups.map((muscle) => `
     <option value="${muscle.id}" ${primary === muscle.id ? "selected" : ""}>${escapeHtml(muscle.label)}</option>
   `).join("");
-  const builtInPreview = exerciseLibrary.filter((exercise) => !isExerciseHidden(exercise.id)).slice(0, 12);
-  const hiddenExercises = exerciseLibrary.filter((exercise) => isExerciseHidden(exercise.id));
 
   return `
     <section class="hero">
@@ -2106,25 +1868,6 @@ function renderExercises() {
       <div class="exercise-list">
         ${customExercises.length ? customExercises.map((exercise) => exerciseCard(exercise, true)).join("") : `<div class="empty">Add the movements you actually do, then TrainWise can credit them to the right muscle groups.</div>`}
       </div>
-    </section>
-
-    <section class="section chart-panel">
-      <div class="chart-header">
-        <h3>Starter library</h3>
-        <span class="muted small">${exerciseLibrary.length} built in</span>
-      </div>
-      <div class="exercise-list">
-        ${builtInPreview.map((exercise) => exerciseCard(exercise, false)).join("")}
-      </div>
-      ${hiddenExercises.length ? `
-        <div class="chart-header" style="margin-top: 14px;">
-          <h3>Removed exercises</h3>
-          <span class="muted small">${hiddenExercises.length} removed</span>
-        </div>
-        <div class="exercise-list">
-          ${hiddenExercises.map((exercise) => exerciseCard(exercise, false, true)).join("")}
-        </div>
-      ` : ""}
     </section>
   `;
 }
@@ -2518,12 +2261,12 @@ function renderHistory() {
 
 function renderTrends() {
   const exercises = [...new Set([...exerciseNames(), ...state.workouts.map((entry) => entry.exercise)])];
-  if (!exercises.includes(state.selectedExercise)) state.selectedExercise = exercises[0];
-  const options = exercises.map((exercise) => `<option ${exercise === state.selectedExercise ? "selected" : ""}>${escapeHtml(exercise)}</option>`).join("");
+  const selectedExercise = exercises.includes(state.selectedExercise) ? state.selectedExercise : exercises[0];
+  const options = exercises.map((exercise) => `<option ${exercise === selectedExercise ? "selected" : ""}>${escapeHtml(exercise)}</option>`).join("");
   const muscleOptions = muscleGroups.map((muscle) => `<option value="${muscle.id}" ${muscle.id === state.selectedMuscle ? "selected" : ""}>${escapeHtml(muscle.label)}</option>`).join("");
   const selectedMuscleLabel = muscleLabel(state.selectedMuscle);
-  const volumeSeries = seriesFromWorkouts(state.selectedExercise, workoutVolume);
-  const e1rmSeries = seriesFromWorkouts(state.selectedExercise, e1rm);
+  const volumeSeries = seriesFromWorkouts(selectedExercise, workoutVolume);
+  const e1rmSeries = seriesFromWorkouts(selectedExercise, e1rm);
   const muscleSetSeries = seriesFromMuscle(state.selectedMuscle, "sets");
   const muscleVolumeSeries = seriesFromMuscle(state.selectedMuscle, "volume");
 
@@ -2564,7 +2307,7 @@ function renderTrends() {
       </div>
       <div class="grid two">
         <div class="chart-panel">
-          <div class="chart-header"><h3>${escapeHtml(state.selectedExercise)} load volume</h3><span class="muted small">sets x reps x load</span></div>
+          <div class="chart-header"><h3>${escapeHtml(selectedExercise)} load volume</h3><span class="muted small">sets x reps x load</span></div>
           ${lineChart(volumeSeries, "#9b8cff", " lb")}
         </div>
         <div class="chart-panel">
@@ -2935,7 +2678,7 @@ async function saveWorkout(form) {
     };
   });
 
-  for (const entry of entries) await dbPut("workouts", entry);
+  await dbPutBatch("workouts", entries);
   const first = entries[0];
   state.selectedExercise = first.exercise;
   state.draftDate = first.date;
@@ -3308,270 +3051,230 @@ function clearWorkoutDraft() {
   state.logHistoryExercise = "";
 }
 
+async function moveExerciseDraft(draftId, direction) {
+  readDraftFromForm();
+  const drafts = [...state.workoutDraft];
+  const idx = drafts.findIndex((d) => d.draftId === draftId);
+  if (idx < 0) return;
+  const swapIdx = idx + direction;
+  if (swapIdx < 0 || swapIdx >= drafts.length) return;
+  [drafts[idx], drafts[swapIdx]] = [drafts[swapIdx], drafts[idx]];
+  state.workoutDraft = drafts;
+  syncLegacyDraftFromFirst();
+  await render();
+}
+
 async function handleAction(action, target) {
-  if (action === "app-retry") {
-    await init();
-    return;
-  }
-  if (action === "refresh-app-shell") {
-    await refreshAppShell();
-    return;
-  }
-  if (action === "toggle-template-panel") {
-    readDraftFromForm();
-    state.showTemplatePanel = !state.showTemplatePanel;
-    await render();
-    return;
-  }
-  if (action === "history-select-exercise") {
-    state.historyExercise = target.dataset.exercise || "";
-    state.historyMode = "exercises";
-    await render();
-    return;
-  }
-  if (action === "history-back") {
-    state.historyExercise = "";
-    state.historyMode = "exercises";
-    await render();
-    return;
-  }
-  if (action === "history-set-mode") {
-    state.historyMode = target.dataset.historyMode === "dates" ? "dates" : "exercises";
-    await render();
-    return;
-  }
-  if (action === "history-date-chip") {
-    state.historyMode = "dates";
-    state.historyDate = target.dataset.historyDateValue || "";
-    await render();
-    return;
-  }
-  if (action === "clear-history-date") {
-    state.historyDate = "";
-    await render();
-    return;
-  }
-  if (action === "coach-timeframe") {
-    const minutes = Number(target.dataset.coachMinutes);
-    state.coachTimeframeMinutes = COACH_TIMEFRAME_OPTIONS.some((option) => option.minutes === minutes)
-      ? minutes
-      : SESSION_LIMIT_MINUTES;
-    await render();
-    return;
-  }
-  if (action === "return-to-today") {
-    readDraftFromForm();
-    const today = todayISO();
-    state.draftDate = today;
-    const workoutsForDate = state.workouts.filter((w) => w.date === today);
-    if (workoutsForDate.length) {
-      const first = workoutsForDate[0];
-      state.editingWorkoutId = first.id;
-      state.workoutDraft = workoutsForDate.map((entry) => ({
-        draftId: uid(),
-        editingWorkoutId: entry.id,
-        exercise: entry.exercise,
-        targetMuscle: entry.primaryMuscles?.[0] || "chest",
-        notes: entry.notes || "",
-        setRows: setRowsFromWorkout(entry)
-      }));
+  const actions = {
+    async "app-retry"() { await init(); },
+    async "refresh-app-shell"() { await refreshAppShell(); },
+    async "toggle-template-panel"() {
+      readDraftFromForm();
+      state.showTemplatePanel = !state.showTemplatePanel;
+      await render();
+    },
+    async "history-select-exercise"() {
+      state.historyExercise = target.dataset.exercise || "";
+      state.historyMode = "exercises";
+      await render();
+    },
+    async "history-back"() {
+      state.historyExercise = "";
+      state.historyMode = "exercises";
+      await render();
+    },
+    async "history-set-mode"() {
+      state.historyMode = target.dataset.historyMode === "dates" ? "dates" : "exercises";
+      await render();
+    },
+    async "history-date-chip"() {
+      state.historyMode = "dates";
+      state.historyDate = target.dataset.historyDateValue || "";
+      await render();
+    },
+    async "clear-history-date"() {
+      state.historyDate = "";
+      await render();
+    },
+    async "coach-timeframe"() {
+      const minutes = Number(target.dataset.coachMinutes);
+      state.coachTimeframeMinutes = COACH_TIMEFRAME_OPTIONS.some((option) => option.minutes === minutes)
+        ? minutes
+        : SESSION_LIMIT_MINUTES;
+      await render();
+    },
+    async "return-to-today"() {
+      readDraftFromForm();
+      const today = todayISO();
+      state.draftDate = today;
+      const workoutsForDate = state.workouts.filter((w) => w.date === today);
+      if (workoutsForDate.length) {
+        const first = workoutsForDate[0];
+        state.editingWorkoutId = first.id;
+        state.workoutDraft = workoutsForDate.map((entry) => ({
+          draftId: uid(),
+          editingWorkoutId: entry.id,
+          exercise: entry.exercise,
+          targetMuscle: entry.primaryMuscles?.[0] || "chest",
+          notes: entry.notes || "",
+          setRows: setRowsFromWorkout(entry)
+        }));
+        syncLegacyDraftFromFirst();
+      } else {
+        state.editingWorkoutId = null;
+        state.workoutDraft = ensureWorkoutDraft().map((d) => ({ ...d, editingWorkoutId: null }));
+        syncLegacyDraftFromFirst();
+      }
+      await render();
+    },
+    async "add-exercise-table"() {
+      readDraftFromForm();
+      state.workoutDraft.push(defaultDraftExercise(exerciseNames()[0] || "Push-up"));
+      await render();
+    },
+    async "remove-exercise-table"() {
+      readDraftFromForm();
+      state.workoutDraft = ensureWorkoutDraft().filter((draft) => draft.draftId !== target.dataset.draftId);
       syncLegacyDraftFromFirst();
-    } else {
+      await render();
+    },
+    async "move-exercise-up"() { await moveExerciseDraft(target.dataset.draftId, -1); },
+    async "move-exercise-down"() { await moveExerciseDraft(target.dataset.draftId, 1); },
+    async "toggle-exercise-menu"() {
+      readDraftFromForm();
+      state.openExerciseMenu = state.openExerciseMenu === target.dataset.draftId ? null : target.dataset.draftId;
+      await render();
+    },
+    async "open-exercise-history"() {
+      readDraftFromForm();
+      state.logHistoryExercise = target.dataset.exercise;
+      state.openExerciseMenu = null;
+      await render();
+    },
+    async "close-log-history"() {
+      state.logHistoryExercise = "";
+      await render();
+    },
+    async "edit-exercise"() {
+      state.activeTab = "exercises";
+      state.editingExerciseId = target.dataset.id;
+      await render();
+    },
+    async "cancel-exercise-edit"() { state.editingExerciseId = null; await render(); },
+    async "exercise-clear-form"() { state.editingExerciseId = null; await render(); },
+    async "delete-exercise"() {
+      const exercise = getCustomExercises().find((item) => item.id === target.dataset.id);
+      if (!exercise) throw new Error("Exercise not found.");
+      if (!confirm(`Delete "${exercise.name}" from your exercise database? Existing logs stay intact.`)) return;
+      await saveSetting("customExercises", getCustomExercises().filter((item) => item.id !== exercise.id));
+      if (state.editingExerciseId === exercise.id) state.editingExerciseId = null;
+      await render();
+      toast("Exercise deleted.");
+    },
+    async "log-exercise"() {
+      state.activeTab = "log";
+      state.logMode = "strength";
       state.editingWorkoutId = null;
-      state.workoutDraft = ensureWorkoutDraft().map((d) => ({ ...d, editingWorkoutId: null }));
+      state.selectedExercise = target.dataset.exercise;
+      state.draftTargetMuscle = resolveExerciseMeta(state.selectedExercise).primaryMuscles[0] || "chest";
+      state.setRows = defaultSetRows();
+      state.workoutDraft = [defaultDraftExercise(state.selectedExercise)];
+      await render();
+    },
+    "quick-backup"() { downloadBackup(); },
+    "export-data"() { downloadBackup(); },
+    "import-click"() { document.getElementById("import-file")?.click(); },
+    async "add-set"() {
+      readDraftFromForm();
+      const draft = state.workoutDraft.find((item) => item.draftId === target.dataset.draftId) || state.workoutDraft[0];
+      const last = draft.setRows[draft.setRows.length - 1] || { weight: "", reps: 10, rir: 2 };
+      draft.setRows.push({ ...last });
       syncLegacyDraftFromFirst();
-    }
-    await render();
-    return;
-  }
-  if (action === "add-exercise-table") {
-    readDraftFromForm();
-    state.workoutDraft.push(defaultDraftExercise(exerciseNames()[0] || "Push-up"));
-    await render();
-    return;
-  }
-  if (action === "remove-exercise-table") {
-    readDraftFromForm();
-    state.workoutDraft = ensureWorkoutDraft().filter((draft) => draft.draftId !== target.dataset.draftId);
-    syncLegacyDraftFromFirst();
-    await render();
-    return;
-  }
-  if (action === "move-exercise-up" || action === "move-exercise-down") {
-    readDraftFromForm();
-    const draftId = target.dataset.draftId;
-    const drafts = [...state.workoutDraft];
-    const idx = drafts.findIndex((d) => d.draftId === draftId);
-    if (idx < 0) return;
-    const swapIdx = action === "move-exercise-up" ? idx - 1 : idx + 1;
-    if (swapIdx < 0 || swapIdx >= drafts.length) return;
-    [drafts[idx], drafts[swapIdx]] = [drafts[swapIdx], drafts[idx]];
-    state.workoutDraft = drafts;
-    syncLegacyDraftFromFirst();
-    await render();
-    return;
-  }
-  if (action === "toggle-exercise-menu") {
-    readDraftFromForm();
-    state.openExerciseMenu = state.openExerciseMenu === target.dataset.draftId ? null : target.dataset.draftId;
-    await render();
-    return;
-  }
-  if (action === "open-exercise-history") {
-    readDraftFromForm();
-    state.logHistoryExercise = target.dataset.exercise;
-    state.openExerciseMenu = null;
-    await render();
-    return;
-  }
-  if (action === "close-log-history") {
-    state.logHistoryExercise = "";
-    await render();
-    return;
-  }
-  if (action === "edit-exercise") {
-    state.activeTab = "exercises";
-    state.editingExerciseId = target.dataset.id;
-    await render();
-    return;
-  }
-  if (action === "cancel-exercise-edit" || action === "exercise-clear-form") {
-    state.editingExerciseId = null;
-    await render();
-    return;
-  }
-  if (action === "delete-exercise") {
-    const exercise = getCustomExercises().find((item) => item.id === target.dataset.id);
-    if (!exercise) throw new Error("Exercise not found.");
-    if (!confirm(`Delete "${exercise.name}" from your exercise database? Existing logs stay intact.`)) return;
-    await saveSetting("customExercises", getCustomExercises().filter((item) => item.id !== exercise.id));
-    if (state.editingExerciseId === exercise.id) state.editingExerciseId = null;
-    await render();
-    toast("Exercise deleted.");
-    return;
-  }
-  if (action === "hide-exercise") {
-    const exercise = exerciseLibrary.find((item) => item.id === target.dataset.id);
-    if (!exercise) throw new Error("Exercise not found.");
-    const hidden = getHiddenExercises();
-    if (!hidden.includes(exercise.id)) {
-      await saveSetting("hiddenExercises", [...hidden, exercise.id]);
-    }
-    await render();
-    toast(`"${exercise.name}" removed from library.`);
-    return;
-  }
-  if (action === "unhide-exercise") {
-    const hidden = getHiddenExercises();
-    const id = target.dataset.id;
-    await saveSetting("hiddenExercises", hidden.filter((itemId) => itemId !== id));
-    await render();
-    toast("Exercise restored to library.");
-    return;
-  }
-  if (action === "log-exercise") {
-    state.activeTab = "log";
-    state.logMode = "strength";
-    state.editingWorkoutId = null;
-    state.selectedExercise = target.dataset.exercise;
-    state.draftTargetMuscle = resolveExerciseMeta(state.selectedExercise).primaryMuscles[0] || "chest";
-    state.setRows = defaultSetRows();
-    state.workoutDraft = [defaultDraftExercise(state.selectedExercise)];
-    await render();
-    return;
-  }
-  if (action === "quick-backup" || action === "export-data") downloadBackup();
-  if (action === "import-click") document.getElementById("import-file")?.click();
-  if (action === "add-set") {
-    readDraftFromForm();
-    const draft = state.workoutDraft.find((item) => item.draftId === target.dataset.draftId) || state.workoutDraft[0];
-    const last = draft.setRows[draft.setRows.length - 1] || { weight: "", reps: 10, rir: 2 };
-    draft.setRows.push({ ...last });
-    syncLegacyDraftFromFirst();
-    await render();
-  }
-  if (action === "remove-set") {
-    readDraftFromForm();
-    const index = Number(target.dataset.index);
-    const draft = state.workoutDraft.find((item) => item.draftId === target.dataset.draftId) || state.workoutDraft[0];
-    if (draft.setRows.length > 1) draft.setRows.splice(index, 1);
-    syncLegacyDraftFromFirst();
-    await render();
-  }
-  if (action === "use-last-session") {
-    readDraftFromForm();
-    const draft = state.workoutDraft.find((item) => item.draftId === target.dataset.draftId) || state.workoutDraft[0];
-    const last = lastSessionForExercise(draft.exercise, draft.editingWorkoutId);
-    if (!last) throw new Error("No previous session for this exercise yet.");
-    draft.setRows = setRowsFromWorkout(last);
-    draft.notes = last.notes || draft.notes;
-    syncLegacyDraftFromFirst();
-    await render();
-    toast("Last session loaded.");
-  }
-  if (action === "toggle-history") {
-    readDraftFromForm();
-    state.historyExercise = state.historyExercise === state.selectedExercise ? "" : state.selectedExercise;
-    await render();
-  }
-  if (action === "new-log") {
-    if (!confirm("Clear all logged info? This will discard your current draft.")) return;
-    readDraftFromForm();
-    clearWorkoutDraft();
-    await render();
-  }
-  if (action === "edit-workout") {
-    editWorkout(target.dataset.id);
-    await render();
-  }
-  if (action === "save-day-template") await saveDayTemplate();
-  if (action === "load-template") await loadDayTemplate();
-  if (action === "delete-template") await deleteDayTemplate();
-  if (action === "template-exercise") {
-    readDraftFromForm();
-    const item = state.templateQueue[Number(target.dataset.index)];
-    if (item) {
-      const draft = {
-        draftId: uid(),
-        editingWorkoutId: null,
-        exercise: item.exercise,
-        targetMuscle: item.targetMuscle || resolveExerciseMeta(item.exercise).primaryMuscles[0] || "chest",
-        notes: item.notes || "",
-        setRows: normalizeSetRows(item.setRows)
-      };
-      state.workoutDraft = [draft];
+      await render();
+    },
+    async "remove-set"() {
+      readDraftFromForm();
+      const index = Number(target.dataset.index);
+      const draft = state.workoutDraft.find((item) => item.draftId === target.dataset.draftId) || state.workoutDraft[0];
+      if (draft.setRows.length > 1) draft.setRows.splice(index, 1);
       syncLegacyDraftFromFirst();
-    }
-    await render();
-  }
-  if (action === "delete-workout") {
-    await dbDelete("workouts", target.dataset.id);
-    if (state.editingWorkoutId === target.dataset.id) clearWorkoutDraft();
-    await loadState();
-    await render();
-    toast("Lift deleted.");
-  }
-  if (action === "delete-metric") {
-    await dbDelete("metrics", target.dataset.id);
-    await loadState();
-    await render();
-    toast("Metric deleted.");
-  }
-  if (action === "choose-exercise") {
-    readDraftFromForm();
-    const exercise = target.dataset.exercise;
-    state.workoutDraft.push(defaultDraftExercise(exercise));
-    syncLegacyDraftFromFirst();
-    await render();
-  }
-  if (action === "save-supabase") await saveSupabaseSettings();
-  if (action === "signup-supabase") await supabaseAuth("signup");
-  if (action === "signin-supabase") await supabaseAuth("signin");
-  if (action === "push-supabase") await pushSupabaseBackup();
-  if (action === "pull-supabase") await pullSupabaseBackup();
-  if (action === "load-sample-data") await loadSampleData();
-  if (action === "remove-sample-data") await removeSampleData();
-  if (action === "clear-all") await clearAll();
+      await render();
+    },
+    async "use-last-session"() {
+      readDraftFromForm();
+      const draft = state.workoutDraft.find((item) => item.draftId === target.dataset.draftId) || state.workoutDraft[0];
+      const last = lastSessionForExercise(draft.exercise, draft.editingWorkoutId);
+      if (!last) throw new Error("No previous session for this exercise yet.");
+      draft.setRows = setRowsFromWorkout(last);
+      draft.notes = last.notes || draft.notes;
+      syncLegacyDraftFromFirst();
+      await render();
+      toast("Last session loaded.");
+    },
+    async "toggle-history"() {
+      readDraftFromForm();
+      state.historyExercise = state.historyExercise === state.selectedExercise ? "" : state.selectedExercise;
+      await render();
+    },
+    async "new-log"() {
+      if (!confirm("Clear all logged info? This will discard your current draft.")) return;
+      readDraftFromForm();
+      clearWorkoutDraft();
+      await render();
+    },
+    async "edit-workout"() {
+      editWorkout(target.dataset.id);
+      await render();
+    },
+    async "save-day-template"() { await saveDayTemplate(); },
+    async "load-template"() { await loadDayTemplate(); },
+    async "delete-template"() { await deleteDayTemplate(); },
+    async "template-exercise"() {
+      readDraftFromForm();
+      const item = state.templateQueue[Number(target.dataset.index)];
+      if (item) {
+        state.workoutDraft = [{
+          draftId: uid(),
+          editingWorkoutId: null,
+          exercise: item.exercise,
+          targetMuscle: item.targetMuscle || resolveExerciseMeta(item.exercise).primaryMuscles[0] || "chest",
+          notes: item.notes || "",
+          setRows: normalizeSetRows(item.setRows)
+        }];
+        syncLegacyDraftFromFirst();
+      }
+      await render();
+    },
+    async "delete-workout"() {
+      await dbDelete("workouts", target.dataset.id);
+      if (state.editingWorkoutId === target.dataset.id) clearWorkoutDraft();
+      await loadState();
+      await render();
+      toast("Lift deleted.");
+    },
+    async "delete-metric"() {
+      await dbDelete("metrics", target.dataset.id);
+      await loadState();
+      await render();
+      toast("Metric deleted.");
+    },
+    async "choose-exercise"() {
+      readDraftFromForm();
+      state.workoutDraft.push(defaultDraftExercise(target.dataset.exercise));
+      syncLegacyDraftFromFirst();
+      await render();
+    },
+    async "save-supabase"() { await saveSupabaseSettings(); },
+    async "signup-supabase"() { await supabaseAuth("signup"); },
+    async "signin-supabase"() { await supabaseAuth("signin"); },
+    async "push-supabase"() { await pushSupabaseBackup(); },
+    async "pull-supabase"() { await pullSupabaseBackup(); },
+    async "load-sample-data"() { await loadSampleData(); },
+    async "remove-sample-data"() { await removeSampleData(); },
+    async "clear-all"() { await clearAll(); }
+  };
+  const handler = actions[action];
+  if (handler) await handler();
 }
 
 const dragState = {
@@ -3617,6 +3320,19 @@ function cancelPendingDrag() {
   dragState.handle = null;
 }
 
+function resetDragState() {
+  dragState.id = null;
+  dragState.active = false;
+  dragState.pending = false;
+  dragState.moved = false;
+  dragState.handle = null;
+  state.draggingDraftId = null;
+  document.querySelectorAll(".exercise-draft.is-dragging").forEach((section) => {
+    section.classList.remove("is-dragging");
+    section.style.transform = "";
+  });
+}
+
 async function finishExerciseDrag(event) {
   clearTimeout(dragState.dragTimer);
   if (dragState.pending && !dragState.active) {
@@ -3649,16 +3365,7 @@ async function finishExerciseDrag(event) {
       syncLegacyDraftFromFirst();
     }
   }
-  dragState.id = null;
-  dragState.active = false;
-  dragState.pending = false;
-  dragState.moved = false;
-  dragState.handle = null;
-  state.draggingDraftId = null;
-  document.querySelectorAll(".exercise-draft.is-dragging").forEach((section) => {
-    section.classList.remove("is-dragging");
-    section.style.transform = "";
-  });
+  resetDragState();
   if (changed) await render();
 }
 

@@ -55,11 +55,35 @@ const resetAndHelpers = `
   state.metrics = [];
   state.settings = {};
   state.selectedExercise = "Push-up";
+  state.settings.customExercises = [
+    ...muscleGroups.map((muscle) => ({
+      id: "custom-" + muscle.id,
+      name: muscle.label + " Exercise",
+      primaryMuscles: [muscle.id],
+      secondaryMuscles: [],
+      equipment: "dumbbells",
+      reps: "8-12",
+      rest: "90-180 sec",
+      cue: "Test exercise for " + muscle.label,
+      userCreated: true
+    })),
+    {
+      id: "custom-bench-press",
+      name: "Dumbbell Bench Press",
+      primaryMuscles: ["chest"],
+      secondaryMuscles: ["triceps", "shoulders"],
+      equipment: "dumbbells, bench",
+      reps: "8-15",
+      rest: "90-180 sec",
+      cue: "Test bench press with secondary muscles.",
+      userCreated: true
+    }
+  ];
   var makeWorkout = (muscle, daysAgo = 2, sets = 2, extra = {}) => ({
     id: extra.id || "w-" + muscle.id + "-" + daysAgo,
     date: dateDaysAgo(daysAgo),
-    exercise: extra.exercise || chooseExerciseForMuscle(muscle.id)?.name || muscle.label,
-    exerciseId: extra.exerciseId || chooseExerciseForMuscle(muscle.id)?.id || "manual-" + muscle.id,
+    exercise: extra.exercise || ("custom-" + muscle.id),
+    exerciseId: extra.exerciseId || ("custom-" + muscle.id),
     primaryMuscles: extra.primaryMuscles || [muscle.id],
     secondaryMuscles: extra.secondaryMuscles || [],
     sets,
@@ -112,9 +136,7 @@ assert.strictEqual(secondaryReadiness.secondaryDaysSince, 1, "Triceps should sti
 
 const missingCoverage = runScenario(`
   ${resetAndHelpers}
-  state.settings.hiddenExercises = exerciseLibrary
-    .filter((exercise) => exercise.primaryMuscles.includes("back"))
-    .map((exercise) => exercise.id);
+  state.settings.customExercises = state.settings.customExercises.filter((ex) => !ex.primaryMuscles.includes("back"));
   state.workouts = muscleGroups.map((muscle) => makeWorkout(muscle, 2, 2));
   var plan = buildTodayPlan(60);
   var whyHtml = renderCoachWhy(plan);
@@ -161,5 +183,102 @@ const personalRest = runScenario(`
 `);
 
 assert(personalRest.estimated >= 12, `Expected personal long rest data to increase time estimate, got ${personalRest.estimated}`);
+
+const extraSetFairness = runScenario(`
+  ${resetAndHelpers}
+  var chest = muscleGroups.find((m) => m.id === "chest");
+  var back = muscleGroups.find((m) => m.id === "back");
+  state.workouts = [
+    makeWorkout(chest, 2, 8),
+    makeWorkout(back, 2, 3),
+    makeWorkout(muscleGroups.find((m) => m.id === "quads"), 2, 10),
+    makeWorkout(muscleGroups.find((m) => m.id === "biceps"), 2, 10),
+    makeWorkout(muscleGroups.find((m) => m.id === "calves"), 2, 10)
+  ];
+  var plan = buildTodayPlan(60);
+  var chestItem = plan.sessionPlan.items.find((item) => item.muscle.id === "chest");
+  var backItem = plan.sessionPlan.items.find((item) => item.muscle.id === "back");
+  ({
+    chestSets: chestItem?.sets || 0,
+    backSets: backItem?.sets || 0,
+    chestDeficit: chestItem?.deficit || 0,
+    backDeficit: backItem?.deficit || 0
+  });
+`);
+
+assert(extraSetFairness.backSets > extraSetFairness.chestSets, `Expected Back (higher deficit) to get more extras, got chest=${extraSetFairness.chestSets} back=${extraSetFairness.backSets}`);
+
+const shortTimeframe = runScenario(`
+  ${resetAndHelpers}
+  state.workouts = muscleGroups.map((muscle) => makeWorkout(muscle, 2, 2));
+  var plan30 = buildTodayPlan(30).sessionPlan;
+  ({
+    total30: plan30.totalMinutes,
+    items30: plan30.items.length,
+    fits: plan30.totalMinutes <= 30
+  });
+`);
+
+assert(shortTimeframe.fits, `Expected 30 min plan to fit within limit, got ${shortTimeframe.total30}`);
+assert(shortTimeframe.items30 >= 2, `Expected 30 min to cover at least 2 muscles, got ${shortTimeframe.items30}`);
+
+const midTimeframe = runScenario(`
+  ${resetAndHelpers}
+  state.workouts = muscleGroups.map((muscle) => makeWorkout(muscle, 2, 2));
+  var plan40 = buildTodayPlan(40).sessionPlan;
+  ({
+    total40: plan40.totalMinutes,
+    items40: plan40.items.length,
+    fits: plan40.totalMinutes <= 40
+  });
+`);
+
+assert(midTimeframe.fits, `Expected 40 min plan to fit within limit, got ${midTimeframe.total40}`);
+assert(midTimeframe.items40 >= 3, `Expected 40 min to cover at least 3 muscles, got ${midTimeframe.items40}`);
+
+const allUnderdeveloped = runScenario(`
+  ${resetAndHelpers}
+  state.workouts = muscleGroups.map((muscle) => makeWorkout(muscle, 5, 1));
+  var plan = buildTodayPlan(60);
+  ({
+    total: plan.sessionPlan.totalMinutes,
+    itemCount: plan.sessionPlan.items.length,
+    fits: plan.sessionPlan.totalMinutes <= 60
+  });
+`);
+
+assert(allUnderdeveloped.fits, `Expected all-underdeveloped plan to fit within limit, got ${allUnderdeveloped.total}`);
+assert(allUnderdeveloped.itemCount >= 4, `Expected all-underdeveloped to cover at least 4 muscles, got ${allUnderdeveloped.itemCount}`);
+
+const emptyPlanAction = runScenario(`
+  ${resetAndHelpers}
+  state.workouts = muscleGroups.map((muscle) => makeWorkout(muscle, 2, 10));
+  var plan = buildTodayPlan(60);
+  var action = actionFromSessionPlan(plan);
+  ({
+    mode: action.mode,
+    hasTitle: typeof action.title === "string" && action.title.length > 0,
+    hasBody: typeof action.body === "string" && action.body.length > 0
+  });
+`);
+
+assert(emptyPlanAction.hasTitle, `Expected action to have a title even with no items, got mode=${emptyPlanAction.mode}`);
+assert(emptyPlanAction.hasBody, `Expected action to have body text even with no items, got mode=${emptyPlanAction.mode}`);
+
+const exerciseScoring = runScenario(`
+  ${resetAndHelpers}
+  var chest = muscleGroups.find((m) => m.id === "chest");
+  var bench = resolveExerciseMeta("Dumbbell Bench Press");
+  var fly = resolveExerciseMeta("Cable Fly");
+  state.workouts = [
+    makeWorkout(chest, 1, 3, { exercise: bench.name, exerciseId: bench.id, primaryMuscles: bench.primaryMuscles, secondaryMuscles: bench.secondaryMuscles, restSeconds: 180 }),
+    makeWorkout(chest, 2, 3, { exercise: bench.name, exerciseId: bench.id, primaryMuscles: bench.primaryMuscles, secondaryMuscles: bench.secondaryMuscles, restSeconds: 180 })
+  ];
+  var benchScore = scoreExerciseForMuscle(bench, "chest");
+  var flyScore = scoreExerciseForMuscle(fly, "chest");
+  ({ benchScore, flyScore, benchWins: benchScore > flyScore });
+`);
+
+assert(exerciseScoring.benchWins, `Expected exercised bench (score=${exerciseScoring.benchScore}) to beat unused fly (score=${exerciseScoring.flyScore})`);
 
 console.log("coach regression tests passed");
