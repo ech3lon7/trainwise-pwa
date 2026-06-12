@@ -3,13 +3,20 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 2;
 const STORES = ["workouts", "metrics", "settings"];
-const APP_VERSION = "1.4.3";
+const APP_VERSION = "1.4.9";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 let dbOpenPromise = null;
 let chartId = 0;
 let reloadingForUpdate = false;
 let renderToken = 0;
 const SESSION_LIMIT_MINUTES = 60;
+const COACH_TIMEFRAME_OPTIONS = [
+  { label: "30 min", minutes: 30 },
+  { label: "40 min", minutes: 40 },
+  { label: "50 min", minutes: 50 },
+  { label: "1 hour", minutes: 60 },
+  { label: "1 hour+", minutes: 75 }
+];
 
 const HYPERTROPHY = {
   minimumSets: 10,
@@ -252,9 +259,11 @@ const state = {
   openExerciseMenu: null,
   logHistoryExercise: "",
   workoutDraft: [],
+  historyMode: "exercises",
   historyExercise: "",
   historySearch: "",
   historyDate: "",
+  coachTimeframeMinutes: SESSION_LIMIT_MINUTES,
   draggingDraftId: null,
   templateQueue: [],
   draftDate: todayISO(),
@@ -306,6 +315,13 @@ function parseLocalDate(value) {
 function fmt(num, digits = 0) {
   if (!Number.isFinite(num)) return "--";
   return new Intl.NumberFormat(undefined, { maximumFractionDigits: digits }).format(num);
+}
+
+function formatShortDate(value) {
+  if (!value) return "";
+  const date = parseLocalDate(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
 function parseNum(value) {
@@ -881,37 +897,234 @@ function estimateExerciseMinutes(exercise, sets) {
   return Math.ceil(3 + sets * perSetMinutes);
 }
 
-function buildSessionPlan(limitMinutes = SESSION_LIMIT_MINUTES) {
+function lastWorkoutForMuscle(muscleId) {
+  return state.workouts.find((workout) => muscleCreditFactor(workout, muscleId) > 0) || null;
+}
+
+function muscleReadiness(stat) {
+  const lastWorkout = lastWorkoutForMuscle(stat.id);
+  const daysSince = lastWorkout ? daysBetween(lastWorkout.date, todayISO()) : null;
+  let readiness = "ready";
+  let reason = lastWorkout ? `Last trained ${daysSince} day${daysSince === 1 ? "" : "s"} ago.` : "No recent work logged.";
+  if (daysSince !== null && daysSince <= 1) {
+    readiness = "recent";
+    reason = `Trained ${daysSince === 0 ? "today" : "yesterday"}, so it can wait if another gap is useful.`;
+  } else if (stat.sessions < 2 && stat.sets >= 5) {
+    readiness = "needs-touch";
+    reason = `${stat.sessions}/2 weekly touches; a second exposure would help.`;
+  } else if (stat.sets > HYPERTROPHY.growthHigh) {
+    readiness = "high";
+    reason = `Above ${HYPERTROPHY.growthHigh} weekly sets; watch recovery.`;
+  }
+  return { ...stat, lastWorkout, daysSince, readiness, readinessReason: reason };
+}
+
+function rankedCoachMuscles() {
+  return muscleSetStats()
+    .map(muscleReadiness)
+    .sort((a, b) => {
+      const aRecentlyTrained = a.daysSince !== null && a.daysSince <= 1;
+      const bRecentlyTrained = b.daysSince !== null && b.daysSince <= 1;
+      return (aRecentlyTrained - bRecentlyTrained)
+        || (b.deficit - a.deficit)
+        || (a.sessions - b.sessions)
+        || (a.sets - b.sets);
+    });
+}
+
+function planPriorityReason(item) {
+  const parts = [
+    `${item.muscle.label} is ${fmt(item.muscle.sets, 1)}/${HYPERTROPHY.minimumSets} hard sets`,
+    `${item.muscle.sessions}/2 touches`
+  ];
+  if (item.muscle.daysSince !== null) parts.push(`last hit ${item.muscle.daysSince}d ago`);
+  return parts.join(" - ");
+}
+
+function selectedCoachTimeframeMinutes() {
+  const selected = Number(state.coachTimeframeMinutes) || SESSION_LIMIT_MINUTES;
+  return COACH_TIMEFRAME_OPTIONS.some((option) => option.minutes === selected) ? selected : SESSION_LIMIT_MINUTES;
+}
+
+function coachTimeframeLabel(minutes = selectedCoachTimeframeMinutes()) {
+  return COACH_TIMEFRAME_OPTIONS.find((option) => option.minutes === minutes)?.label || "1 hour";
+}
+
+function coachTimeframeSelectionLabel(minutes = selectedCoachTimeframeMinutes()) {
+  return `Selected: ${coachTimeframeLabel(minutes)}`;
+}
+
+function sessionPlanCaps(limitMinutes, restart = false) {
+  const limit = Math.min(75, Math.max(30, Number(limitMinutes) || SESSION_LIMIT_MINUTES));
+  if (restart) {
+    return {
+      maxItems: limit <= 30 ? 2 : limit <= 40 ? 3 : limit <= 50 ? 4 : 5,
+      minSets: 2,
+      maxSets: limit <= 40 ? 2 : limit <= 60 ? 3 : 4,
+      finishBuffer: limit <= 30 ? 4 : limit <= 40 ? 6 : 3
+    };
+  }
+  return {
+    maxItems: limit <= 30 ? 2 : limit <= 40 ? 3 : limit <= 50 ? 4 : 5,
+    minSets: 2,
+    maxSets: limit <= 40 ? 3 : limit <= 50 ? 4 : 5,
+    finishBuffer: limit <= 30 ? 4 : limit <= 40 ? 6 : 3
+  };
+}
+
+function plannedExerciseMinutes(item, sets = item.sets) {
+  return estimateExerciseMinutes(item.exercise, sets);
+}
+
+function buildSessionPlan(limitMinutes = SESSION_LIMIT_MINUTES, options = {}) {
+  const restart = options.restart || false;
+  const cappedLimit = Math.min(75, Math.max(30, Number(limitMinutes) || SESSION_LIMIT_MINUTES));
+  const caps = sessionPlanCaps(cappedLimit, restart);
   const stats = muscleSetStats()
+    .map(muscleReadiness)
     .filter((stat) => stat.sets < HYPERTROPHY.minimumSets)
-    .sort((a, b) => a.sets - b.sets);
+    .sort((a, b) => {
+      const aRecentlyTrained = a.daysSince !== null && a.daysSince <= 1;
+      const bRecentlyTrained = b.daysSince !== null && b.daysSince <= 1;
+      return (aRecentlyTrained - bRecentlyTrained)
+        || (b.deficit - a.deficit)
+        || (a.sessions - b.sessions)
+        || (a.sets - b.sets);
+    });
   const items = [];
   const missing = [];
+  const deprioritized = [];
   let totalMinutes = 0;
   const usedExercises = new Set();
 
   for (const target of stats) {
+    const hasAlternative = stats.some((stat) => stat.id !== target.id && stat.deficit > 0 && !(stat.daysSince !== null && stat.daysSince <= 1));
+    if (target.daysSince !== null && target.daysSince <= 1 && hasAlternative) {
+      deprioritized.push({ muscle: target, reason: `${target.label} was trained ${target.daysSince === 0 ? "today" : "yesterday"}.` });
+      continue;
+    }
     const exercise = chooseExerciseForMuscle(target.id);
     if (!exercise) {
       missing.push(target);
       continue;
     }
     if (usedExercises.has(exercise.id)) continue;
-    const sets = Math.min(3, Math.max(2, Math.ceil(target.deficit)));
-    const minutes = estimateExerciseMinutes(exercise, sets);
-    if (items.length && totalMinutes + minutes > limitMinutes) continue;
-    items.push({ muscle: target, exercise, sets, minutes });
+    const desiredSets = Math.min(caps.maxSets, Math.max(caps.minSets, Math.ceil(target.deficit)));
+    let sets = desiredSets;
+    let minutes = estimateExerciseMinutes(exercise, sets);
+    while (sets > caps.minSets && items.length && totalMinutes + minutes > cappedLimit) {
+      sets -= 1;
+      minutes = estimateExerciseMinutes(exercise, sets);
+    }
+    if (items.length && totalMinutes + minutes > cappedLimit) continue;
+    items.push({ muscle: target, exercise, sets, minutes, reason: "" });
     usedExercises.add(exercise.id);
     totalMinutes += minutes;
-    if (totalMinutes >= limitMinutes - 8) break;
+    if (items.length >= caps.maxItems || totalMinutes >= cappedLimit - caps.finishBuffer) break;
   }
 
-  return { items, missing, totalMinutes, limitMinutes };
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const item of items) {
+      const targetMaxSets = Math.min(caps.maxSets, Math.ceil(item.muscle.deficit));
+      if (item.sets >= targetMaxSets) continue;
+      const nextMinutes = plannedExerciseMinutes(item, item.sets + 1);
+      const extraMinutes = nextMinutes - item.minutes;
+      if (totalMinutes + extraMinutes > cappedLimit) continue;
+      item.sets += 1;
+      item.minutes = nextMinutes;
+      totalMinutes += extraMinutes;
+      changed = true;
+      if (totalMinutes >= cappedLimit - caps.finishBuffer) break;
+    }
+  }
+
+  return {
+    items: items.map((item) => ({ ...item, reason: planPriorityReason(item) })),
+    missing,
+    deprioritized,
+    totalMinutes,
+    limitMinutes: cappedLimit,
+    restart
+  };
+}
+
+function buildTodayPlan(limitMinutes = selectedCoachTimeframeMinutes()) {
+  const lastWorkout = state.workouts[0] || null;
+  const daysSinceWorkout = lastWorkout ? daysBetween(lastWorkout.date, todayISO()) : null;
+  const restart = daysSinceWorkout === null || daysSinceWorkout >= 4;
+  const ranked = rankedCoachMuscles();
+  const sessionPlan = buildSessionPlan(limitMinutes, { restart });
+  const proteinAvg = getAverage("protein", 7);
+  const protein = proteinTargets();
+  const highVolume = ranked.filter((stat) => stat.sets > HYPERTROPHY.growthHigh);
+  const belowMinimum = ranked.filter((stat) => stat.sets < HYPERTROPHY.minimumSets);
+  const progression = progressionTargetForExercise(state.selectedExercise) || progressionTargetForExercise(state.workouts[0]?.exercise);
+  const why = [];
+  const notes = [];
+
+  if (restart) {
+    why.push(daysSinceWorkout === null
+      ? "No lifting baseline yet, so the plan starts with a small session."
+      : `${daysSinceWorkout} days since your last lift, so volume is capped for a restart.`);
+  }
+  if (sessionPlan.items.length) {
+    why.push(...sessionPlan.items.slice(0, 3).map((item) => item.reason));
+  }
+  if (sessionPlan.deprioritized.length) {
+    why.push(...sessionPlan.deprioritized.slice(0, 2).map((item) => `${item.reason} Coach picked another gap first.`));
+  }
+  if (sessionPlan.missing.length) {
+    why.push(`Add a primary exercise for ${sessionPlan.missing.map((muscle) => muscle.label).join(", ")} to unlock better plans.`);
+  }
+  if (protein.bodyWeightLb && proteinAvg && proteinAvg < protein.floor) {
+    notes.push(`Protein is under target: ${fmt(proteinAvg)}g avg vs ${fmt(protein.floor)}g floor.`);
+  } else if (!protein.bodyWeightLb || !proteinAvg) {
+    notes.push("Log body weight and protein for nutrition-aware coaching.");
+  }
+  if (highVolume.length) {
+    notes.push(`${highVolume.map((stat) => stat.label).join(", ")} are above the growth zone; hold volume if performance dips.`);
+  }
+
+  if (sessionPlan.items.length) {
+    return {
+      mode: restart ? "restart" : "session",
+      title: restart ? "Restart session" : "Today's Plan",
+      subtitle: restart ? `Small, useful work capped at ${coachTimeframeLabel(limitMinutes)}.` : `Best gaps to train next, capped at ${coachTimeframeLabel(limitMinutes)}.`,
+      sessionPlan,
+      why,
+      notes,
+      progression
+    };
+  }
+
+  if (belowMinimum.length && sessionPlan.missing.length) {
+    return {
+      mode: "library-gap",
+      title: "Add exercise coverage",
+      subtitle: "Coach needs more movement options before it can build a full plan.",
+      sessionPlan,
+      why,
+      notes,
+      progression
+    };
+  }
+
+  return {
+    mode: progression ? "progression" : "recovery",
+    title: progression ? "Progression focus" : "Recovery or maintenance",
+    subtitle: progression ? progression.body : "Minimums are covered. Progress slowly or recover if joints feel beat up.",
+    sessionPlan,
+    why: why.length ? why : ["Weekly minimums are covered, so Coach is not forcing extra volume."],
+    notes,
+    progression
+  };
 }
 
 function nextHypertrophyAction() {
   const stats = muscleSetStats();
-  const sessionPlan = buildSessionPlan();
+  const sessionPlan = buildSessionPlan(selectedCoachTimeframeMinutes());
   const underMinimum = stats
     .filter((stat) => stat.sets < HYPERTROPHY.minimumSets)
     .sort((a, b) => a.sets - b.sets || muscleGroups.findIndex((muscle) => muscle.id === a.id) - muscleGroups.findIndex((muscle) => muscle.id === b.id));
@@ -1973,40 +2186,32 @@ function historyExerciseNames() {
     .sort((a, b) => a.localeCompare(b));
 }
 
-function renderHistoryList() {
-  const search = state.historySearch.trim().toLowerCase();
-  const exercises = historyExerciseNames().filter((name) => name.toLowerCase().includes(search));
-  const dateWorkouts = state.historyDate
-    ? state.workouts.filter((w) => w.date === state.historyDate).sort((a, b) => String(a.createdAt || "").localeCompare(String(b.createdAt || "")))
-    : [];
-  return `
-    <section class="hero">
-      <div>
-        <h2 class="hero-title">History</h2>
-        <p class="hero-copy">Exercise performance, PRs, load volume, and progressive overload from your logged sessions.</p>
-      </div>
-    </section>
+function recentHistoryDates(limit = 7) {
+  return [...new Set(state.workouts.map((entry) => entry.date).filter(Boolean))]
+    .sort((a, b) => b.localeCompare(a))
+    .slice(0, limit);
+}
 
-    <section class="section form-panel">
-      <div class="field">
+function effectiveHistoryDate(recentDates = recentHistoryDates()) {
+  return state.historyDate || recentDates[0] || "";
+}
+
+function renderHistoryModeSegment() {
+  return `
+    <div class="segment history-mode-segment" role="tablist" aria-label="History view">
+      <button class="${state.historyMode === "exercises" ? "is-active" : ""}" type="button" role="tab" aria-selected="${state.historyMode === "exercises"}" data-action="history-set-mode" data-history-mode="exercises">Exercises</button>
+      <button class="${state.historyMode === "dates" ? "is-active" : ""}" type="button" role="tab" aria-selected="${state.historyMode === "dates"}" data-action="history-set-mode" data-history-mode="dates">Dates</button>
+    </div>
+  `;
+}
+
+function renderHistoryExercisesMode(exercises) {
+  return `
+    <section class="section form-panel history-filter-panel">
+      <div class="field history-search-field">
         <label for="history-search">Search exercises</label>
         <input id="history-search" class="search-input" data-history-search value="${escapeHtml(state.historySearch)}" placeholder="Bench press, row, squat">
       </div>
-      <div class="history-date-controls">
-        <div class="field history-date-field">
-          <label for="history-date">Browse by date</label>
-          <input id="history-date" class="history-date-input" type="date" data-history-date value="${escapeHtml(state.historyDate)}">
-        </div>
-        ${state.historyDate ? `<button class="ghost-button history-clear-button" type="button" data-action="clear-history-date">Clear date</button>` : ""}
-      </div>
-      ${dateWorkouts.length ? `
-        <div class="history-date-results">
-          <h3>${escapeHtml(state.historyDate)} — ${dateWorkouts.length} workout${dateWorkouts.length === 1 ? "" : "s"}</h3>
-          <div class="list">
-            ${dateWorkouts.map((entry) => listWorkout(entry)).join("")}
-          </div>
-        </div>
-      ` : state.historyDate ? `<div class="empty">No workouts logged on ${escapeHtml(state.historyDate)}.</div>` : ""}
     </section>
 
     <section class="section history-exercise-grid">
@@ -2035,6 +2240,63 @@ function renderHistoryList() {
         `;
       }).join("") : `<div class="empty">No exercise history matches that search.</div>`}
     </section>
+  `;
+}
+
+function renderHistoryDatesMode() {
+  const recentDates = recentHistoryDates();
+  const selectedDate = effectiveHistoryDate(recentDates);
+  const dateWorkouts = selectedDate
+    ? state.workouts.filter((w) => w.date === selectedDate).sort((a, b) => String(a.createdAt || "").localeCompare(String(b.createdAt || "")))
+    : [];
+  return `
+    <section class="section form-panel history-date-panel">
+      ${recentDates.length ? `
+        <div class="history-date-chip-row" aria-label="Recent workout dates">
+          ${recentDates.map((date) => `
+            <button class="date-chip ${date === selectedDate ? "is-active" : ""}" type="button" data-action="history-date-chip" data-history-date-value="${escapeHtml(date)}" aria-pressed="${date === selectedDate}">
+              ${escapeHtml(date === todayISO() ? "Today" : formatShortDate(date))}
+            </button>
+          `).join("")}
+        </div>
+      ` : ""}
+      <div class="history-date-controls">
+        <div class="field history-date-field">
+          <label for="history-date">Browse by date</label>
+          <input id="history-date" class="history-date-input" type="date" data-history-date value="${escapeHtml(selectedDate)}">
+        </div>
+        ${state.historyDate ? `<button class="ghost-button history-clear-button" type="button" data-action="clear-history-date">Clear date</button>` : ""}
+      </div>
+      ${selectedDate ? `
+        <div class="history-date-results">
+          <h3>${escapeHtml(formatShortDate(selectedDate))} - ${dateWorkouts.length} workout${dateWorkouts.length === 1 ? "" : "s"}</h3>
+          ${dateWorkouts.length ? `
+            <div class="list">
+              ${dateWorkouts.map((entry) => listWorkout(entry)).join("")}
+            </div>
+          ` : `<div class="empty">No workouts logged on ${escapeHtml(selectedDate)}.</div>`}
+        </div>
+      ` : `<div class="empty">No workouts logged yet.</div>`}
+    </section>
+  `;
+}
+
+function renderHistoryList() {
+  const search = state.historySearch.trim().toLowerCase();
+  const exercises = historyExerciseNames().filter((name) => name.toLowerCase().includes(search));
+  return `
+    <section class="hero">
+      <div>
+        <h2 class="hero-title">History</h2>
+        <p class="hero-copy">Exercise performance, PRs, load volume, and progressive overload from your logged sessions.</p>
+      </div>
+    </section>
+
+    <section class="section history-mode-shell">
+      ${renderHistoryModeSegment()}
+    </section>
+
+    ${state.historyMode === "dates" ? renderHistoryDatesMode() : renderHistoryExercisesMode(exercises)}
   `;
 }
 
@@ -2192,10 +2454,93 @@ function renderTrends() {
   `;
 }
 
+function renderTodayPlan(plan) {
+  const items = plan.sessionPlan.items;
+  const muscles = [...new Set(items.map((item) => item.muscle.label))];
+  return `
+    <section class="section card coach-action featured-action today-plan-card">
+      <span class="badge">${escapeHtml(plan.mode === "restart" ? "Restart plan" : plan.mode === "progression" ? "Progression" : plan.mode === "library-gap" ? "Library gap" : "Today's plan")}</span>
+      <div class="today-plan-header">
+        <div>
+          <h3>${escapeHtml(plan.title)}</h3>
+          <p>${escapeHtml(plan.subtitle)}</p>
+        </div>
+        <span class="today-plan-time"><strong>${plan.sessionPlan.totalMinutes || "--"}</strong><small>min</small></span>
+      </div>
+      ${items.length ? `
+        <div class="today-plan-list">
+          ${items.map((item) => `
+            <div class="today-plan-item">
+              <div>
+                <strong>${escapeHtml(item.exercise.name)}</strong>
+                <span>${escapeHtml(item.muscle.label)} - ${escapeHtml(item.exercise.reps)} reps - ${HYPERTROPHY.idealRirMin}-${HYPERTROPHY.idealRirMax} RIR</span>
+              </div>
+              <span class="today-plan-dose">${item.sets} sets</span>
+            </div>
+          `).join("")}
+        </div>
+        <div class="action-grid today-plan-summary">
+          <span><strong>${items.length}</strong> lifts</span>
+          <span><strong>${items.reduce((sum, item) => sum + item.sets, 0)}</strong> sets</span>
+          <span><strong>${escapeHtml(muscles.join(", ") || "--")}</strong> muscles</span>
+          <span><strong>${plan.sessionPlan.totalMinutes}</strong> min</span>
+        </div>
+      ` : plan.mode === "progression" && plan.progression ? `
+        <div class="action-grid today-plan-summary">
+          <span><strong>${escapeHtml(plan.progression.target)}</strong> target</span>
+          <span><strong>${escapeHtml(plan.progression.indicator.symbol)}</strong> trend</span>
+          <span><strong>${escapeHtml(plan.progression.exercise)}</strong> lift</span>
+          <span><strong>${HYPERTROPHY.idealRirMin}-${HYPERTROPHY.idealRirMax}</strong> RIR</span>
+        </div>
+      ` : `
+        <div class="empty compact-empty">${escapeHtml(plan.subtitle)}</div>
+      `}
+      ${plan.sessionPlan.missing.length ? `
+        <div class="session-plan-gap">
+          Missing primary exercise: ${escapeHtml(plan.sessionPlan.missing.map((muscle) => muscle.label).join(", "))}.
+        </div>
+      ` : ""}
+    </section>
+  `;
+}
+
+function renderCoachTimeframeSelector() {
+  const selected = selectedCoachTimeframeMinutes();
+  return `
+    <section class="section card coach-timeframe-card">
+      <div class="chart-header"><h3>Workout time</h3><span class="muted small">${escapeHtml(coachTimeframeSelectionLabel(selected))}</span></div>
+      <div class="coach-timeframe-options" aria-label="Workout timeframe">
+        ${COACH_TIMEFRAME_OPTIONS.map((option) => `
+          <button class="timeframe-chip ${option.minutes === selected ? "is-active" : ""}" type="button" data-action="coach-timeframe" data-coach-minutes="${option.minutes}" aria-pressed="${option.minutes === selected}">
+            ${escapeHtml(option.label)}
+          </button>
+        `).join("")}
+      </div>
+    </section>
+  `;
+}
+
+function renderCoachWhy(plan) {
+  const items = [
+    ...plan.why,
+    ...plan.notes
+  ].filter(Boolean).slice(0, 6);
+  return `
+    <section class="section card coach-why-card">
+      <div class="chart-header"><h3>Why this?</h3><span class="muted small">readiness + gaps</span></div>
+      ${items.length ? `
+        <div class="coach-why-list">
+          ${items.map((item) => `<span>${escapeHtml(item)}</span>`).join("")}
+        </div>
+      ` : `<div class="empty compact-empty">No priority issues right now.</div>`}
+    </section>
+  `;
+}
+
 function renderCoach() {
   const recs = recommendations();
-  const action = recs[0]?.action;
-  const sessionPlan = action?.sessionPlan || buildSessionPlan();
+  const timeframeMinutes = selectedCoachTimeframeMinutes();
+  const todayPlan = buildTodayPlan(timeframeMinutes);
   return `
     <section class="hero">
       <div>
@@ -2203,50 +2548,15 @@ function renderCoach() {
         <p class="hero-copy">Minimum-first coaching: 10 hard sets per muscle, 2 weekly touches, 1-3 RIR, enough protein, and gradual overload.</p>
       </div>
     </section>
-    ${action ? `
-      <section class="section card coach-action featured-action">
-        <span class="badge">${action.mode === "progression" ? "Progression target" : action.exercise ? "Recommended now" : "Library gap"}</span>
-        <h3>${escapeHtml(action.exercise?.name || action.title)}</h3>
-        <p>${escapeHtml(action.body)}</p>
-        ${action.exercise && action.mode !== "progression" ? `
-          <div class="action-grid">
-            <span><strong>${action.sets}</strong> sets</span>
-            <span><strong>${escapeHtml(action.exercise.reps)}</strong> reps</span>
-            <span><strong>${HYPERTROPHY.idealRirMin}-${HYPERTROPHY.idealRirMax}</strong> RIR</span>
-            <span><strong>${action.minutes}</strong> min</span>
-          </div>
-          <p class="muted small">${escapeHtml(action.exercise.cue)}</p>
-        ` : action.mode === "progression" ? `
-          <div class="action-grid">
-            <span><strong>${escapeHtml(action.progression?.target || "--")}</strong> target</span>
-            <span><strong>${escapeHtml(action.progression?.indicator?.symbol || "=")}</strong> trend</span>
-            <span><strong>${escapeHtml(action.exercise?.reps || "8-15")}</strong> range</span>
-            <span><strong>${HYPERTROPHY.idealRirMin}-${HYPERTROPHY.idealRirMax}</strong> RIR</span>
-          </div>
-        ` : `<p class="muted small">Recommendations only use movements saved in Exercises or the starter library.</p>`}
-      </section>
-    ` : ""}
-    <section class="section card">
-      <div class="chart-header"><h3>Under 1 hour plan</h3><span class="muted small">${sessionPlan.totalMinutes}/${SESSION_LIMIT_MINUTES} min estimate</span></div>
-      <div class="session-plan-list">
-        ${sessionPlan.items.length ? sessionPlan.items.map((item) => `
-          <div class="session-plan-item">
-            <strong>${escapeHtml(item.exercise.name)}</strong>
-            <span>${item.sets} sets - ${escapeHtml(item.exercise.reps)} reps - ${escapeHtml(item.muscle.label)} - ${item.minutes} min</span>
-          </div>
-        `).join("") : `<div class="empty">No extra work needed right now. Keep sessions short and recover.</div>`}
-        ${sessionPlan.missing?.length ? `
-          <div class="session-plan-gap">
-            No primary exercise in your library for: ${escapeHtml(sessionPlan.missing.map((muscle) => muscle.label).join(", "))}.
-          </div>
-        ` : ""}
-      </div>
-    </section>
+    ${renderCoachTimeframeSelector()}
+    ${renderTodayPlan(todayPlan)}
+    ${renderCoachWhy(todayPlan)}
     <section class="section chart-panel">
       <div class="chart-header"><h3>Muscle set audit</h3><span class="muted small">10 set floor, 12-20 growth zone</span></div>
       ${muscleProgressMarkup(muscleSetStats())}
     </section>
     <section class="section grid">
+      <div class="chart-header coach-notes-header"><h3>Coach notes</h3><span class="muted small">secondary checks</span></div>
       ${recs.map((rec) => `<div class="coach-card ${rec.tone}"><strong>${escapeHtml(rec.title)}</strong><p>${escapeHtml(rec.body)}</p></div>`).join("")}
     </section>
   `;
@@ -2862,16 +3172,37 @@ async function handleAction(action, target) {
   }
   if (action === "history-select-exercise") {
     state.historyExercise = target.dataset.exercise || "";
+    state.historyMode = "exercises";
     await render();
     return;
   }
   if (action === "history-back") {
     state.historyExercise = "";
+    state.historyMode = "exercises";
+    await render();
+    return;
+  }
+  if (action === "history-set-mode") {
+    state.historyMode = target.dataset.historyMode === "dates" ? "dates" : "exercises";
+    await render();
+    return;
+  }
+  if (action === "history-date-chip") {
+    state.historyMode = "dates";
+    state.historyDate = target.dataset.historyDateValue || "";
     await render();
     return;
   }
   if (action === "clear-history-date") {
     state.historyDate = "";
+    await render();
+    return;
+  }
+  if (action === "coach-timeframe") {
+    const minutes = Number(target.dataset.coachMinutes);
+    state.coachTimeframeMinutes = COACH_TIMEFRAME_OPTIONS.some((option) => option.minutes === minutes)
+      ? minutes
+      : SESSION_LIMIT_MINUTES;
     await render();
     return;
   }
@@ -3264,6 +3595,7 @@ document.addEventListener("change", async (event) => {
       await render();
     }
     if (event.target.matches("#history-date")) {
+      state.historyMode = "dates";
       state.historyDate = event.target.value || "";
       await render();
     }

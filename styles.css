@@ -574,6 +574,146 @@ textarea {
   border-color: rgba(53, 213, 140, 0.22);
 }
 
+.today-plan-card {
+  display: grid;
+  gap: 12px;
+}
+
+.today-plan-header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: start;
+}
+
+.today-plan-header h3 {
+  margin-top: 8px;
+}
+
+.today-plan-time {
+  display: grid;
+  place-items: center;
+  min-width: 62px;
+  min-height: 62px;
+  padding: 8px;
+  border-radius: 8px;
+  background: rgba(53, 213, 140, 0.12);
+  color: var(--green);
+  text-align: center;
+}
+
+.today-plan-time strong {
+  color: var(--text);
+  font-size: 20px;
+  line-height: 1;
+}
+
+.today-plan-time small {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.today-plan-list,
+.coach-why-list {
+  display: grid;
+  gap: 8px;
+}
+
+.today-plan-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  min-height: 58px;
+  padding: 10px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.045);
+}
+
+.today-plan-item span,
+.coach-why-list span {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.today-plan-dose {
+  display: grid;
+  place-items: center;
+  min-width: 58px;
+  min-height: 40px;
+  padding: 0 8px;
+  border-radius: 8px;
+  background: rgba(155, 140, 255, 0.14);
+  color: #c7bfff !important;
+  font-weight: 900;
+  white-space: nowrap;
+}
+
+.today-plan-summary span {
+  overflow-wrap: anywhere;
+}
+
+.coach-why-card {
+  border-color: rgba(155, 140, 255, 0.18);
+}
+
+.coach-why-list span {
+  display: block;
+  padding: 10px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.045);
+}
+
+.coach-notes-header {
+  grid-column: 1 / -1;
+  margin-bottom: 0;
+}
+
+.coach-timeframe-card {
+  display: grid;
+  gap: 10px;
+}
+
+.coach-timeframe-options {
+  display: flex;
+  gap: 8px;
+  width: 100%;
+  max-width: 100%;
+  overflow-x: auto;
+  padding-bottom: 2px;
+  scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
+}
+
+.coach-timeframe-options::-webkit-scrollbar {
+  display: none;
+}
+
+.timeframe-chip {
+  flex: 0 0 auto;
+  min-width: 72px;
+  min-height: 44px;
+  padding: 0 12px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--muted);
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.timeframe-chip.is-active {
+  border-color: rgba(53, 213, 140, 0.45);
+  background: rgba(53, 213, 140, 0.16);
+  color: var(--green);
+}
+
+.compact-empty {
+  min-height: 76px;
+}
+
 .badge {
   display: inline-flex;
   align-items: center;
@@ -610,25 +750,6 @@ textarea {
   margin-bottom: 4px;
   color: var(--text);
   font-size: 15px;
-}
-
-.session-plan-list {
-  display: grid;
-  gap: 8px;
-}
-
-.session-plan-item {
-  display: grid;
-  gap: 4px;
-  min-height: 58px;
-  padding: 10px;
-  border-radius: 8px;
-  background: rgba(255, 255, 255, 0.045);
-}
-
-.session-plan-item span {
-  color: var(--muted);
-  font-size: 12px;
 }
 
 .session-plan-gap {
@@ -1294,6 +1415,63 @@ textarea {
 
 .search-input {
   min-height: 48px;
+}
+
+.history-mode-shell {
+  padding-bottom: 0;
+}
+
+.history-mode-segment {
+  margin-bottom: 0;
+}
+
+.history-mode-segment button {
+  min-height: 44px;
+  font-weight: 800;
+}
+
+.history-filter-panel,
+.history-date-panel {
+  overflow: hidden;
+}
+
+.history-search-field {
+  margin-bottom: 0;
+}
+
+.history-date-chip-row {
+  display: flex;
+  gap: 8px;
+  width: 100%;
+  max-width: 100%;
+  margin-bottom: 12px;
+  padding-bottom: 4px;
+  overflow-x: auto;
+  scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
+}
+
+.history-date-chip-row::-webkit-scrollbar {
+  display: none;
+}
+
+.date-chip {
+  flex: 0 0 auto;
+  min-width: 76px;
+  min-height: 44px;
+  padding: 0 12px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--muted);
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.date-chip.is-active {
+  border-color: rgba(53, 213, 140, 0.45);
+  background: rgba(53, 213, 140, 0.16);
+  color: var(--green);
 }
 
 .history-date-controls {
