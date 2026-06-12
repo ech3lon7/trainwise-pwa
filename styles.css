@@ -666,6 +666,19 @@ textarea {
   background: rgba(255, 255, 255, 0.045);
 }
 
+.coach-why-section {
+  display: grid;
+  gap: 6px;
+}
+
+.coach-why-section h4 {
+  margin: 2px 0 0;
+  color: var(--muted);
+  font-size: 11px;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
 .coach-notes-header {
   grid-column: 1 / -1;
   margin-bottom: 0;

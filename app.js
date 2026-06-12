@@ -3,7 +3,7 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 2;
 const STORES = ["workouts", "metrics", "settings"];
-const APP_VERSION = "1.5.0";
+const APP_VERSION = "1.5.1";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 let dbOpenPromise = null;
 let chartId = 0;
@@ -41,6 +41,20 @@ const muscleGroups = [
   { id: "calves", label: "Calves" },
   { id: "abs", label: "Abs" }
 ];
+
+const COACH_MUSCLE_REGIONS = {
+  chest: "push",
+  shoulders: "push",
+  triceps: "push",
+  back: "pull",
+  biceps: "pull",
+  quads: "legs",
+  hamstrings: "legs",
+  glutes: "legs",
+  calves: "legs",
+  abs: "core"
+};
+const COACH_REGION_ORDER = ["push", "pull", "legs", "core"];
 
 const muscleIconPaths = {
   chest: "./assets/muscles/chest.png",
@@ -886,29 +900,93 @@ function setZone(sets) {
   return { key: "high", label: "High fatigue", tone: "warn" };
 }
 
+function workoutsNewestFirst(workouts = state.workouts) {
+  return [...workouts].sort((a, b) => {
+    const dateCompare = String(b.date || "").localeCompare(String(a.date || ""));
+    if (dateCompare) return dateCompare;
+    return String(b.createdAt || b.updatedAt || "").localeCompare(String(a.createdAt || a.updatedAt || ""));
+  });
+}
+
+function latestWorkout() {
+  return workoutsNewestFirst()[0] || null;
+}
+
+function exerciseHistoryForDefinition(exercise) {
+  const normalizedName = normalizeName(exercise.name);
+  return workoutsNewestFirst().filter((workout) => (
+    workout.exerciseId === exercise.id || normalizeName(workout.exercise) === normalizedName
+  ));
+}
+
+function scoreExerciseForMuscle(exercise, muscleId) {
+  const history = exerciseHistoryForDefinition(exercise);
+  const last = history[0] || null;
+  const daysSince = last ? daysBetween(last.date, todayISO()) : null;
+  const usageScore = Math.min(12, history.length * 2);
+  const recencyScore = daysSince === null ? 0 : Math.max(0, 8 - daysSince);
+  const customScore = exercise.userCreated ? 3 : 0;
+  const selectedScore = exercise.name === state.selectedExercise ? 1 : 0;
+  const specificityScore = (exercise.primaryMuscles || []).length === 1 ? 1 : 0;
+  const targetIndex = (exercise.primaryMuscles || []).indexOf(muscleId);
+  const targetScore = targetIndex === 0 ? 1 : 0;
+  return usageScore + recencyScore + customScore + selectedScore + specificityScore + targetScore;
+}
+
 function chooseExerciseForMuscle(muscleId, usedExerciseIds = new Set()) {
-  return exerciseDatabase().find((exercise) => exercise.primaryMuscles.includes(muscleId) && !usedExerciseIds.has(exercise.id)) || null;
+  return exerciseDatabase()
+    .filter((exercise) => exercise.primaryMuscles.includes(muscleId) && !usedExerciseIds.has(exercise.id))
+    .sort((a, b) => scoreExerciseForMuscle(b, muscleId) - scoreExerciseForMuscle(a, muscleId))
+    [0] || null;
+}
+
+function hasPrimaryExerciseForMuscle(muscleId) {
+  return exerciseDatabase().some((exercise) => exercise.primaryMuscles.includes(muscleId));
 }
 
 function estimateExerciseMinutes(exercise, sets) {
+  const personalRestSeconds = averageRestSecondsForExercise(exercise);
   const restMatch = String(exercise.rest || "90 sec").match(/(\d+)(?:-(\d+))?/);
-  const restSeconds = restMatch ? (Number(restMatch[2] || restMatch[1]) + Number(restMatch[1])) / 2 : 90;
+  const restSeconds = personalRestSeconds
+    || (restMatch ? (Number(restMatch[2] || restMatch[1]) + Number(restMatch[1])) / 2 : 90);
   const perSetMinutes = 0.75 + restSeconds / 60;
   return Math.ceil(3 + sets * perSetMinutes);
 }
 
-function lastWorkoutForMuscle(muscleId) {
-  return state.workouts.find((workout) => muscleCreditFactor(workout, muscleId) > 0) || null;
+function averageRestSecondsForExercise(exercise) {
+  const values = exerciseHistoryForDefinition(exercise)
+    .map(averageRestSeconds)
+    .filter((value) => Number.isFinite(value) && value > 0);
+  if (!values.length) return null;
+  return values.reduce((sum, value) => sum + value, 0) / values.length;
+}
+
+function latestWorkoutForMuscle(muscleId, mode = "any") {
+  return workoutsNewestFirst().find((workout) => {
+    const meta = workoutMeta(workout);
+    const primary = (meta.primaryMuscles || []).includes(muscleId);
+    const secondary = (meta.secondaryMuscles || []).includes(muscleId);
+    if (mode === "primary") return primary;
+    if (mode === "secondary") return secondary && !primary;
+    return primary || secondary;
+  }) || null;
 }
 
 function muscleReadiness(stat) {
-  const lastWorkout = lastWorkoutForMuscle(stat.id);
-  const daysSince = lastWorkout ? daysBetween(lastWorkout.date, todayISO()) : null;
+  const lastPrimaryWorkout = latestWorkoutForMuscle(stat.id, "primary");
+  const lastSecondaryWorkout = latestWorkoutForMuscle(stat.id, "secondary");
+  const lastWorkout = lastPrimaryWorkout || lastSecondaryWorkout;
+  const primaryDaysSince = lastPrimaryWorkout ? daysBetween(lastPrimaryWorkout.date, todayISO()) : null;
+  const secondaryDaysSince = lastSecondaryWorkout ? daysBetween(lastSecondaryWorkout.date, todayISO()) : null;
+  const daysSince = primaryDaysSince ?? secondaryDaysSince;
   let readiness = "ready";
   let reason = lastWorkout ? `Last trained ${daysSince} day${daysSince === 1 ? "" : "s"} ago.` : "No recent work logged.";
-  if (daysSince !== null && daysSince <= 1) {
+  if (primaryDaysSince !== null && primaryDaysSince <= 1) {
     readiness = "recent";
-    reason = `Trained ${daysSince === 0 ? "today" : "yesterday"}, so it can wait if another gap is useful.`;
+    reason = `Directly trained ${primaryDaysSince === 0 ? "today" : "yesterday"}, so it can wait if another gap is useful.`;
+  } else if (secondaryDaysSince !== null && secondaryDaysSince <= 1) {
+    readiness = "secondary-recent";
+    reason = `Only secondary work ${secondaryDaysSince === 0 ? "today" : "yesterday"}; direct work can still be useful if the gap is large.`;
   } else if (stat.sessions < 2 && stat.sets >= 5) {
     readiness = "needs-touch";
     reason = `${stat.sessions}/2 weekly touches; a second exposure would help.`;
@@ -916,20 +994,48 @@ function muscleReadiness(stat) {
     readiness = "high";
     reason = `Above ${HYPERTROPHY.growthHigh} weekly sets; watch recovery.`;
   }
-  return { ...stat, lastWorkout, daysSince, readiness, readinessReason: reason };
+  return { ...stat, lastWorkout, lastPrimaryWorkout, lastSecondaryWorkout, daysSince, primaryDaysSince, secondaryDaysSince, readiness, readinessReason: reason };
+}
+
+function coachMusclePrioritySort(a, b) {
+  const aPrimaryRecent = a.primaryDaysSince !== null && a.primaryDaysSince <= 1;
+  const bPrimaryRecent = b.primaryDaysSince !== null && b.primaryDaysSince <= 1;
+  const aSecondaryRecent = a.secondaryDaysSince !== null && a.secondaryDaysSince <= 1;
+  const bSecondaryRecent = b.secondaryDaysSince !== null && b.secondaryDaysSince <= 1;
+  return (aPrimaryRecent - bPrimaryRecent)
+    || (b.deficit - a.deficit)
+    || (a.sessions - b.sessions)
+    || (aSecondaryRecent - bSecondaryRecent)
+    || (a.sets - b.sets)
+    || (muscleGroups.findIndex((muscle) => muscle.id === a.id) - muscleGroups.findIndex((muscle) => muscle.id === b.id));
+}
+
+function muscleRegion(muscleId) {
+  return COACH_MUSCLE_REGIONS[muscleId] || "other";
+}
+
+function balancedCoverageTargets(targets) {
+  const buckets = new Map();
+  const orderedRegions = [...COACH_REGION_ORDER, "other"];
+  for (const target of targets) {
+    const region = muscleRegion(target.id);
+    if (!buckets.has(region)) buckets.set(region, []);
+    buckets.get(region).push(target);
+    if (!orderedRegions.includes(region)) orderedRegions.push(region);
+  }
+
+  const ordered = [];
+  while ([...buckets.values()].some((items) => items.length)) {
+    for (const region of orderedRegions) {
+      const bucket = buckets.get(region);
+      if (bucket?.length) ordered.push(bucket.shift());
+    }
+  }
+  return ordered;
 }
 
 function rankedCoachMuscles() {
-  return muscleSetStats()
-    .map(muscleReadiness)
-    .sort((a, b) => {
-      const aRecentlyTrained = a.daysSince !== null && a.daysSince <= 1;
-      const bRecentlyTrained = b.daysSince !== null && b.daysSince <= 1;
-      return (aRecentlyTrained - bRecentlyTrained)
-        || (b.deficit - a.deficit)
-        || (a.sessions - b.sessions)
-        || (a.sets - b.sets);
-    });
+  return muscleSetStats().map(muscleReadiness).sort(coachMusclePrioritySort);
 }
 
 function planPriorityReason(item) {
@@ -960,20 +1066,26 @@ function sessionPlanCaps(limitMinutes, restart = false) {
     return {
       maxItems: limit <= 30 ? 2 : limit <= 40 ? 3 : limit <= 50 ? 4 : 5,
       minSets: 2,
-      maxSets: limit <= 40 ? 2 : limit <= 60 ? 3 : 4,
-      finishBuffer: limit <= 30 ? 4 : limit <= 40 ? 6 : 3
+      maxSets: limit <= 40 ? 2 : limit <= 60 ? 3 : 4
     };
   }
   return {
     maxItems: limit <= 30 ? 2 : limit <= 40 ? 3 : limit <= 50 ? 4 : 5,
     minSets: 2,
-    maxSets: limit <= 40 ? 3 : limit <= 50 ? 4 : 5,
-    finishBuffer: limit <= 30 ? 4 : limit <= 40 ? 6 : 3
+    maxSets: limit <= 40 ? 3 : limit <= 50 ? 4 : 5
   };
 }
 
 function plannedExerciseMinutes(item, sets = item.sets) {
   return estimateExerciseMinutes(item.exercise, sets);
+}
+
+function initialSetsForPlanTarget(target, caps) {
+  return Math.max(1, Math.min(caps.minSets, caps.maxSets, Math.ceil(target.deficit)));
+}
+
+function maxSetsForPlanTarget(target, caps) {
+  return Math.max(1, Math.min(caps.maxSets, Math.ceil(target.deficit)));
 }
 
 function buildSessionPlan(limitMinutes = SESSION_LIMIT_MINUTES, options = {}) {
@@ -983,18 +1095,10 @@ function buildSessionPlan(limitMinutes = SESSION_LIMIT_MINUTES, options = {}) {
   const stats = muscleSetStats()
     .map(muscleReadiness)
     .filter((stat) => stat.sets < HYPERTROPHY.minimumSets)
-    .sort((a, b) => {
-      const aRecentlyTrained = a.daysSince !== null && a.daysSince <= 1;
-      const bRecentlyTrained = b.daysSince !== null && b.daysSince <= 1;
-      return (aRecentlyTrained - bRecentlyTrained)
-        || (b.deficit - a.deficit)
-        || (a.sessions - b.sessions)
-        || (a.sets - b.sets);
-    });
+    .sort(coachMusclePrioritySort);
   const items = [];
   const missing = [];
   const missingIds = new Set();
-  const deprioritized = [];
   let totalMinutes = 0;
   const usedExercises = new Set();
 
@@ -1007,35 +1111,35 @@ function buildSessionPlan(limitMinutes = SESSION_LIMIT_MINUTES, options = {}) {
       }
       return false;
     }
-    const desiredSets = Math.min(caps.maxSets, Math.max(caps.minSets, Math.ceil(target.deficit)));
-    let sets = desiredSets;
+    let sets = initialSetsForPlanTarget(target, caps);
     let minutes = estimateExerciseMinutes(exercise, sets);
-    while (sets > caps.minSets && items.length && totalMinutes + minutes > cappedLimit) {
+    while (sets > 1 && totalMinutes + minutes > cappedLimit) {
       sets -= 1;
       minutes = estimateExerciseMinutes(exercise, sets);
     }
-    if (items.length && totalMinutes + minutes > cappedLimit) return false;
+    if (totalMinutes + minutes > cappedLimit) return false;
     items.push({ muscle: target, exercise, sets, minutes, reason: "" });
     usedExercises.add(exercise.id);
     totalMinutes += minutes;
     return true;
   };
 
-  for (const target of stats) {
-    const hasAlternative = stats.some((stat) => stat.id !== target.id && stat.deficit > 0 && !(stat.daysSince !== null && stat.daysSince <= 1));
-    if (target.daysSince !== null && target.daysSince <= 1 && hasAlternative) {
-      deprioritized.push({ muscle: target, reason: `${target.label} was trained ${target.daysSince === 0 ? "today" : "yesterday"}.` });
-      continue;
-    }
-    addTargetToPlan(target);
-    if (items.length >= caps.maxItems || totalMinutes >= cappedLimit - caps.finishBuffer) break;
-  }
+  const freshTargets = balancedCoverageTargets(stats.filter((target) => !(target.primaryDaysSince !== null && target.primaryDaysSince <= 1)));
+  const recentPrimaryTargets = balancedCoverageTargets(stats.filter((target) => target.primaryDaysSince !== null && target.primaryDaysSince <= 1));
 
-  if (items.length < caps.maxItems && totalMinutes < cappedLimit - caps.finishBuffer) {
-    for (const target of stats) {
+  for (const group of [freshTargets, recentPrimaryTargets]) {
+    for (const target of group) {
       if (items.some((item) => item.muscle.id === target.id)) continue;
       addTargetToPlan(target);
-      if (items.length >= caps.maxItems || totalMinutes >= cappedLimit - caps.finishBuffer) break;
+      if (items.length >= caps.maxItems) break;
+    }
+    if (items.length >= caps.maxItems) break;
+  }
+
+  for (const target of stats) {
+    if (!hasPrimaryExerciseForMuscle(target.id) && !missingIds.has(target.id)) {
+      missing.push(target);
+      missingIds.add(target.id);
     }
   }
 
@@ -1043,7 +1147,7 @@ function buildSessionPlan(limitMinutes = SESSION_LIMIT_MINUTES, options = {}) {
   while (changed) {
     changed = false;
     for (const item of items) {
-      const targetMaxSets = Math.min(caps.maxSets, Math.ceil(item.muscle.deficit));
+      const targetMaxSets = maxSetsForPlanTarget(item.muscle, caps);
       if (item.sets >= targetMaxSets) continue;
       const nextMinutes = plannedExerciseMinutes(item, item.sets + 1);
       const extraMinutes = nextMinutes - item.minutes;
@@ -1052,9 +1156,13 @@ function buildSessionPlan(limitMinutes = SESSION_LIMIT_MINUTES, options = {}) {
       item.minutes = nextMinutes;
       totalMinutes += extraMinutes;
       changed = true;
-      if (totalMinutes >= cappedLimit - caps.finishBuffer) break;
     }
   }
+
+  const plannedIds = new Set(items.map((item) => item.muscle.id));
+  const deprioritized = stats
+    .filter((target) => target.primaryDaysSince !== null && target.primaryDaysSince <= 1 && !plannedIds.has(target.id))
+    .map((target) => ({ muscle: target, reason: `${target.label} was directly trained ${target.primaryDaysSince === 0 ? "today" : "yesterday"}.` }));
 
   return {
     items: items.map((item) => ({ ...item, reason: planPriorityReason(item) })),
@@ -1067,7 +1175,7 @@ function buildSessionPlan(limitMinutes = SESSION_LIMIT_MINUTES, options = {}) {
 }
 
 function buildTodayPlan(limitMinutes = selectedCoachTimeframeMinutes()) {
-  const lastWorkout = state.workouts[0] || null;
+  const lastWorkout = latestWorkout();
   const daysSinceWorkout = lastWorkout ? daysBetween(lastWorkout.date, todayISO()) : null;
   const restart = daysSinceWorkout === null || daysSinceWorkout >= 4;
   const ranked = rankedCoachMuscles();
@@ -1076,8 +1184,11 @@ function buildTodayPlan(limitMinutes = selectedCoachTimeframeMinutes()) {
   const protein = proteinTargets();
   const highVolume = ranked.filter((stat) => stat.sets > HYPERTROPHY.growthHigh);
   const belowMinimum = ranked.filter((stat) => stat.sets < HYPERTROPHY.minimumSets);
-  const progression = progressionTargetForExercise(state.selectedExercise) || progressionTargetForExercise(state.workouts[0]?.exercise);
+  const progression = progressionTargetForExercise(state.selectedExercise) || progressionTargetForExercise(lastWorkout?.exercise);
   const why = [];
+  const selectedReasons = [];
+  const skippedReasons = [];
+  const missingReasons = [];
   const notes = [];
 
   if (restart) {
@@ -1086,12 +1197,15 @@ function buildTodayPlan(limitMinutes = selectedCoachTimeframeMinutes()) {
       : `${daysSinceWorkout} days since your last lift, so volume is capped for a restart.`);
   }
   if (sessionPlan.items.length) {
-    why.push(...sessionPlan.items.slice(0, 3).map((item) => item.reason));
+    selectedReasons.push(...sessionPlan.items.map((item) => item.reason));
+    why.push(...selectedReasons.slice(0, 3));
   }
   if (sessionPlan.deprioritized.length) {
-    why.push(...sessionPlan.deprioritized.slice(0, 2).map((item) => `${item.reason} Coach picked another gap first.`));
+    skippedReasons.push(...sessionPlan.deprioritized.map((item) => `${item.reason} Coach picked another gap first.`));
+    why.push(...skippedReasons.slice(0, 2));
   }
   if (sessionPlan.missing.length) {
+    missingReasons.push(...sessionPlan.missing.map((muscle) => `Add a primary exercise for ${muscle.label}.`));
     why.push(`Add a primary exercise for ${sessionPlan.missing.map((muscle) => muscle.label).join(", ")} to unlock better plans.`);
   }
   if (protein.bodyWeightLb && proteinAvg && proteinAvg < protein.floor) {
@@ -1110,6 +1224,7 @@ function buildTodayPlan(limitMinutes = selectedCoachTimeframeMinutes()) {
       subtitle: restart ? `Small, useful work capped at ${coachTimeframeLabel(limitMinutes)}.` : `Best gaps to train next, capped at ${coachTimeframeLabel(limitMinutes)}.`,
       sessionPlan,
       why,
+      explanation: { selected: selectedReasons, skipped: skippedReasons, missing: missingReasons, notes },
       notes,
       progression
     };
@@ -1122,6 +1237,7 @@ function buildTodayPlan(limitMinutes = selectedCoachTimeframeMinutes()) {
       subtitle: "Coach needs more movement options before it can build a full plan.",
       sessionPlan,
       why,
+      explanation: { selected: selectedReasons, skipped: skippedReasons, missing: missingReasons, notes },
       notes,
       progression
     };
@@ -1133,6 +1249,7 @@ function buildTodayPlan(limitMinutes = selectedCoachTimeframeMinutes()) {
     subtitle: progression ? progression.body : "Minimums are covered. Progress slowly or recover if joints feel beat up.",
     sessionPlan,
     why: why.length ? why : ["Weekly minimums are covered, so Coach is not forcing extra volume."],
+    explanation: { selected: selectedReasons, skipped: skippedReasons, missing: missingReasons, notes },
     notes,
     progression
   };
@@ -1203,7 +1320,7 @@ function nextHypertrophyAction() {
     };
   }
 
-  const progression = progressionTargetForExercise(state.selectedExercise) || progressionTargetForExercise(state.workouts[0]?.exercise);
+  const progression = progressionTargetForExercise(state.selectedExercise) || progressionTargetForExercise(latestWorkout()?.exercise);
   if (progression) {
     return {
       mode: "progression",
@@ -1227,6 +1344,18 @@ function nextHypertrophyAction() {
     sessionPlan,
     title: "Minimums are covered",
     body: "All tracked muscles are at the weekly hypertrophy floor. Progress by adding reps or load, or recover if joints or soreness are talking back."
+  };
+}
+
+function actionFromSessionPlan(plan) {
+  const items = plan.sessionPlan.items;
+  const sets = items.reduce((sum, item) => sum + item.sets, 0);
+  const muscles = [...new Set(items.map((item) => item.muscle.label))].join(", ");
+  return {
+    mode: plan.mode,
+    sessionPlan: plan.sessionPlan,
+    title: plan.mode === "restart" ? "Restart session is the priority" : "Today's Plan is the priority",
+    body: `${sets} sets across ${muscles}. Estimated ${plan.sessionPlan.totalMinutes}/${plan.sessionPlan.limitMinutes} min.`
   };
 }
 
@@ -1377,27 +1506,27 @@ function topUnderTargetMuscles(limit = 4) {
     .slice(0, limit);
 }
 
-function recommendations() {
+function recommendations(todayPlan = null) {
   const recs = [];
   const stats = muscleSetStats();
-  const action = nextHypertrophyAction();
+  const action = todayPlan?.sessionPlan?.items?.length ? actionFromSessionPlan(todayPlan) : nextHypertrophyAction();
   const proteinAvg = getAverage("protein", 7);
   const protein = proteinTargets();
   const trend = weightTrend(14);
   const highRir = stats[0]?.highRir || [];
   const highVolume = stats.filter((stat) => stat.sets > HYPERTROPHY.growthHigh);
   const lowFrequency = stats.filter((stat) => stat.sets >= 5 && stat.sessions < 2).slice(0, 3);
-  const lastWorkout = state.workouts[0];
+  const lastWorkout = latestWorkout();
   const daysSinceWorkout = lastWorkout ? daysBetween(lastWorkout.date, todayISO()) : null;
 
   recs.push({
-    tone: action.mode === "minimum" ? "hot" : action.mode === "library-gap" ? "warn" : "",
+    tone: action.mode === "minimum" ? "hot" : action.mode === "library-gap" ? "warn" : action.mode === "session" || action.mode === "restart" ? "good" : "",
     title: action.title,
     body: action.body,
     action
   });
 
-  const progression = action.progression || progressionTargetForExercise(state.workouts[0]?.exercise);
+  const progression = todayPlan?.progression || action.progression || progressionTargetForExercise(lastWorkout?.exercise);
   if (progression && action.mode !== "progression") {
     recs.push({
       tone: progression.indicator.tone === "down" ? "warn" : "good",
@@ -2537,16 +2666,24 @@ function renderCoachTimeframeSelector() {
 }
 
 function renderCoachWhy(plan) {
-  const items = [
-    ...plan.why,
-    ...plan.notes
-  ].filter(Boolean).slice(0, 6);
+  const explanation = plan.explanation || {};
+  const sections = [
+    { title: "Selected", items: explanation.selected || plan.why || [] },
+    { title: "Waiting", items: explanation.skipped || [] },
+    { title: "Library gaps", items: explanation.missing || [] },
+    { title: "Other checks", items: explanation.notes || plan.notes || [] }
+  ].filter((section) => section.items.length);
   return `
     <section class="section card coach-why-card">
       <div class="chart-header"><h3>Why this?</h3><span class="muted small">readiness + gaps</span></div>
-      ${items.length ? `
+      ${sections.length ? `
         <div class="coach-why-list">
-          ${items.map((item) => `<span>${escapeHtml(item)}</span>`).join("")}
+          ${sections.map((section) => `
+            <div class="coach-why-section">
+              <h4>${escapeHtml(section.title)}</h4>
+              ${section.items.map((item) => `<span>${escapeHtml(item)}</span>`).join("")}
+            </div>
+          `).join("")}
         </div>
       ` : `<div class="empty compact-empty">No priority issues right now.</div>`}
     </section>
@@ -2554,9 +2691,9 @@ function renderCoachWhy(plan) {
 }
 
 function renderCoach() {
-  const recs = recommendations();
   const timeframeMinutes = selectedCoachTimeframeMinutes();
   const todayPlan = buildTodayPlan(timeframeMinutes);
+  const recs = recommendations(todayPlan);
   return `
     <section class="hero">
       <div>
