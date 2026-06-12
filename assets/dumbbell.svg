@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" fill="none">
+  <defs>
+    <mask id="plus-mask">
+      <rect width="120" height="120" fill="white"/>
+      <rect x="94" y="18" width="8" height="24" rx="2" fill="black"/>
+      <rect x="86" y="26" width="24" height="8" rx="2" fill="black"/>
+    </mask>
+  </defs>
+  <rect x="10" y="40" width="18" height="40" rx="5" fill="#7c6bff"/>
+  <rect x="28" y="48" width="8" height="24" rx="3" fill="#7c6bff"/>
+  <rect x="36" y="53" width="48" height="14" rx="4" fill="#7c6bff"/>
+  <rect x="84" y="48" width="8" height="24" rx="3" fill="#7c6bff"/>
+  <rect x="92" y="40" width="18" height="40" rx="5" fill="#7c6bff"/>
+  <circle cx="98" cy="30" r="13" fill="#7c6bff" mask="url(#plus-mask)"/>
+</svg>

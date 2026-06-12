@@ -22,6 +22,7 @@ html,
 body {
   margin: 0;
   min-height: 100%;
+  overflow-x: hidden;
   background: var(--bg);
   color: var(--text);
 }
@@ -66,6 +67,7 @@ button {
 .app-shell {
   min-height: 100svh;
   padding: max(14px, env(safe-area-inset-top)) 14px calc(88px + env(safe-area-inset-bottom));
+  overflow-x: hidden;
   background:
     radial-gradient(circle at 16% -10%, rgba(53, 213, 140, 0.28), transparent 29%),
     radial-gradient(circle at 110% 18%, rgba(255, 107, 95, 0.23), transparent 28%),
@@ -115,6 +117,7 @@ h3 {
 .app-content {
   max-width: 920px;
   margin: 0 auto;
+  min-width: 0;
 }
 
 .app-content.content-enter {
@@ -185,6 +188,7 @@ h3 {
   background: rgba(23, 27, 23, 0.88);
   border-radius: 8px;
   box-shadow: 0 12px 34px rgba(0, 0, 0, 0.18);
+  overflow: hidden;
 }
 
 .card,
@@ -192,6 +196,7 @@ h3 {
 .chart-panel,
 .settings-panel {
   padding: 14px;
+  word-break: break-word;
 }
 
 .content-enter .card,
@@ -855,7 +860,66 @@ textarea {
 .exercise-draft.is-dragging {
   border-color: rgba(155, 140, 255, 0.5);
   box-shadow: 0 18px 48px rgba(155, 140, 255, 0.16);
-  opacity: 0.82;
+  opacity: 0.9;
+  transform: scale(1.02);
+  z-index: 10;
+}
+
+.reorder-arrows {
+  display: flex;
+  gap: 4px;
+  margin-left: auto;
+}
+
+.reorder-arrows button {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.reorder-arrows button:hover:not(:disabled) {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.reorder-arrows button:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+
+.add-exercise-icon-btn {
+  display: grid;
+  place-items: center;
+  width: 42px;
+  height: 42px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  padding: 0;
+  cursor: pointer;
+  transition: transform 0.15s ease, opacity 0.15s ease;
+}
+
+.add-exercise-icon-btn img {
+  display: block;
+  width: 36px;
+  height: 36px;
+  pointer-events: none;
+}
+
+.add-exercise-icon-btn:hover {
+  opacity: 0.75;
+}
+
+.add-exercise-icon-btn:active {
+  transform: scale(0.9);
 }
 
 .exercise-table-top {
@@ -981,7 +1045,7 @@ textarea {
 
 .set-table {
   width: 100%;
-  min-width: 760px;
+  min-width: 600px;
   border-collapse: separate;
   border-spacing: 0;
 }
@@ -1034,7 +1098,7 @@ textarea {
 }
 
 .prev-cell {
-  min-width: 96px;
+  min-width: 80px;
   color: var(--muted);
   font-weight: 800;
 }
@@ -1230,6 +1294,16 @@ textarea {
 
 .search-input {
   min-height: 48px;
+}
+
+.history-date-row > .field {
+  min-width: 0;
+}
+
+.history-date-input {
+  display: block;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .history-date-results {
@@ -1429,6 +1503,10 @@ textarea {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
+  .history-date-row {
+    grid-template-columns: 1fr;
+  }
+
   .trend-section-header {
     grid-template-columns: 1fr;
   }
@@ -1442,13 +1520,17 @@ textarea {
   }
 
   .log-date-row,
-  .draft-meta-row,
-  .exercise-table-top {
+  .draft-meta-row {
     grid-template-columns: 1fr;
+  }
+
+  .exercise-table-top {
+    grid-template-columns: 1fr auto;
   }
 
   .exercise-table-title {
     grid-template-columns: auto auto minmax(0, 1fr);
+    gap: 8px;
   }
 
   .history-set-grid {
@@ -1485,12 +1567,27 @@ textarea {
     grid-template-columns: auto 1fr;
   }
 
-  .exercise-table-title {
-    grid-template-columns: 1fr;
+  .exercise-table-top {
+    grid-template-columns: 1fr auto;
+    gap: 6px;
   }
 
-  .exercise-table-title .exercise-muscle-icons {
-    grid-column: auto;
+  .exercise-table-title {
+    grid-template-columns: auto auto minmax(0, 1fr);
+    gap: 6px;
+  }
+
+  .exercise-muscle-icons {
+    grid-template-columns: repeat(2, 22px);
+    grid-auto-rows: 22px;
+    gap: 2px;
+    width: 48px;
+    min-width: 48px;
+  }
+
+  .muscle-icon-chip {
+    width: 22px;
+    height: 22px;
   }
 
   .history-session-card summary {
@@ -1507,8 +1604,8 @@ textarea {
   }
 
   .row-actions {
-    flex-direction: column;
-    align-items: flex-end;
+    flex-wrap: wrap;
+    gap: 6px;
   }
 
   .exercise-definition {
@@ -1516,7 +1613,8 @@ textarea {
   }
 
   .exercise-definition .row-actions {
-    align-items: stretch;
+    align-items: center;
+    justify-content: flex-start;
   }
 
   .checkbox-grid {
@@ -1536,5 +1634,49 @@ textarea {
 
   .tab {
     font-size: 9px;
+  }
+
+  .set-table {
+    min-width: 0;
+  }
+
+  .set-table th,
+  .set-table td {
+    padding: 4px 3px;
+    font-size: 12px;
+  }
+
+  .set-table th.set-type-cell,
+  .set-table td.set-type {
+    display: none;
+  }
+
+  .set-table th.prev-cell,
+  .set-table td.prev-cell {
+    display: none;
+  }
+
+  .set-table input {
+    min-width: 48px;
+    font-size: 16px;
+    padding: 5px 3px;
+  }
+
+  .set-table input[data-set-field="rest"] {
+    min-width: 44px;
+    font-size: 14px;
+  }
+
+  .set-number {
+    width: 24px;
+    height: 24px;
+    font-size: 11px;
+    margin-right: 4px;
+  }
+
+  .set-table .delete-set-btn {
+    font-size: 14px;
+    min-width: 28px;
+    min-height: 28px;
   }
 }

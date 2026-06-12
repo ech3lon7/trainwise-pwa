@@ -3,7 +3,7 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 2;
 const STORES = ["workouts", "metrics", "settings"];
-const APP_VERSION = "1.4.1";
+const APP_VERSION = "1.4.2";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 let dbOpenPromise = null;
 let chartId = 0;
@@ -1450,7 +1450,7 @@ function renderSetRows(draft = draftExerciseFromState()) {
       <td><input data-set-field="weight" type="number" inputmode="decimal" min="0" step="2.5" value="${escapeHtml(row.weight)}" aria-label="Set ${index + 1} weight"></td>
       <td><input data-set-field="reps" type="number" inputmode="numeric" min="1" step="1" value="${escapeHtml(row.reps)}" aria-label="Set ${index + 1} reps"></td>
       <td><input data-set-field="rir" type="number" inputmode="numeric" min="0" max="5" step="1" value="${row.rir ?? ""}" aria-label="Set ${index + 1} RIR"></td>
-      <td><input data-set-field="rest" type="text" inputmode="numeric" value="${escapeHtml(restInputValue(row.restSeconds))}" placeholder="1:30" aria-label="Set ${index + 1} rest"></td>
+      <td><input data-set-field="rest" type="text" inputmode="text" value="${escapeHtml(restInputValue(row.restSeconds))}" placeholder="1:30" aria-label="Set ${index + 1} rest"></td>
       <td><button class="ghost-mini" type="button" data-action="remove-set" data-draft-id="${escapeHtml(draft.draftId)}" data-index="${index}" ${rows.length <= 1 ? "disabled" : ""}>x</button></td>
     </tr>
   `).join("");
@@ -1511,6 +1511,10 @@ function exerciseHistoryScreen(exerciseName) {
                   <small>${row.rir === null ? "--" : fmt(row.rir, 1)} RIR - Rest ${formatRest(row.restSeconds)}</small>
                 </div>
               `).join("")}
+            </div>
+            <div class="row-actions">
+              <button class="ghost-mini" type="button" data-action="edit-workout" data-id="${escapeHtml(entry.id)}">Edit</button>
+              <button class="delete-small" type="button" aria-label="Delete workout" data-action="delete-workout" data-id="${escapeHtml(entry.id)}">x</button>
             </div>
             ${entry.notes ? `<p class="muted small">${escapeHtml(entry.notes)}</p>` : ""}
           </details>
@@ -1841,7 +1845,7 @@ function exerciseDraftTable(draft, index, total) {
         <table class="set-table">
           <thead>
             <tr>
-              <th>Type</th>
+              <th class="set-type-cell">Type</th>
               <th>Prev</th>
               <th>lbs</th>
               <th>Reps</th>
@@ -1856,6 +1860,11 @@ function exerciseDraftTable(draft, index, total) {
       <div class="log-actions exercise-table-actions">
         <button class="round-add" type="button" aria-label="Add set" data-action="add-set" data-draft-id="${escapeHtml(draft.draftId)}">+</button>
         <button class="ghost-button" type="button" data-action="remove-exercise-table" data-draft-id="${escapeHtml(draft.draftId)}" ${total <= 1 ? "disabled" : ""}>Remove</button>
+        ${index === total - 1 ? `<button class="add-exercise-icon-btn" type="button" data-action="add-exercise-table" aria-label="Add exercise"><img src="./assets/dumbbell.svg" alt="" width="36" height="36"></button>` : ""}
+        <div class="reorder-arrows">
+          <button type="button" aria-label="Move up" data-action="move-exercise-up" data-draft-id="${escapeHtml(draft.draftId)}" ${index === 0 ? "disabled" : ""}>&#9650;</button>
+          <button type="button" aria-label="Move down" data-action="move-exercise-down" data-draft-id="${escapeHtml(draft.draftId)}" ${index === total - 1 ? "disabled" : ""}>&#9660;</button>
+        </div>
       </div>
     </section>
   `;
@@ -1903,7 +1912,10 @@ function renderLog() {
           <div class="field-row log-date-row">
             <div class="field">
               <label for="workout-date">Date</label>
-              <input id="workout-date" name="date" type="date" required value="${escapeHtml(state.draftDate || todayISO())}">
+              <div style="display: flex; gap: 8px; align-items: end;">
+                <input id="workout-date" name="date" type="date" required value="${escapeHtml(state.draftDate || todayISO())}" style="flex: 1;">
+                ${state.draftDate && state.draftDate !== todayISO() ? `<button class="ghost-button" type="button" data-action="return-to-today" style="min-width: auto; white-space: nowrap;">Today</button>` : ""}
+              </div>
             </div>
           </div>
 
@@ -1980,10 +1992,10 @@ function renderHistoryList() {
         <label for="history-search">Search exercises</label>
         <input id="history-search" class="search-input" data-history-search value="${escapeHtml(state.historySearch)}" placeholder="Bench press, row, squat">
       </div>
-      <div class="field-row">
+      <div class="field-row history-date-row">
         <div class="field">
           <label for="history-date">Browse by date</label>
-          <input id="history-date" type="date" data-history-date value="${escapeHtml(state.historyDate)}">
+          <input id="history-date" class="history-date-input" type="date" data-history-date value="${escapeHtml(state.historyDate)}">
         </div>
         ${state.historyDate ? `<div class="field"><label>&nbsp;</label><button class="ghost-button" type="button" data-action="clear-history-date">Clear date</button></div>` : ""}
       </div>
@@ -2079,6 +2091,10 @@ function renderHistoryDetail(exerciseName) {
                   <small>${row.rir === null ? "--" : fmt(row.rir, 1)} RIR - Rest ${formatRest(row.restSeconds)}</small>
                 </div>
               `).join("")}
+            </div>
+            <div class="row-actions">
+              <button class="ghost-mini" type="button" data-action="edit-workout" data-id="${escapeHtml(entry.id)}">Edit</button>
+              <button class="delete-small" type="button" aria-label="Delete workout" data-action="delete-workout" data-id="${escapeHtml(entry.id)}">x</button>
             </div>
             ${entry.notes ? `<p class="muted small">${escapeHtml(entry.notes)}</p>` : ""}
           </details>
@@ -2859,6 +2875,31 @@ async function handleAction(action, target) {
     await render();
     return;
   }
+  if (action === "return-to-today") {
+    readDraftFromForm();
+    const today = todayISO();
+    state.draftDate = today;
+    const workoutsForDate = state.workouts.filter((w) => w.date === today);
+    if (workoutsForDate.length) {
+      const first = workoutsForDate[0];
+      state.editingWorkoutId = first.id;
+      state.workoutDraft = workoutsForDate.map((entry) => ({
+        draftId: uid(),
+        editingWorkoutId: entry.id,
+        exercise: entry.exercise,
+        targetMuscle: entry.primaryMuscles?.[0] || "chest",
+        notes: entry.notes || "",
+        setRows: setRowsFromWorkout(entry)
+      }));
+      syncLegacyDraftFromFirst();
+    } else {
+      state.editingWorkoutId = null;
+      state.workoutDraft = ensureWorkoutDraft().map((d) => ({ ...d, editingWorkoutId: null }));
+      syncLegacyDraftFromFirst();
+    }
+    await render();
+    return;
+  }
   if (action === "add-exercise-table") {
     readDraftFromForm();
     state.workoutDraft.push(defaultDraftExercise(exerciseNames()[0] || "Push-up"));
@@ -2868,6 +2909,20 @@ async function handleAction(action, target) {
   if (action === "remove-exercise-table") {
     readDraftFromForm();
     state.workoutDraft = ensureWorkoutDraft().filter((draft) => draft.draftId !== target.dataset.draftId);
+    syncLegacyDraftFromFirst();
+    await render();
+    return;
+  }
+  if (action === "move-exercise-up" || action === "move-exercise-down") {
+    readDraftFromForm();
+    const draftId = target.dataset.draftId;
+    const drafts = [...state.workoutDraft];
+    const idx = drafts.findIndex((d) => d.draftId === draftId);
+    if (idx < 0) return;
+    const swapIdx = action === "move-exercise-up" ? idx - 1 : idx + 1;
+    if (swapIdx < 0 || swapIdx >= drafts.length) return;
+    [drafts[idx], drafts[swapIdx]] = [drafts[swapIdx], drafts[idx]];
+    state.workoutDraft = drafts;
     syncLegacyDraftFromFirst();
     await render();
     return;
@@ -3040,24 +3095,50 @@ const dragState = {
   startY: 0,
   currentY: 0,
   active: false,
-  moved: false
+  moved: false,
+  pending: false,
+  dragTimer: null,
+  handle: null,
+  holdDelay: 150
 };
 
-function startExerciseDrag(handle, event) {
+function activateDrag() {
+  if (!dragState.pending || !dragState.handle) return;
+  const handle = dragState.handle;
   const section = handle.closest(".exercise-draft");
   if (!section) return;
   readDraftFromForm();
   dragState.id = section.dataset.draftId;
-  dragState.startY = event.clientY;
-  dragState.currentY = event.clientY;
   dragState.active = true;
-  dragState.moved = false;
+  dragState.pending = false;
   state.draggingDraftId = dragState.id;
   section.classList.add("is-dragging");
-  handle.setPointerCapture?.(event.pointerId);
+  handle.setPointerCapture?.(dragState.pointerId);
+}
+
+function startExerciseDrag(handle, event) {
+  dragState.handle = handle;
+  dragState.startY = event.clientY;
+  dragState.currentY = event.clientY;
+  dragState.pending = true;
+  dragState.moved = false;
+  dragState.pointerId = event.pointerId;
+  clearTimeout(dragState.dragTimer);
+  dragState.dragTimer = setTimeout(activateDrag, dragState.holdDelay);
+}
+
+function cancelPendingDrag() {
+  clearTimeout(dragState.dragTimer);
+  dragState.pending = false;
+  dragState.handle = null;
 }
 
 async function finishExerciseDrag(event) {
+  clearTimeout(dragState.dragTimer);
+  if (dragState.pending && !dragState.active) {
+    cancelPendingDrag();
+    return;
+  }
   if (!dragState.active || !dragState.id) return;
   dragState.currentY = event.clientY;
   const draggedId = dragState.id;
@@ -3086,9 +3167,14 @@ async function finishExerciseDrag(event) {
   }
   dragState.id = null;
   dragState.active = false;
+  dragState.pending = false;
   dragState.moved = false;
+  dragState.handle = null;
   state.draggingDraftId = null;
-  document.querySelectorAll(".exercise-draft.is-dragging").forEach((section) => section.classList.remove("is-dragging"));
+  document.querySelectorAll(".exercise-draft.is-dragging").forEach((section) => {
+    section.classList.remove("is-dragging");
+    section.style.transform = "";
+  });
   if (changed) await render();
 }
 
@@ -3212,9 +3298,13 @@ document.addEventListener("input", async (event) => {
 document.addEventListener("pointermove", (event) => {
   if (dragState.active) {
     dragState.currentY = event.clientY;
-    if (Math.abs(dragState.currentY - dragState.startY) > 8) dragState.moved = true;
+    const delta = dragState.currentY - dragState.startY;
+    if (Math.abs(delta) > 8) dragState.moved = true;
+    const dragged = document.querySelector(`.exercise-draft[data-draft-id="${dragState.id}"]`);
+    if (dragged) dragged.style.transform = `translateY(${delta}px)`;
     return;
   }
+  cancelPendingDrag();
   const chart = event.target.closest(".interactive-chart");
   if (chart) updateInteractiveChart(chart, event);
 });
@@ -3222,7 +3312,6 @@ document.addEventListener("pointermove", (event) => {
 document.addEventListener("pointerdown", (event) => {
   const handle = event.target.closest("[data-drag-handle]");
   if (handle) {
-    event.preventDefault();
     startExerciseDrag(handle, event);
     return;
   }
@@ -3244,9 +3333,14 @@ document.addEventListener("pointercancel", async (event) => {
   } catch {
     dragState.id = null;
     dragState.active = false;
+    dragState.pending = false;
     dragState.moved = false;
+    dragState.handle = null;
     state.draggingDraftId = null;
-    document.querySelectorAll(".exercise-draft.is-dragging").forEach((section) => section.classList.remove("is-dragging"));
+    document.querySelectorAll(".exercise-draft.is-dragging").forEach((section) => {
+      section.classList.remove("is-dragging");
+      section.style.transform = "";
+    });
   }
 });
 
@@ -3264,7 +3358,12 @@ document.addEventListener("touchmove", (event) => {
     event.preventDefault();
     const touch = event.touches[0];
     dragState.currentY = touch.clientY;
-    if (Math.abs(dragState.currentY - dragState.startY) > 8) dragState.moved = true;
+    const delta = dragState.currentY - dragState.startY;
+    if (Math.abs(delta) > 8) dragState.moved = true;
+    const dragged = document.querySelector(`.exercise-draft[data-draft-id="${dragState.id}"]`);
+    if (dragged) dragged.style.transform = `translateY(${delta}px)`;
+  } else if (dragState.pending) {
+    cancelPendingDrag();
   }
 }, { passive: false });
 
@@ -3277,11 +3376,17 @@ document.addEventListener("touchend", async (event) => {
 });
 
 document.addEventListener("touchcancel", () => {
+  clearTimeout(dragState.dragTimer);
   dragState.id = null;
   dragState.active = false;
+  dragState.pending = false;
   dragState.moved = false;
+  dragState.handle = null;
   state.draggingDraftId = null;
-  document.querySelectorAll(".exercise-draft.is-dragging").forEach((section) => section.classList.remove("is-dragging"));
+  document.querySelectorAll(".exercise-draft.is-dragging").forEach((section) => {
+    section.classList.remove("is-dragging");
+    section.style.transform = "";
+  });
 });
 
 document.addEventListener("submit", async (event) => {
