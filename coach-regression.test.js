@@ -50,6 +50,8 @@ function runScenario(source) {
   return vm.runInContext(source, context);
 }
 
+const withinCoachTimeWindow = (total, target) => Math.abs(total - target) <= 3;
+
 const resetAndHelpers = `
   state.workouts = [];
   state.metrics = [];
@@ -111,7 +113,7 @@ const coverage = runScenario(`
 `);
 
 assert(coverage.itemCount >= 5, `Expected 1 hour to cover at least 5 muscles, got ${coverage.itemCount}: ${coverage.muscles.join(", ")}`);
-assert(coverage.total >= 50, `Expected 1 hour plan to use meaningful time, got ${coverage.total}`);
+assert(withinCoachTimeWindow(coverage.total, 60), `Expected 1 hour plan to land near 60 min, got ${coverage.total}`);
 assert(coverage.regions.includes("push") && coverage.regions.includes("pull") && coverage.regions.includes("legs") && coverage.regions.includes("core"), `Expected balanced regions, got ${coverage.regions.join(", ")}`);
 assert(coverage.noteTitle.includes("Today's Plan"), `Expected Coach note to summarize Today's Plan, got ${coverage.noteTitle}`);
 assert(coverage.noteBody.includes(`${coverage.total}/60`), `Expected Coach note to use active plan estimate, got ${coverage.noteBody}`);
@@ -166,8 +168,49 @@ const timeframe = runScenario(`
 `);
 
 assert(timeframe.total60 > timeframe.total50, `Expected 60 min to exceed 50 min, got ${timeframe.total50} and ${timeframe.total60}`);
+assert(withinCoachTimeWindow(timeframe.total50, 50), `Expected 50 min plan to land near 50 min, got ${timeframe.total50}`);
+assert(withinCoachTimeWindow(timeframe.total60, 60), `Expected 60 min plan to land near 60 min, got ${timeframe.total60}`);
 assert(timeframe.items60 >= timeframe.items50, `Expected 60 min to keep or add coverage, got ${timeframe.items50} and ${timeframe.items60}`);
 assert(timeframe.sets60 > timeframe.sets50, `Expected 60 min to add useful sets, got ${timeframe.sets50} and ${timeframe.sets60}`);
+
+const shortRestTimeframe = runScenario(`
+  ${resetAndHelpers}
+  state.settings.customExercises = muscleGroups.map((muscle) => ({
+    id: "short-rest-" + muscle.id,
+    name: muscle.label + " Short Rest Exercise",
+    primaryMuscles: [muscle.id],
+    secondaryMuscles: [],
+    equipment: "custom",
+    reps: "8-15",
+    rest: "30-60 sec",
+    cue: "Short-rest test exercise for " + muscle.label,
+    userCreated: true
+  }));
+  var shortWorkout = (muscle, daysAgo, sets) => makeWorkout(muscle, daysAgo, sets, {
+    exercise: "short-rest-" + muscle.id,
+    exerciseId: "short-rest-" + muscle.id,
+    primaryMuscles: [muscle.id],
+    restSeconds: 31
+  });
+  state.workouts = [
+    shortWorkout(muscleGroups.find((muscle) => muscle.id === "biceps"), 5, 5),
+    shortWorkout(muscleGroups.find((muscle) => muscle.id === "glutes"), 4, 7.5),
+    shortWorkout(muscleGroups.find((muscle) => muscle.id === "back"), 5, 7.5),
+    shortWorkout(muscleGroups.find((muscle) => muscle.id === "calves"), 4, 7.5),
+    ...muscleGroups
+      .filter((muscle) => !["biceps", "glutes", "back", "calves"].includes(muscle.id))
+      .map((muscle) => shortWorkout(muscle, 2, 10))
+  ];
+  var plan = buildTodayPlan(60).sessionPlan;
+  ({
+    total: plan.totalMinutes,
+    itemCount: plan.items.length,
+    setCount: plan.items.reduce((sum, item) => sum + item.sets, 0)
+  });
+`);
+
+assert(withinCoachTimeWindow(shortRestTimeframe.total, 60), `Expected short-rest 1 hour plan to land near 60 min, got ${shortRestTimeframe.total}`);
+assert(shortRestTimeframe.setCount > 14, `Expected short-rest 1 hour plan to add useful volume beyond the early 14-set plan, got ${shortRestTimeframe.setCount}`);
 
 const personalRest = runScenario(`
   ${resetAndHelpers}
@@ -215,11 +258,12 @@ const shortTimeframe = runScenario(`
   ({
     total30: plan30.totalMinutes,
     items30: plan30.items.length,
-    fits: plan30.totalMinutes <= 30
+    fits: plan30.totalMinutes <= 33
   });
 `);
 
-assert(shortTimeframe.fits, `Expected 30 min plan to fit within limit, got ${shortTimeframe.total30}`);
+assert(shortTimeframe.fits, `Expected 30 min plan to fit within time window, got ${shortTimeframe.total30}`);
+assert(withinCoachTimeWindow(shortTimeframe.total30, 30), `Expected 30 min plan to land near 30 min, got ${shortTimeframe.total30}`);
 assert(shortTimeframe.items30 >= 2, `Expected 30 min to cover at least 2 muscles, got ${shortTimeframe.items30}`);
 
 const midTimeframe = runScenario(`
@@ -229,11 +273,12 @@ const midTimeframe = runScenario(`
   ({
     total40: plan40.totalMinutes,
     items40: plan40.items.length,
-    fits: plan40.totalMinutes <= 40
+    fits: plan40.totalMinutes <= 43
   });
 `);
 
-assert(midTimeframe.fits, `Expected 40 min plan to fit within limit, got ${midTimeframe.total40}`);
+assert(midTimeframe.fits, `Expected 40 min plan to fit within time window, got ${midTimeframe.total40}`);
+assert(withinCoachTimeWindow(midTimeframe.total40, 40), `Expected 40 min plan to land near 40 min, got ${midTimeframe.total40}`);
 assert(midTimeframe.items40 >= 3, `Expected 40 min to cover at least 3 muscles, got ${midTimeframe.items40}`);
 
 const allUnderdeveloped = runScenario(`
@@ -257,11 +302,14 @@ const emptyPlanAction = runScenario(`
   var action = actionFromSessionPlan(plan);
   ({
     mode: action.mode,
+    itemCount: plan.sessionPlan.items.length,
     hasTitle: typeof action.title === "string" && action.title.length > 0,
     hasBody: typeof action.body === "string" && action.body.length > 0
   });
 `);
 
+assert.notStrictEqual(emptyPlanAction.mode, "session", "Expected all-covered muscles to stay in progression/recovery mode instead of filling time.");
+assert.strictEqual(emptyPlanAction.itemCount, 0, `Expected all-covered plan to have no forced session items, got ${emptyPlanAction.itemCount}`);
 assert(emptyPlanAction.hasTitle, `Expected action to have a title even with no items, got mode=${emptyPlanAction.mode}`);
 assert(emptyPlanAction.hasBody, `Expected action to have body text even with no items, got mode=${emptyPlanAction.mode}`);
 

@@ -3,13 +3,14 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 2;
 const STORES = ["workouts", "metrics", "settings"];
-const APP_VERSION = "1.5.6";
+const APP_VERSION = "1.5.7";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 let dbOpenPromise = null;
 let chartId = 0;
 let reloadingForUpdate = false;
 let renderToken = 0;
 const SESSION_LIMIT_MINUTES = 60;
+const COACH_TIME_TOLERANCE_MINUTES = 3;
 const COACH_TIMEFRAME_OPTIONS = [
   { label: "30 min", minutes: 30 },
   { label: "40 min", minutes: 40 },
@@ -941,9 +942,9 @@ function sessionPlanCaps(limitMinutes, restart = false) {
     };
   }
   return {
-    maxItems: limit <= 30 ? 2 : limit <= 40 ? 3 : limit <= 50 ? 4 : 5,
+    maxItems: limit <= 30 ? 3 : limit <= 40 ? 4 : limit <= 50 ? 5 : limit <= 60 ? 6 : 8,
     minSets: 2,
-    maxSets: limit <= 40 ? 3 : limit <= 50 ? 4 : 5
+    maxSets: limit <= 30 ? 4 : limit <= 40 ? 5 : limit <= 50 ? 6 : limit <= 60 ? 8 : 10
   };
 }
 
@@ -955,28 +956,34 @@ function initialSetsForPlanTarget(target, caps) {
   return Math.max(1, Math.min(caps.minSets, caps.maxSets, Math.ceil(target.deficit)));
 }
 
-function maxSetsForPlanTarget(target, caps) {
-  return Math.max(1, Math.min(caps.maxSets, Math.ceil(target.deficit)));
+function maxSetsForPlanTarget(target, caps, fillToTime = false) {
+  const minimumGap = Math.max(1, Math.ceil(target.deficit));
+  if (!fillToTime) return Math.max(1, Math.min(caps.maxSets, minimumGap));
+  const growthGap = Math.max(minimumGap, Math.ceil(HYPERTROPHY.growthHigh - target.sets));
+  return Math.max(1, Math.min(caps.maxSets, growthGap));
 }
 
 function buildSessionPlan(limitMinutes = SESSION_LIMIT_MINUTES, options = {}) {
   const restart = options.restart || false;
   const cappedLimit = Math.min(75, Math.max(30, Number(limitMinutes) || SESSION_LIMIT_MINUTES));
+  const targetFloor = restart ? 0 : Math.max(0, cappedLimit - COACH_TIME_TOLERANCE_MINUTES);
+  const hardLimit = cappedLimit + (restart ? 0 : COACH_TIME_TOLERANCE_MINUTES);
   const caps = sessionPlanCaps(cappedLimit, restart);
-  const stats = muscleSetStats()
+  const allStats = muscleSetStats()
     .map(muscleReadiness)
-    .filter((stat) => stat.sets < HYPERTROPHY.minimumSets)
     .sort(coachMusclePrioritySort);
+  const stats = allStats.filter((stat) => stat.sets < HYPERTROPHY.minimumSets);
   const items = [];
   const missing = [];
   const missingIds = new Set();
   let totalMinutes = 0;
   const usedExercises = new Set();
 
-  const addTargetToPlan = (target) => {
+  const addTargetToPlan = (target, addOptions = {}) => {
+    const trackMissing = addOptions.trackMissing !== false;
     const exercise = chooseExerciseForMuscle(target.id, usedExercises);
     if (!exercise) {
-      if (!missingIds.has(target.id)) {
+      if (trackMissing && !missingIds.has(target.id)) {
         missing.push(target);
         missingIds.add(target.id);
       }
@@ -984,11 +991,11 @@ function buildSessionPlan(limitMinutes = SESSION_LIMIT_MINUTES, options = {}) {
     }
     let sets = initialSetsForPlanTarget(target, caps);
     let minutes = estimateExerciseMinutes(exercise, sets);
-    while (sets > 1 && totalMinutes + minutes > cappedLimit) {
+    while (sets > 1 && totalMinutes + minutes > hardLimit) {
       sets -= 1;
       minutes = estimateExerciseMinutes(exercise, sets);
     }
-    if (totalMinutes + minutes > cappedLimit) return false;
+    if (totalMinutes + minutes > hardLimit) return false;
     items.push({ muscle: target, exercise, sets, minutes, reason: "" });
     usedExercises.add(exercise.id);
     totalMinutes += minutes;
@@ -1007,6 +1014,23 @@ function buildSessionPlan(limitMinutes = SESSION_LIMIT_MINUTES, options = {}) {
     if (items.length >= caps.maxItems) break;
   }
 
+  if (!restart && stats.length) {
+    const supplementalTargets = allStats.filter((target) => (
+      target.sets < HYPERTROPHY.growthHigh
+      && !items.some((item) => item.muscle.id === target.id)
+    ));
+    const freshSupplemental = balancedCoverageTargets(supplementalTargets.filter((target) => !(target.primaryDaysSince !== null && target.primaryDaysSince <= 1)));
+    const recentSupplemental = balancedCoverageTargets(supplementalTargets.filter((target) => target.primaryDaysSince !== null && target.primaryDaysSince <= 1));
+
+    for (const group of [freshSupplemental, recentSupplemental]) {
+      for (const target of group) {
+        if (totalMinutes >= targetFloor || items.length >= caps.maxItems) break;
+        addTargetToPlan(target, { trackMissing: false });
+      }
+      if (totalMinutes >= targetFloor || items.length >= caps.maxItems) break;
+    }
+  }
+
   for (const target of stats) {
     if (!hasPrimaryExerciseForMuscle(target.id) && !missingIds.has(target.id)) {
       missing.push(target);
@@ -1018,12 +1042,12 @@ function buildSessionPlan(limitMinutes = SESSION_LIMIT_MINUTES, options = {}) {
   while (changed) {
     changed = false;
     const eligible = items
-      .filter((item) => item.sets < maxSetsForPlanTarget(item.muscle, caps))
+      .filter((item) => item.sets < maxSetsForPlanTarget(item.muscle, caps, !restart && stats.length > 0))
       .sort((a, b) => (b.muscle.deficit - a.muscle.deficit) || (a.sets - b.sets) || (plannedExerciseMinutes(a, a.sets + 1) - plannedExerciseMinutes(b, b.sets + 1)));
     for (const item of eligible) {
       const nextMinutes = plannedExerciseMinutes(item, item.sets + 1);
       const extraMinutes = nextMinutes - item.minutes;
-      if (totalMinutes + extraMinutes > cappedLimit) continue;
+      if (totalMinutes + extraMinutes > hardLimit) continue;
       item.sets += 1;
       item.minutes = nextMinutes;
       totalMinutes += extraMinutes;
@@ -1043,6 +1067,8 @@ function buildSessionPlan(limitMinutes = SESSION_LIMIT_MINUTES, options = {}) {
     deprioritized,
     totalMinutes,
     limitMinutes: cappedLimit,
+    targetFloorMinutes: targetFloor,
+    hardLimitMinutes: hardLimit,
     restart
   };
 }
@@ -1094,7 +1120,7 @@ function buildTodayPlan(limitMinutes = selectedCoachTimeframeMinutes()) {
     return {
       mode: restart ? "restart" : "session",
       title: restart ? "Restart session" : "Today's Plan",
-      subtitle: restart ? `Small, useful work capped at ${coachTimeframeLabel(limitMinutes)}.` : `Best gaps to train next, capped at ${coachTimeframeLabel(limitMinutes)}.`,
+      subtitle: restart ? `Small, useful work capped at ${coachTimeframeLabel(limitMinutes)}.` : `Best gaps to train next, built for about ${coachTimeframeLabel(limitMinutes)}.`,
       sessionPlan,
       why,
       explanation: { selected: selectedReasons, skipped: skippedReasons, missing: missingReasons, notes },
