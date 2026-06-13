@@ -1214,6 +1214,10 @@ textarea {
   font-size: 18px;
 }
 
+.mobile-set-meta {
+  display: none;
+}
+
 .set-type {
   min-width: 116px;
   color: var(--violet);
@@ -1823,8 +1827,138 @@ textarea {
   }
 
   .exercise-table-title {
-    grid-template-columns: auto auto minmax(0, 1fr);
+    display: grid;
+    grid-template-columns: 42px auto auto minmax(0, 1fr);
+    grid-template-areas:
+      "drag record muscles spacer"
+      "field field field field";
     gap: 8px;
+    align-items: center;
+  }
+
+  .drag-handle {
+    grid-area: drag;
+  }
+
+  .volume-record-trophy {
+    grid-area: record;
+    justify-self: start;
+  }
+
+  .exercise-muscle-icons {
+    grid-area: muscles;
+    justify-self: start;
+  }
+
+  .exercise-table-title > div:not(.exercise-muscle-icons) {
+    grid-area: field;
+    min-width: 0;
+  }
+
+  .set-table {
+    display: block;
+    width: 100%;
+    min-width: 0;
+    table-layout: fixed;
+  }
+
+  .set-table thead,
+  .set-table tbody {
+    display: block;
+    width: 100%;
+  }
+
+  .set-table tr {
+    display: grid;
+    grid-template-columns: minmax(0, 1.2fr) minmax(0, 1.1fr) minmax(0, 0.8fr) minmax(0, 1fr) 38px;
+    column-gap: 6px;
+    row-gap: 6px;
+    align-items: center;
+    width: 100%;
+  }
+
+  .set-table thead tr {
+    padding: 0 8px 6px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  }
+
+  .set-table tbody tr {
+    padding: 8px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  }
+
+  .set-table tbody tr:last-child {
+    border-bottom: 0;
+  }
+
+  .set-table th,
+  .set-table td {
+    display: block;
+    min-width: 0;
+    padding: 0;
+    font-size: 12px;
+    border-bottom: 0;
+  }
+
+  .set-table th.set-type-cell,
+  .set-table td.set-type,
+  .set-table th.prev-cell,
+  .set-table td.prev-cell {
+    display: none;
+  }
+
+  .set-table td.mobile-set-meta {
+    display: flex;
+    grid-column: 1 / -1;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    min-width: 0;
+    padding: 0 0 2px;
+    color: var(--muted);
+    font-size: 12px;
+    font-weight: 800;
+  }
+
+  .mobile-set-type,
+  .mobile-prev-label {
+    display: inline-flex;
+    align-items: center;
+    min-width: 0;
+    white-space: nowrap;
+  }
+
+  .mobile-set-type {
+    gap: 5px;
+    color: var(--violet);
+  }
+
+  .mobile-prev-label {
+    overflow: hidden;
+    justify-content: flex-end;
+    text-overflow: ellipsis;
+  }
+
+  .set-table input {
+    box-sizing: border-box;
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+    font-size: 16px;
+    padding: 5px 4px;
+  }
+
+  .set-table input[data-set-field="rest"] {
+    min-width: 0;
+    font-size: 14px;
+  }
+
+  .set-table .delete-set-btn {
+    width: 100%;
+    min-width: 0;
+    min-height: 36px;
+    padding: 0;
+    font-size: 14px;
   }
 
   .history-set-grid {
@@ -1867,7 +2001,7 @@ textarea {
   }
 
   .exercise-table-title {
-    grid-template-columns: auto auto minmax(0, 1fr);
+    grid-template-columns: 42px auto auto minmax(0, 1fr);
     gap: 6px;
   }
 
@@ -1930,37 +2064,6 @@ textarea {
     font-size: 9px;
   }
 
-  .set-table {
-    min-width: 0;
-  }
-
-  .set-table th,
-  .set-table td {
-    padding: 4px 3px;
-    font-size: 12px;
-  }
-
-  .set-table th.set-type-cell,
-  .set-table td.set-type {
-    display: none;
-  }
-
-  .set-table th.prev-cell,
-  .set-table td.prev-cell {
-    display: none;
-  }
-
-  .set-table input {
-    min-width: 48px;
-    font-size: 16px;
-    padding: 5px 3px;
-  }
-
-  .set-table input[data-set-field="rest"] {
-    min-width: 44px;
-    font-size: 14px;
-  }
-
   .set-number {
     width: 24px;
     height: 24px;
@@ -1968,9 +2071,4 @@ textarea {
     margin-right: 4px;
   }
 
-  .set-table .delete-set-btn {
-    font-size: 14px;
-    min-width: 28px;
-    min-height: 28px;
-  }
 }
