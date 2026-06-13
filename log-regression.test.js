@@ -117,6 +117,8 @@ assert(mobileCss.includes(".set-table td.prev-cell"), "Expected mobile set table
 assert(mobileCss.includes("table-layout: fixed"), "Expected mobile set table to use fixed columns.");
 assert(mobileCss.includes(".set-table tr"), "Expected mobile set table rows to use explicit grid layout.");
 assert(mobileCss.includes("grid-template-columns: minmax(0, 1.2fr)"), "Expected mobile set table to define visible input columns.");
+assert(mobileCss.includes(".set-table td.mobile-set-meta"), "Expected mobile row metadata to be visible on mobile.");
+assert(stylesCode.includes(".mobile-set-meta {\n  display: none;"), "Expected mobile row metadata to be hidden by default.");
 assert(!appCode.includes("exercise-title-dumbbell"), "Expected extra dumbbell icon next to record/muscle icons to be removed.");
 
 const setRecords = runScenario(`
@@ -168,6 +170,24 @@ const setTrophyDismissal = runScenario(`
 assert(setTrophyDismissal.beforeVisible, "Expected set trophy before dismissal.");
 assert(setTrophyDismissal.afterDismissHidden, "Expected dismissed set trophy to hide.");
 assert(setTrophyDismissal.afterChangeVisible, "Expected set trophy to return after weight/reps change.");
+
+const mobileMetaMarkup = runScenario(`
+  ${reset}
+  state.workouts = [
+    makeWorkout({ id: "prior-meta", setRows: [{ weight: 100, reps: 11, rir: 2, restSeconds: 120 }] })
+  ];
+  var draft = {
+    draftId: "draft-meta",
+    exercise: "Bench Press",
+    editingWorkoutId: null,
+    setRows: [{ weight: 100, reps: 12, rir: 2, restSeconds: 120 }]
+  };
+  renderSetRows(draft);
+`);
+
+assert(mobileMetaMarkup.includes("mobile-set-meta"), "Expected set rows to include mobile metadata.");
+assert(mobileMetaMarkup.includes("Prev 100 x 11"), "Expected mobile metadata to include previous set label.");
+assert(mobileMetaMarkup.includes("<strong>Set</strong>"), "Expected mobile metadata to include Set label.");
 
 const volumeRecord = runScenario(`
   ${reset}

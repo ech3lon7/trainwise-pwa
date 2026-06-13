@@ -3,7 +3,7 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 2;
 const STORES = ["workouts", "metrics", "settings"];
-const APP_VERSION = "1.5.5";
+const APP_VERSION = "1.5.6";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 let dbOpenPromise = null;
 let chartId = 0;
@@ -1680,13 +1680,18 @@ function renderSetRows(draft = draftExerciseFromState()) {
   return rows.map((row, index) => {
     const reasons = setRecordReasons(row, recordStats);
     const trophyKey = setRecordTrophyKey(draft, index, row, reasons);
+    const previousLabel = previousSetLabel(draft.exercise, index, draft.editingWorkoutId);
     return `
     <tr class="set-row" data-index="${index}">
+      <td class="mobile-set-meta" colspan="7">
+        <span class="mobile-set-type"><span class="set-number">${index + 1}</span><strong>Set</strong>${recordTrophyMarkup(reasons.join(" / "), "set-record-trophy", trophyKey)}</span>
+        <span class="mobile-prev-label">Prev ${escapeHtml(previousLabel)}</span>
+      </td>
       <td class="set-type">
         <span class="set-number">${index + 1}</span>
         <span class="set-label-wrap"><strong>Set</strong>${recordTrophyMarkup(reasons.join(" / "), "set-record-trophy", trophyKey)}</span>
       </td>
-      <td class="prev-cell">${escapeHtml(previousSetLabel(draft.exercise, index, draft.editingWorkoutId))}</td>
+      <td class="prev-cell">${escapeHtml(previousLabel)}</td>
       <td><input data-set-field="weight" type="number" inputmode="decimal" min="0" step="2.5" value="${escapeHtml(row.weight)}" aria-label="Set ${index + 1} weight"></td>
       <td><input data-set-field="reps" type="number" inputmode="numeric" min="1" step="1" value="${escapeHtml(row.reps)}" aria-label="Set ${index + 1} reps"></td>
       <td><input data-set-field="rir" type="number" inputmode="numeric" min="0" max="5" step="1" value="${row.rir ?? ""}" aria-label="Set ${index + 1} RIR"></td>

@@ -1221,6 +1221,10 @@ textarea {
   font-size: 18px;
 }
 
+.mobile-set-meta {
+  display: none;
+}
+
 .set-type {
   min-width: 116px;
   color: var(--violet);
@@ -1875,6 +1879,7 @@ textarea {
     display: grid;
     grid-template-columns: minmax(0, 1.2fr) minmax(0, 1.1fr) minmax(0, 0.8fr) minmax(0, 1fr) 38px;
     column-gap: 6px;
+    row-gap: 6px;
     align-items: center;
     width: 100%;
   }
@@ -1907,6 +1912,38 @@ textarea {
   .set-table th.prev-cell,
   .set-table td.prev-cell {
     display: none;
+  }
+
+  .set-table td.mobile-set-meta {
+    display: flex;
+    grid-column: 1 / -1;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    min-width: 0;
+    padding: 0 0 2px;
+    color: var(--muted);
+    font-size: 12px;
+    font-weight: 800;
+  }
+
+  .mobile-set-type,
+  .mobile-prev-label {
+    display: inline-flex;
+    align-items: center;
+    min-width: 0;
+    white-space: nowrap;
+  }
+
+  .mobile-set-type {
+    gap: 5px;
+    color: var(--violet);
+  }
+
+  .mobile-prev-label {
+    overflow: hidden;
+    justify-content: flex-end;
+    text-overflow: ellipsis;
   }
 
   .set-table input {
