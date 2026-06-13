@@ -57,6 +57,7 @@ const resetAndHelpers = `
   state.metrics = [];
   state.settings = {};
   state.selectedExercise = "Push-up";
+  state.coachTargetMuscles = [];
   state.settings.customExercises = [
     ...muscleGroups.map((muscle) => ({
       id: "custom-" + muscle.id,
@@ -151,6 +152,35 @@ const missingCoverage = runScenario(`
 
 assert(missingCoverage.missing.includes("Back"), `Expected missing coverage to include Back, got ${missingCoverage.missing.join(", ")}`);
 assert(missingCoverage.whyHasLibraryGap && missingCoverage.whyHasBack, "Why this? should expose missing library coverage.");
+
+const targetedMuscles = runScenario(`
+  ${resetAndHelpers}
+  state.coachTargetMuscles = ["biceps"];
+  state.workouts = muscleGroups.map((muscle) => makeWorkout(muscle, 2, 10));
+  var plan = buildTodayPlan(60);
+  ({
+    mode: plan.mode,
+    muscles: plan.sessionPlan.items.map((item) => item.muscle.id),
+    bicepsSets: plan.sessionPlan.items.find((item) => item.muscle.id === "biceps")?.sets || 0,
+    why: plan.why.join(" ")
+  });
+`);
+
+assert.strictEqual(targetedMuscles.mode, "session", `Expected target focus to create a session, got ${targetedMuscles.mode}`);
+assert(targetedMuscles.muscles.includes("biceps"), `Expected biceps target in plan, got ${targetedMuscles.muscles.join(", ")}`);
+assert(targetedMuscles.bicepsSets > 0, `Expected biceps target to receive work, got ${targetedMuscles.bicepsSets}`);
+assert(targetedMuscles.why.includes("Target focus"), `Expected target focus explanation, got ${targetedMuscles.why}`);
+
+const targetMissingCoverage = runScenario(`
+  ${resetAndHelpers}
+  state.coachTargetMuscles = ["biceps"];
+  state.settings.customExercises = state.settings.customExercises.filter((exercise) => !exercise.primaryMuscles.includes("biceps"));
+  state.workouts = muscleGroups.map((muscle) => makeWorkout(muscle, 2, 10));
+  var plan = buildTodayPlan(60);
+  ({ missing: plan.sessionPlan.missing.map((muscle) => muscle.label) });
+`);
+
+assert(targetMissingCoverage.missing.includes("Biceps"), `Expected missing target coverage to include Biceps, got ${targetMissingCoverage.missing.join(", ")}`);
 
 const timeframe = runScenario(`
   ${resetAndHelpers}
@@ -315,18 +345,48 @@ assert(emptyPlanAction.hasBody, `Expected action to have body text even with no 
 
 const exerciseScoring = runScenario(`
   ${resetAndHelpers}
-  var chest = muscleGroups.find((m) => m.id === "chest");
-  var bench = resolveExerciseMeta("Dumbbell Bench Press");
-  var fly = resolveExerciseMeta("Cable Fly");
-  state.workouts = [
-    makeWorkout(chest, 1, 3, { exercise: bench.name, exerciseId: bench.id, primaryMuscles: bench.primaryMuscles, secondaryMuscles: bench.secondaryMuscles, restSeconds: 180 }),
-    makeWorkout(chest, 2, 3, { exercise: bench.name, exerciseId: bench.id, primaryMuscles: bench.primaryMuscles, secondaryMuscles: bench.secondaryMuscles, restSeconds: 180 })
+  state.settings.customExercises = [
+    {
+      id: "curl",
+      name: "Bicep Curl",
+      primaryMuscles: ["biceps"],
+      secondaryMuscles: [],
+      equipment: "dumbbells",
+      reps: "8-15",
+      rest: "60-120 sec",
+      cue: "Curl.",
+      userCreated: true
+    },
+    {
+      id: "hammer",
+      name: "Hammer Curl",
+      primaryMuscles: ["biceps"],
+      secondaryMuscles: [],
+      equipment: "dumbbells",
+      reps: "8-15",
+      rest: "60-120 sec",
+      cue: "Hammer.",
+      userCreated: true
+    }
   ];
-  var benchScore = scoreExerciseForMuscle(bench, "chest");
-  var flyScore = scoreExerciseForMuscle(fly, "chest");
-  ({ benchScore, flyScore, benchWins: benchScore > flyScore });
+  var biceps = muscleGroups.find((m) => m.id === "biceps");
+  state.workouts = [
+    makeWorkout(biceps, 4, 3, { exercise: "Bicep Curl", exerciseId: "curl", primaryMuscles: ["biceps"], secondaryMuscles: [], restSeconds: 90 })
+  ];
+  var chosen = chooseExerciseForMuscle("biceps");
+  ({
+    chosen: chosen?.name,
+    curlScore: scoreExerciseForMuscle(resolveExerciseMeta("Bicep Curl"), "biceps"),
+    hammerScore: scoreExerciseForMuscle(resolveExerciseMeta("Hammer Curl"), "biceps")
+  });
 `);
 
-assert(exerciseScoring.benchWins, `Expected exercised bench (score=${exerciseScoring.benchScore}) to beat unused fly (score=${exerciseScoring.flyScore})`);
+assert.strictEqual(exerciseScoring.chosen, "Hammer Curl", `Expected rotation toward Hammer Curl, got ${exerciseScoring.chosen} with scores curl=${exerciseScoring.curlScore} hammer=${exerciseScoring.hammerScore}`);
+
+const highVolumeWording = runScenario(`
+  setZone(21).label;
+`);
+
+assert.strictEqual(highVolumeWording, "High volume", `Expected high volume wording, got ${highVolumeWording}`);
 
 console.log("coach regression tests passed");

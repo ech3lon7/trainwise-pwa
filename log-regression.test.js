@@ -251,6 +251,30 @@ const volumeTrophyDismissal = runScenario(`
 assert(volumeTrophyDismissal.beforeVisible, "Expected volume trophy before dismissal.");
 assert(volumeTrophyDismissal.afterDismissHidden, "Expected dismissed volume trophy to hide.");
 
+const liveTrophySlots = runScenario(`
+  ${reset}
+  state.workouts = [makeWorkout({ setRows: [{ weight: 25, reps: 10, rir: 2, restSeconds: 90 }] })];
+  var draft = {
+    draftId: "live-draft",
+    exercise: "Bench Press",
+    targetMuscle: "chest",
+    editingWorkoutId: null,
+    notes: "",
+    setRows: [{ weight: 25, reps: 12, rir: 2, restSeconds: 90 }]
+  };
+  var markup = renderSetRows(draft);
+  var stats = exerciseRecordStats("Bench Press");
+  ({
+    hasSlot: markup.includes('data-record-slot="set"'),
+    hasTrophy: markup.includes("set-record-trophy"),
+    removedAfterEdit: !setRecordTrophyMarkupForRow(draft, { weight: 25, reps: 9, rir: 2, restSeconds: 90 }, 0, stats)
+  });
+`);
+
+assert(liveTrophySlots.hasSlot, "Expected set rows to include live trophy slots.");
+assert(liveTrophySlots.hasTrophy, "Expected live trophy slot to render a set trophy when row is a record.");
+assert(liveTrophySlots.removedAfterEdit, "Expected live trophy helper to remove trophy when edited below record.");
+
 const editExclusion = runScenario(`
   ${reset}
   state.workouts = [
@@ -273,6 +297,54 @@ const orderPreserved = runScenario(`
 `);
 
 assert.deepEqual(orderPreserved, ["First", "Second", "Third"], `Expected saved exercise order, got ${orderPreserved.join(", ")}`);
+
+const coachPlanCopy = runScenario(`
+  ${reset}
+  state.workouts = [
+    makeWorkout({
+      exercise: "Bench Press",
+      exerciseId: "custom-bench",
+      primaryMuscles: ["chest"],
+      secondaryMuscles: ["triceps"],
+      setRows: [
+        { weight: 100, reps: 10, rir: 2, restSeconds: 120 },
+        { weight: 95, reps: 10, rir: 2, restSeconds: 120 }
+      ]
+    }),
+    makeWorkout({
+      exercise: "Cable Row",
+      exerciseId: "custom-row",
+      primaryMuscles: ["back"],
+      secondaryMuscles: ["biceps"],
+      setRows: [
+        { weight: 120, reps: 11, rir: 2, restSeconds: 120 }
+      ]
+    })
+  ];
+  copyCoachPlanToLog({
+    sessionPlan: {
+      items: [
+        { exercise: resolveExerciseMeta("Bench Press"), muscle: { id: "chest" }, sets: 3, reason: "Chest plan" },
+        { exercise: resolveExerciseMeta("Cable Row"), muscle: { id: "back" }, sets: 2, reason: "Back plan" }
+      ]
+    }
+  });
+  ({
+    activeTab: state.activeTab,
+    draftExercises: state.workoutDraft.map((draft) => draft.exercise),
+    setCounts: state.workoutDraft.map((draft) => draft.setRows.length),
+    firstWeights: state.workoutDraft.map((draft) => draft.setRows[0].weight),
+    repeatedPrevious: state.workoutDraft[0].setRows[2].weight,
+    editingIds: state.workoutDraft.map((draft) => draft.editingWorkoutId)
+  });
+`);
+
+assert.strictEqual(coachPlanCopy.activeTab, "log", `Expected Coach copy to switch to Log, got ${coachPlanCopy.activeTab}`);
+assert.deepEqual(coachPlanCopy.draftExercises, ["Bench Press", "Cable Row"], `Expected Coach copy order, got ${coachPlanCopy.draftExercises.join(", ")}`);
+assert.deepEqual(coachPlanCopy.setCounts, [3, 2], `Expected planned set counts, got ${coachPlanCopy.setCounts.join(", ")}`);
+assert.deepEqual(coachPlanCopy.firstWeights, [100, 120], `Expected copied previous weights, got ${coachPlanCopy.firstWeights.join(", ")}`);
+assert.strictEqual(coachPlanCopy.repeatedPrevious, 95, `Expected missing planned sets to repeat last previous row, got ${coachPlanCopy.repeatedPrevious}`);
+assert(coachPlanCopy.editingIds.every((id) => id === null), "Expected Coach copied drafts to be unsaved templates.");
 
 const emptyDateReset = runScenario(`
   ${reset}
@@ -325,5 +397,18 @@ const populatedDateLoad = runScenario(`
 `);
 
 assert.deepEqual(populatedDateLoad, ["Bench Press", "Cable Row"], `Expected populated date to load in saved order, got ${populatedDateLoad.join(", ")}`);
+
+const supabasePasswordExport = runScenario(`
+  ${reset}
+  state.settings.supabasePassword = "secret-password";
+  state.settings.supabaseRememberPassword = true;
+  state.settings.supabaseUrl = "https://example.supabase.co";
+  state.settings.supabaseAnonKey = "anon";
+  state.settings.supabaseEmail = "user@example.com";
+  exportPayload().settings;
+`);
+
+assert(!("supabasePassword" in supabasePasswordExport), "Expected saved Supabase password to be excluded from backup exports.");
+assert(!("supabaseRememberPassword" in supabasePasswordExport), "Expected Supabase remember flag to be excluded from backup exports.");
 
 console.log("log regression tests passed");

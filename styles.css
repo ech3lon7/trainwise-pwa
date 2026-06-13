@@ -684,12 +684,14 @@ textarea {
   margin-bottom: 0;
 }
 
-.coach-timeframe-card {
+.coach-timeframe-card,
+.coach-target-card {
   display: grid;
   gap: 10px;
 }
 
-.coach-timeframe-options {
+.coach-timeframe-options,
+.coach-target-options {
   display: flex;
   gap: 8px;
   width: 100%;
@@ -700,11 +702,13 @@ textarea {
   -webkit-overflow-scrolling: touch;
 }
 
-.coach-timeframe-options::-webkit-scrollbar {
+.coach-timeframe-options::-webkit-scrollbar,
+.coach-target-options::-webkit-scrollbar {
   display: none;
 }
 
-.timeframe-chip {
+.timeframe-chip,
+.target-muscle-chip {
   flex: 0 0 auto;
   min-width: 72px;
   min-height: 44px;
@@ -717,10 +721,20 @@ textarea {
   white-space: nowrap;
 }
 
-.timeframe-chip.is-active {
+.timeframe-chip.is-active,
+.target-muscle-chip.is-active {
   border-color: rgba(53, 213, 140, 0.45);
   background: rgba(53, 213, 140, 0.16);
   color: var(--green);
+}
+
+.target-muscle-chip {
+  min-width: 84px;
+}
+
+.coach-copy-button {
+  width: 100%;
+  margin-top: 12px;
 }
 
 .compact-empty {
@@ -1156,6 +1170,22 @@ textarea {
 .muscle-token.primary {
   background: rgba(53, 213, 140, 0.16);
   color: var(--green);
+}
+
+.checkbox-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.checkbox-row input {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--green);
 }
 
 .muscle-token.secondary {
