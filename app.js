@@ -2070,7 +2070,7 @@ function exerciseDraftTable(draft, index, total) {
           <thead>
             <tr>
               <th class="set-type-cell">Type</th>
-              <th>Prev</th>
+              <th class="prev-cell">Prev</th>
               <th>lbs</th>
               <th>Reps</th>
               <th>RIR</th>

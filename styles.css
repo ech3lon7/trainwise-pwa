@@ -1837,8 +1837,14 @@ textarea {
   }
 
   .exercise-table-title {
-    grid-template-columns: auto auto minmax(0, 1fr);
+    display: flex;
+    flex-wrap: wrap;
     gap: 8px;
+    align-items: center;
+  }
+
+  .exercise-table-title > div {
+    flex-basis: 100%;
   }
 
   .history-set-grid {
@@ -1881,8 +1887,14 @@ textarea {
   }
 
   .exercise-table-title {
-    grid-template-columns: auto auto minmax(0, 1fr);
+    display: flex;
+    flex-wrap: wrap;
     gap: 6px;
+    align-items: center;
+  }
+
+  .exercise-table-title > div {
+    flex-basis: 100%;
   }
 
   .exercise-muscle-icons {
