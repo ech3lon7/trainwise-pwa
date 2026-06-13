@@ -3,7 +3,7 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 2;
 const STORES = ["workouts", "metrics", "settings"];
-const APP_VERSION = "1.5.4";
+const APP_VERSION = "1.5.5";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 let dbOpenPromise = null;
 let chartId = 0;
@@ -2033,15 +2033,13 @@ function exerciseDraftTable(draft, index, total) {
   const recordStats = exerciseRecordStats(draft.exercise, draft.editingWorkoutId);
   const volumeRecordReason = exerciseVolumeRecordReason(draft, recordStats);
   const volumeTrophyKey = volumeRecordTrophyKey(draft, volumeRecordReason);
+  const volumeTrophyMarkup = recordTrophyMarkup(volumeRecordReason, "volume-record-trophy", volumeTrophyKey);
   return `
     <section class="exercise-draft ${state.draggingDraftId === draft.draftId ? "is-dragging" : ""}" data-draft-id="${escapeHtml(draft.draftId)}" data-editing-workout-id="${escapeHtml(draft.editingWorkoutId || "")}">
       <div class="exercise-table-top">
         <div class="exercise-table-title">
           <button class="drag-handle" type="button" aria-label="Drag exercise table" data-drag-handle data-draft-id="${escapeHtml(draft.draftId)}">::</button>
-          <span class="exercise-record-icon-wrap">
-            <img class="exercise-title-dumbbell" src="./assets/dumbbell.svg?v=${APP_VERSION}" alt="" width="26" height="26">
-            ${recordTrophyMarkup(volumeRecordReason, "volume-record-trophy", volumeTrophyKey)}
-          </span>
+          ${volumeTrophyMarkup ? `<span class="exercise-record-icon-wrap">${volumeTrophyMarkup}</span>` : ""}
           ${exerciseMuscleIcons(meta)}
           <div>
             <label for="exercise-${escapeHtml(draft.draftId)}">Exercise</label>

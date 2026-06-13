@@ -115,6 +115,9 @@ assert(mobileCss.includes('"drag record muscles spacer"'), "Expected mobile exer
 assert(mobileCss.includes(".set-table th.prev-cell"), "Expected mobile set table to hide Prev header at the 720px breakpoint.");
 assert(mobileCss.includes(".set-table td.prev-cell"), "Expected mobile set table to hide Prev values at the 720px breakpoint.");
 assert(mobileCss.includes("table-layout: fixed"), "Expected mobile set table to use fixed columns.");
+assert(mobileCss.includes(".set-table tr"), "Expected mobile set table rows to use explicit grid layout.");
+assert(mobileCss.includes("grid-template-columns: minmax(0, 1.2fr)"), "Expected mobile set table to define visible input columns.");
+assert(!appCode.includes("exercise-title-dumbbell"), "Expected extra dumbbell icon next to record/muscle icons to be removed.");
 
 const setRecords = runScenario(`
   ${reset}
