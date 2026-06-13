@@ -1837,14 +1837,93 @@ textarea {
   }
 
   .exercise-table-title {
-    display: flex;
-    flex-wrap: wrap;
+    display: grid;
+    grid-template-columns: 42px auto auto minmax(0, 1fr);
+    grid-template-areas:
+      "drag record muscles spacer"
+      "field field field field";
     gap: 8px;
     align-items: center;
   }
 
-  .exercise-table-title > div {
-    flex-basis: 100%;
+  .drag-handle {
+    grid-area: drag;
+  }
+
+  .exercise-record-icon-wrap {
+    grid-area: record;
+    justify-self: start;
+  }
+
+  .exercise-muscle-icons {
+    grid-area: muscles;
+    justify-self: start;
+  }
+
+  .exercise-table-title > div:not(.exercise-muscle-icons) {
+    grid-area: field;
+    min-width: 0;
+  }
+
+  .set-table {
+    min-width: 0;
+    table-layout: fixed;
+  }
+
+  .set-table th,
+  .set-table td {
+    padding: 5px 4px;
+    font-size: 12px;
+  }
+
+  .set-table th.set-type-cell,
+  .set-table td.set-type,
+  .set-table th.prev-cell,
+  .set-table td.prev-cell {
+    display: none;
+  }
+
+  .set-table th:nth-child(3),
+  .set-table td:nth-child(3) {
+    width: 26%;
+  }
+
+  .set-table th:nth-child(4),
+  .set-table td:nth-child(4) {
+    width: 24%;
+  }
+
+  .set-table th:nth-child(5),
+  .set-table td:nth-child(5) {
+    width: 16%;
+  }
+
+  .set-table th:nth-child(6),
+  .set-table td:nth-child(6) {
+    width: 22%;
+  }
+
+  .set-table th:nth-child(7),
+  .set-table td:nth-child(7) {
+    width: 12%;
+  }
+
+  .set-table input {
+    min-width: 48px;
+    font-size: 16px;
+    padding: 5px 3px;
+  }
+
+  .set-table input[data-set-field="rest"] {
+    min-width: 44px;
+    font-size: 14px;
+  }
+
+  .set-table .delete-set-btn {
+    min-width: 28px;
+    min-height: 28px;
+    padding: 0;
+    font-size: 14px;
   }
 
   .history-set-grid {
@@ -1887,14 +1966,8 @@ textarea {
   }
 
   .exercise-table-title {
-    display: flex;
-    flex-wrap: wrap;
+    grid-template-columns: 42px auto auto minmax(0, 1fr);
     gap: 6px;
-    align-items: center;
-  }
-
-  .exercise-table-title > div {
-    flex-basis: 100%;
   }
 
   .exercise-muscle-icons {
@@ -1956,37 +2029,6 @@ textarea {
     font-size: 9px;
   }
 
-  .set-table {
-    min-width: 0;
-  }
-
-  .set-table th,
-  .set-table td {
-    padding: 4px 3px;
-    font-size: 12px;
-  }
-
-  .set-table th.set-type-cell,
-  .set-table td.set-type {
-    display: none;
-  }
-
-  .set-table th.prev-cell,
-  .set-table td.prev-cell {
-    display: none;
-  }
-
-  .set-table input {
-    min-width: 48px;
-    font-size: 16px;
-    padding: 5px 3px;
-  }
-
-  .set-table input[data-set-field="rest"] {
-    min-width: 44px;
-    font-size: 14px;
-  }
-
   .set-number {
     width: 24px;
     height: 24px;
@@ -1994,9 +2036,4 @@ textarea {
     margin-right: 4px;
   }
 
-  .set-table .delete-set-btn {
-    font-size: 14px;
-    min-width: 28px;
-    min-height: 28px;
-  }
 }

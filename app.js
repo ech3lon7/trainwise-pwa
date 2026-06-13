@@ -3,7 +3,7 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 2;
 const STORES = ["workouts", "metrics", "settings"];
-const APP_VERSION = "1.5.3";
+const APP_VERSION = "1.5.4";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 let dbOpenPromise = null;
 let chartId = 0;
@@ -1691,7 +1691,7 @@ function renderSetRows(draft = draftExerciseFromState()) {
       <td><input data-set-field="reps" type="number" inputmode="numeric" min="1" step="1" value="${escapeHtml(row.reps)}" aria-label="Set ${index + 1} reps"></td>
       <td><input data-set-field="rir" type="number" inputmode="numeric" min="0" max="5" step="1" value="${row.rir ?? ""}" aria-label="Set ${index + 1} RIR"></td>
       <td><input data-set-field="rest" type="text" inputmode="text" value="${escapeHtml(restInputValue(row.restSeconds))}" placeholder="1:30" aria-label="Set ${index + 1} rest"></td>
-      <td><button class="ghost-mini" type="button" data-action="remove-set" data-draft-id="${escapeHtml(draft.draftId)}" data-index="${index}" ${rows.length <= 1 ? "disabled" : ""}>x</button></td>
+      <td><button class="ghost-mini delete-set-btn" type="button" data-action="remove-set" data-draft-id="${escapeHtml(draft.draftId)}" data-index="${index}" ${rows.length <= 1 ? "disabled" : ""}>x</button></td>
     </tr>
   `;
   }).join("");

@@ -4,6 +4,7 @@ const vm = require("vm");
 
 let appCode = fs.readFileSync("app.js", "utf8");
 appCode = appCode.replace(/init\(\)\.catch\([\s\S]*?\n\}\);\s*$/, "");
+const stylesCode = fs.readFileSync("styles.css", "utf8");
 
 const context = {
   console,
@@ -106,6 +107,14 @@ const reset = `
     updatedAt: overrides.updatedAt || "2026-06-10T12:00:00.000Z"
   });
 `;
+
+const mobileStart = stylesCode.indexOf("@media (max-width: 720px)");
+const mobileEnd = stylesCode.indexOf("@media (max-width: 420px)");
+const mobileCss = mobileStart >= 0 && mobileEnd > mobileStart ? stylesCode.slice(mobileStart, mobileEnd) : "";
+assert(mobileCss.includes('"drag record muscles spacer"'), "Expected mobile exercise header to keep icons left of the field.");
+assert(mobileCss.includes(".set-table th.prev-cell"), "Expected mobile set table to hide Prev header at the 720px breakpoint.");
+assert(mobileCss.includes(".set-table td.prev-cell"), "Expected mobile set table to hide Prev values at the 720px breakpoint.");
+assert(mobileCss.includes("table-layout: fixed"), "Expected mobile set table to use fixed columns.");
 
 const setRecords = runScenario(`
   ${reset}
