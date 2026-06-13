@@ -2038,8 +2038,8 @@ function exerciseDraftTable(draft, index, total) {
       <div class="exercise-table-top">
         <div class="exercise-table-title">
           <button class="drag-handle" type="button" aria-label="Drag exercise table" data-drag-handle data-draft-id="${escapeHtml(draft.draftId)}">::</button>
-          ${recordTrophyMarkup(volumeRecordReason, "volume-record-trophy", volumeTrophyKey)}
           ${exerciseMuscleIcons(meta)}
+          ${recordTrophyMarkup(volumeRecordReason, "volume-record-trophy", volumeTrophyKey)}
           <div>
             <label for="exercise-${escapeHtml(draft.draftId)}">Exercise</label>
             <select id="exercise-${escapeHtml(draft.draftId)}" data-draft-field="exercise" data-action="draft-exercise-change" data-draft-id="${escapeHtml(draft.draftId)}">
@@ -2067,7 +2067,7 @@ function exerciseDraftTable(draft, index, total) {
           <thead>
             <tr>
               <th class="set-type-cell">Type</th>
-              <th>Prev</th>
+              <th class="prev-cell">Prev</th>
               <th>lbs</th>
               <th>Reps</th>
               <th>RIR</th>
