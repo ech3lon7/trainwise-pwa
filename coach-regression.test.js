@@ -355,9 +355,33 @@ const allUnderdeveloped = runScenario(`
 assert(allUnderdeveloped.fits, `Expected all-underdeveloped plan to fit within limit, got ${allUnderdeveloped.total}`);
 assert(allUnderdeveloped.itemCount >= 4, `Expected all-underdeveloped to cover at least 4 muscles, got ${allUnderdeveloped.itemCount}`);
 
-const emptyPlanAction = runScenario(`
+const optimumPlanAction = runScenario(`
   ${resetAndHelpers}
   state.workouts = muscleGroups.map((muscle) => makeWorkout(muscle, 2, 10));
+  var plan = buildTodayPlan(60);
+  var action = actionFromSessionPlan(plan);
+  ({
+    mode: action.mode,
+    itemCount: plan.sessionPlan.items.length,
+    total: plan.sessionPlan.totalMinutes,
+    hasOptimumReason: plan.why.join(" ").includes("/20 hard sets"),
+    maxMuscleSets: Math.max(...plan.sessionPlan.items.map((item) => item.muscle.sets + item.sets)),
+    hasTitle: typeof action.title === "string" && action.title.length > 0,
+    hasBody: typeof action.body === "string" && action.body.length > 0
+  });
+`);
+
+assert.strictEqual(optimumPlanAction.mode, "session", `Expected all floor-covered muscles below 20 to build an optimum-volume session, got ${optimumPlanAction.mode}`);
+assert(optimumPlanAction.itemCount > 0, "Expected optimum-volume plan to include exercises after minimums are covered.");
+assert(withinCoachTimeWindow(optimumPlanAction.total, 60), `Expected optimum-volume 1 hour plan to land near 60 min, got ${optimumPlanAction.total}`);
+assert(optimumPlanAction.hasOptimumReason, "Expected optimum-volume reasons to use the 20-set target after the floor is covered.");
+assert(optimumPlanAction.maxMuscleSets <= 20, `Expected optimum-volume plan not to push muscles over 20 sets, got ${optimumPlanAction.maxMuscleSets}`);
+assert(optimumPlanAction.hasTitle, `Expected action to have a title, got mode=${optimumPlanAction.mode}`);
+assert(optimumPlanAction.hasBody, `Expected action to have body text, got mode=${optimumPlanAction.mode}`);
+
+const emptyPlanAction = runScenario(`
+  ${resetAndHelpers}
+  state.workouts = muscleGroups.map((muscle) => makeWorkout(muscle, 2, 20));
   var plan = buildTodayPlan(60);
   var action = actionFromSessionPlan(plan);
   ({
@@ -368,8 +392,8 @@ const emptyPlanAction = runScenario(`
   });
 `);
 
-assert.notStrictEqual(emptyPlanAction.mode, "session", "Expected all-covered muscles to stay in progression/recovery mode instead of filling time.");
-assert.strictEqual(emptyPlanAction.itemCount, 0, `Expected all-covered plan to have no forced session items, got ${emptyPlanAction.itemCount}`);
+assert.notStrictEqual(emptyPlanAction.mode, "session", "Expected all muscles at 20 sets to stay in progression/recovery mode instead of forcing more volume.");
+assert.strictEqual(emptyPlanAction.itemCount, 0, `Expected all-optimum plan to have no forced session items, got ${emptyPlanAction.itemCount}`);
 assert(emptyPlanAction.hasTitle, `Expected action to have a title even with no items, got mode=${emptyPlanAction.mode}`);
 assert(emptyPlanAction.hasBody, `Expected action to have body text even with no items, got mode=${emptyPlanAction.mode}`);
 
@@ -419,5 +443,14 @@ const highVolumeZone = runScenario(`
 
 assert.strictEqual(highVolumeZone.label, "High volume", `Expected high volume wording, got ${highVolumeZone.label}`);
 assert.strictEqual(highVolumeZone.tone, "high-volume", `Expected high volume to use dark-green tone, got ${highVolumeZone.tone}`);
+
+const muscleChartScale = runScenario(`
+  ${resetAndHelpers}
+  var chest = muscleGroups.find((m) => m.id === "chest");
+  state.workouts = [makeWorkout(chest, 2, 10)];
+  muscleSetStats().find((stat) => stat.id === "chest").percent;
+`);
+
+assert.strictEqual(muscleChartScale, 50, `Expected 10 sets to fill half of the 20-set chart target, got ${muscleChartScale}`);
 
 console.log("coach regression tests passed");

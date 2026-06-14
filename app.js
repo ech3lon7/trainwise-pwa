@@ -3,7 +3,7 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 2;
 const STORES = ["workouts", "metrics", "settings"];
-const APP_VERSION = "1.5.9";
+const APP_VERSION = "1.5.10";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 let dbOpenPromise = null;
 let chartId = 0;
@@ -737,7 +737,7 @@ function muscleSetStats() {
       ...muscle,
       sets,
       sessions: sessions[muscle.id].size,
-      percent: Math.min(100, (sets / HYPERTROPHY.minimumSets) * 100),
+      percent: Math.min(100, (sets / HYPERTROPHY.growthHigh) * 100),
       zone: setZone(sets),
       deficit: Math.max(0, HYPERTROPHY.minimumSets - sets)
     };
@@ -911,9 +911,20 @@ function rankedCoachMuscles() {
   return muscleSetStats().map(muscleReadiness).sort(coachMusclePrioritySort);
 }
 
+function optimumSetGap(stat) {
+  return Math.max(0, HYPERTROPHY.growthHigh - stat.sets);
+}
+
+function plannedOptimumGap(item) {
+  return Math.max(0, HYPERTROPHY.growthHigh - (item.muscle.sets + item.sets));
+}
+
 function planPriorityReason(item) {
+  const targetSets = item.muscle.sets < HYPERTROPHY.minimumSets
+    ? HYPERTROPHY.minimumSets
+    : HYPERTROPHY.growthHigh;
   const parts = [
-    `${item.muscle.label} is ${fmt(item.muscle.sets, 1)}/${HYPERTROPHY.minimumSets} hard sets`,
+    `${item.muscle.label} is ${fmt(item.muscle.sets, 1)}/${targetSets} hard sets`,
     `${item.muscle.sessions}/2 touches`
   ];
   if (item.muscle.daysSince !== null) parts.push(`last hit ${item.muscle.daysSince}d ago`);
@@ -986,6 +997,7 @@ function buildSessionPlan(limitMinutes = SESSION_LIMIT_MINUTES, options = {}) {
     .map(muscleReadiness)
     .sort(coachMusclePrioritySort);
   const stats = allStats.filter((stat) => stat.sets < HYPERTROPHY.minimumSets);
+  const optimumCandidates = allStats.filter((stat) => stat.sets < HYPERTROPHY.growthHigh);
   const items = [];
   const missing = [];
   const missingIds = new Set();
@@ -1027,21 +1039,21 @@ function buildSessionPlan(limitMinutes = SESSION_LIMIT_MINUTES, options = {}) {
     if (items.length >= caps.maxItems) break;
   }
 
-  if (!restart && (stats.length || targetMuscles.length)) {
+  if (!restart && (optimumCandidates.length || targetMuscles.length)) {
     const supplementalTargets = allStats.filter((target) => (
       target.sets < HYPERTROPHY.growthHigh
       && (!targetMuscles.length || stats.length || isCoachTargetMuscle(target.id, targetMuscles))
       && !items.some((item) => item.muscle.id === target.id)
     )).sort((a, b) => (
       Number(isCoachTargetMuscle(b.id, targetMuscles)) - Number(isCoachTargetMuscle(a.id, targetMuscles))
-    ) || coachMusclePrioritySort(a, b));
+    ) || (optimumSetGap(b) - optimumSetGap(a)) || coachMusclePrioritySort(a, b));
     const freshSupplemental = balancedCoverageTargets(supplementalTargets.filter((target) => !(target.primaryDaysSince !== null && target.primaryDaysSince <= 1)));
     const recentSupplemental = balancedCoverageTargets(supplementalTargets.filter((target) => target.primaryDaysSince !== null && target.primaryDaysSince <= 1));
 
     for (const group of [freshSupplemental, recentSupplemental]) {
       for (const target of group) {
         if (totalMinutes >= targetFloor || items.length >= caps.maxItems) break;
-        addTargetToPlan(target, { trackMissing: false });
+        addTargetToPlan(target, { trackMissing: stats.length === 0 });
       }
       if (totalMinutes >= targetFloor || items.length >= caps.maxItems) break;
     }
@@ -1065,10 +1077,10 @@ function buildSessionPlan(limitMinutes = SESSION_LIMIT_MINUTES, options = {}) {
   while (changed) {
     changed = false;
     const eligible = items
-      .filter((item) => item.sets < maxSetsForPlanTarget(item.muscle, caps, !restart && (stats.length > 0 || targetMuscles.length > 0)))
+      .filter((item) => item.sets < maxSetsForPlanTarget(item.muscle, caps, !restart && (optimumCandidates.length > 0 || targetMuscles.length > 0)))
       .sort((a, b) => (
         Number(isCoachTargetMuscle(b.muscle.id, targetMuscles)) - Number(isCoachTargetMuscle(a.muscle.id, targetMuscles))
-      ) || (b.muscle.deficit - a.muscle.deficit) || (a.sets - b.sets) || (plannedExerciseMinutes(a, a.sets + 1) - plannedExerciseMinutes(b, b.sets + 1)));
+      ) || (plannedOptimumGap(b) - plannedOptimumGap(a)) || (b.muscle.deficit - a.muscle.deficit) || (a.sets - b.sets) || (plannedExerciseMinutes(a, a.sets + 1) - plannedExerciseMinutes(b, b.sets + 1)));
     for (const item of eligible) {
       const nextMinutes = plannedExerciseMinutes(item, item.sets + 1);
       const extraMinutes = nextMinutes - item.minutes;
@@ -1109,6 +1121,7 @@ function buildTodayPlan(limitMinutes = selectedCoachTimeframeMinutes()) {
   const protein = proteinTargets();
   const highVolume = ranked.filter((stat) => stat.sets > HYPERTROPHY.growthHigh);
   const belowMinimum = ranked.filter((stat) => stat.sets < HYPERTROPHY.minimumSets);
+  const belowOptimum = ranked.filter((stat) => stat.sets < HYPERTROPHY.growthHigh);
   const progression = progressionTargetForExercise(state.selectedExercise) || progressionTargetForExercise(lastWorkout?.exercise);
   const why = [];
   const selectedReasons = [];
@@ -1150,7 +1163,11 @@ function buildTodayPlan(limitMinutes = selectedCoachTimeframeMinutes()) {
     return {
       mode: restart ? "restart" : "session",
       title: restart ? "Restart session" : "Today's Plan",
-      subtitle: restart ? `Small, useful work capped at ${coachTimeframeLabel(limitMinutes)}.` : `Best gaps to train next, built for about ${coachTimeframeLabel(limitMinutes)}.`,
+      subtitle: restart
+        ? `Small, useful work capped at ${coachTimeframeLabel(limitMinutes)}.`
+        : belowMinimum.length
+          ? `Best minimum gaps to train next, built for about ${coachTimeframeLabel(limitMinutes)}.`
+          : `Best gaps toward 20 hard sets, built for about ${coachTimeframeLabel(limitMinutes)}.`,
       sessionPlan,
       why,
       explanation: { selected: selectedReasons, skipped: skippedReasons, missing: missingReasons, notes },
@@ -1159,11 +1176,13 @@ function buildTodayPlan(limitMinutes = selectedCoachTimeframeMinutes()) {
     };
   }
 
-  if (belowMinimum.length && sessionPlan.missing.length) {
+  if (belowOptimum.length && sessionPlan.missing.length && !sessionPlan.items.length) {
     return {
       mode: "library-gap",
       title: "Add exercise coverage",
-      subtitle: "Coach needs more movement options before it can build a full plan.",
+      subtitle: belowMinimum.length
+        ? "Coach needs more movement options before it can build a full plan."
+        : "Coach needs more movement options before it can build toward 20 hard sets.",
       sessionPlan,
       why,
       explanation: { selected: selectedReasons, skipped: skippedReasons, missing: missingReasons, notes },
@@ -1175,9 +1194,9 @@ function buildTodayPlan(limitMinutes = selectedCoachTimeframeMinutes()) {
   return {
     mode: progression ? "progression" : "recovery",
     title: progression ? "Progression focus" : "Recovery or maintenance",
-    subtitle: progression ? progression.body : "Minimums are covered. Progress slowly or recover if joints feel beat up.",
+    subtitle: progression ? progression.body : "20-set targets are covered. Progress slowly or recover if joints feel beat up.",
     sessionPlan,
-    why: why.length ? why : ["Weekly minimums are covered, so Coach is not forcing extra volume."],
+    why: why.length ? why : ["Weekly 20-set targets are covered, so Coach is not forcing extra volume."],
     explanation: { selected: selectedReasons, skipped: skippedReasons, missing: missingReasons, notes },
     notes,
     progression
@@ -1332,7 +1351,7 @@ function muscleProgressMarkup(stats = muscleSetStats(), compact = false) {
     <div class="muscle-card ${stat.zone.tone}">
       <div class="muscle-card-top">
         <strong>${escapeHtml(stat.label)}</strong>
-        <span>${fmt(stat.sets, 1)}/${HYPERTROPHY.minimumSets}</span>
+        <span>${fmt(stat.sets, 1)}/${HYPERTROPHY.growthHigh}</span>
       </div>
       <div class="progress-bar"><span style="width:${stat.percent}%"></span></div>
       <div class="muscle-card-meta">
