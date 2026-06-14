@@ -7,6 +7,7 @@
   --text: #f5f7ef;
   --muted: #a5afa0;
   --green: #35d58c;
+  --green-dark: #168a5a;
   --coral: #ff6b5f;
   --gold: #f2d06b;
   --violet: #9b8cff;
@@ -707,6 +708,25 @@ textarea {
   display: none;
 }
 
+.coach-target-controls {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.coach-target-reset {
+  min-height: 44px;
+  padding: 0 10px;
+  border: 1px solid rgba(53, 213, 140, 0.28);
+  border-radius: 8px;
+  background: rgba(53, 213, 140, 0.08);
+  color: var(--green);
+  font-size: 12px;
+  font-weight: 800;
+}
+
 .timeframe-chip,
 .target-muscle-chip {
   flex: 0 0 auto;
@@ -817,6 +837,10 @@ textarea {
 
 .muscle-card.good .progress-bar span {
   background: var(--green);
+}
+
+.muscle-card.high-volume .progress-bar span {
+  background: var(--green-dark);
 }
 
 .muscle-card-top,

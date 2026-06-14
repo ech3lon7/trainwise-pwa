@@ -3,7 +3,7 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 2;
 const STORES = ["workouts", "metrics", "settings"];
-const APP_VERSION = "1.5.8";
+const APP_VERSION = "1.5.9";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 let dbOpenPromise = null;
 let chartId = 0;
@@ -749,7 +749,7 @@ function setZone(sets) {
   if (sets < HYPERTROPHY.minimumSets) return { key: "below", label: "Below minimum", tone: "warn" };
   if (sets < HYPERTROPHY.growthLow) return { key: "minimum", label: "Minimum met", tone: "" };
   if (sets <= HYPERTROPHY.growthHigh) return { key: "growth", label: "Growth zone", tone: "good" };
-  return { key: "high", label: "High volume", tone: "warn" };
+  return { key: "high", label: "High volume", tone: "high-volume" };
 }
 
 function workoutsNewestFirst(workouts = state.workouts) {
@@ -2665,7 +2665,13 @@ function renderCoachTargetSelector() {
   const selected = selectedCoachTargetMuscles();
   return `
     <section class="section card coach-target-card">
-      <div class="chart-header"><h3>Target muscles</h3><span class="muted small">${selected.length ? `${selected.length} selected` : "optional focus"}</span></div>
+      <div class="chart-header coach-target-header">
+        <h3>Target muscles</h3>
+        <div class="coach-target-controls">
+          <span class="muted small">${selected.length ? `${selected.length} selected` : "optional focus"}</span>
+          ${selected.length ? `<button class="coach-target-reset" type="button" data-action="clear-coach-targets">Reset choices</button>` : ""}
+        </div>
+      </div>
       <div class="coach-target-options" aria-label="Target muscle focus">
         ${muscleGroups.map((muscle) => {
           const active = selected.includes(muscle.id);
@@ -3424,10 +3430,16 @@ async function handleAction(action, target) {
     async "coach-target-muscle"() {
       const muscleId = target.dataset.muscleId;
       if (!muscleGroups.some((muscle) => muscle.id === muscleId)) return;
+      const scrollLeft = target.closest(".coach-target-options")?.scrollLeft || 0;
       const selected = selectedCoachTargetMuscles();
       state.coachTargetMuscles = selected.includes(muscleId)
         ? selected.filter((id) => id !== muscleId)
         : [...selected, muscleId];
+      await render();
+      restoreCoachTargetScroll(scrollLeft);
+    },
+    async "clear-coach-targets"() {
+      state.coachTargetMuscles = [];
       await render();
     },
     async "copy-coach-plan"() {
@@ -3710,6 +3722,15 @@ function updateInteractiveChart(chart, event) {
   marker.style.left = `${nearest.x}%`;
   marker.style.top = `${nearest.y}%`;
   readout.textContent = chartReadout(nearest, chart.dataset.unit || "");
+}
+
+function restoreCoachTargetScroll(scrollLeft) {
+  const restore = () => {
+    const scroller = document.querySelector(".coach-target-options");
+    if (scroller) scroller.scrollLeft = scrollLeft;
+  };
+  if (typeof requestAnimationFrame === "function") requestAnimationFrame(restore);
+  else restore();
 }
 
 document.addEventListener("click", async (event) => {

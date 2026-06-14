@@ -171,6 +171,36 @@ assert(targetedMuscles.muscles.includes("biceps"), `Expected biceps target in pl
 assert(targetedMuscles.bicepsSets > 0, `Expected biceps target to receive work, got ${targetedMuscles.bicepsSets}`);
 assert(targetedMuscles.why.includes("Target focus"), `Expected target focus explanation, got ${targetedMuscles.why}`);
 
+const targetSelectorReset = runScenario(`
+  ${resetAndHelpers}
+  state.coachTargetMuscles = ["biceps", "triceps"];
+  var markup = renderCoachTargetSelector();
+  ({
+    hasReset: markup.includes('data-action="clear-coach-targets"'),
+    hasCount: markup.includes("2 selected")
+  });
+`);
+
+assert(targetSelectorReset.hasReset, "Expected target selector to expose a reset choices control when muscles are selected.");
+assert(targetSelectorReset.hasCount, "Expected target selector to keep selected count visible.");
+
+const targetScrollRestore = runScenario(`
+  var originalQuerySelector = document.querySelector;
+  var scroller = { scrollLeft: 0 };
+  var usedAnimationFrame = false;
+  document.querySelector = (selector) => selector === ".coach-target-options" ? scroller : null;
+  requestAnimationFrame = (fn) => {
+    usedAnimationFrame = true;
+    fn();
+  };
+  restoreCoachTargetScroll(137);
+  document.querySelector = originalQuerySelector;
+  ({ scrollLeft: scroller.scrollLeft, usedAnimationFrame });
+`);
+
+assert.strictEqual(targetScrollRestore.scrollLeft, 137, `Expected target selector scroll to restore to 137, got ${targetScrollRestore.scrollLeft}`);
+assert(targetScrollRestore.usedAnimationFrame, "Expected target selector scroll restore to run after render timing.");
+
 const targetMissingCoverage = runScenario(`
   ${resetAndHelpers}
   state.coachTargetMuscles = ["biceps"];
@@ -383,10 +413,11 @@ const exerciseScoring = runScenario(`
 
 assert.strictEqual(exerciseScoring.chosen, "Hammer Curl", `Expected rotation toward Hammer Curl, got ${exerciseScoring.chosen} with scores curl=${exerciseScoring.curlScore} hammer=${exerciseScoring.hammerScore}`);
 
-const highVolumeWording = runScenario(`
-  setZone(21).label;
+const highVolumeZone = runScenario(`
+  setZone(21);
 `);
 
-assert.strictEqual(highVolumeWording, "High volume", `Expected high volume wording, got ${highVolumeWording}`);
+assert.strictEqual(highVolumeZone.label, "High volume", `Expected high volume wording, got ${highVolumeZone.label}`);
+assert.strictEqual(highVolumeZone.tone, "high-volume", `Expected high volume to use dark-green tone, got ${highVolumeZone.tone}`);
 
 console.log("coach regression tests passed");
