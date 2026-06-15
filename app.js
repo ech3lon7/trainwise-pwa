@@ -3,7 +3,7 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 2;
 const STORES = ["workouts", "metrics", "settings"];
-const APP_VERSION = "1.5.12";
+const APP_VERSION = "1.5.13";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 let dbOpenPromise = null;
 let chartId = 0;
@@ -17,6 +17,11 @@ const COACH_TIMEFRAME_OPTIONS = [
   { label: "50 min", minutes: 50 },
   { label: "1 hour", minutes: 60 },
   { label: "1 hour+", minutes: 75 }
+];
+const NUTRITION_GOAL_OPTIONS = [
+  { id: "bulk", label: "Bulk", hint: "Lean gain" },
+  { id: "maintain", label: "Maintain", hint: "Hold steady" },
+  { id: "cut", label: "Cut", hint: "Slow loss" }
 ];
 
 const HYPERTROPHY = {
@@ -716,6 +721,106 @@ function proteinTargets() {
     floor: kg * HYPERTROPHY.proteinFloorGPerKg,
     upper: kg * HYPERTROPHY.proteinUpperGPerKg
   };
+}
+
+function selectedNutritionGoal() {
+  const goal = state.settings.nutritionGoal;
+  return NUTRITION_GOAL_OPTIONS.some((option) => option.id === goal) ? goal : "bulk";
+}
+
+function nutritionGoalLabel(goal = selectedNutritionGoal()) {
+  return NUTRITION_GOAL_OPTIONS.find((option) => option.id === goal)?.label || "Bulk";
+}
+
+function metricEntriesForField(field, days) {
+  const start = recentDays(days);
+  return state.metrics
+    .filter((entry) => parseLocalDate(entry.date) >= start && Number.isFinite(entry[field]) && entry[field] > 0)
+    .sort((a, b) => a.date.localeCompare(b.date));
+}
+
+function healthCoachSummary() {
+  const goal = selectedNutritionGoal();
+  const protein = proteinTargets();
+  const calorieAverage = getAverage("calories", 7);
+  const proteinAverage = getAverage("protein", 7);
+  const latestWeight = lastMetric("bodyWeight")?.bodyWeight || 0;
+  const weightEntries = metricEntriesForField("bodyWeight", 14);
+  const weightTrendLb = weightEntries.length >= 2
+    ? weightEntries[weightEntries.length - 1].bodyWeight - weightEntries[0].bodyWeight
+    : null;
+  const daySpan = weightEntries.length >= 2
+    ? Math.max(1, daysBetween(weightEntries[0].date, weightEntries[weightEntries.length - 1].date))
+    : 0;
+  const weeklyWeightRate = weightTrendLb === null ? null : (weightTrendLb / daySpan) * 7;
+  const summary = {
+    goal,
+    goalLabel: nutritionGoalLabel(goal),
+    calorieAverage,
+    proteinAverage,
+    latestWeight,
+    weightTrendLb,
+    weeklyWeightRate,
+    proteinFloor: protein.floor,
+    proteinUpper: protein.upper,
+    tone: "warn",
+    recommendation: ""
+  };
+
+  if (!calorieAverage) {
+    summary.recommendation = "Log calories for a few days before Coach adjusts intake.";
+    return summary;
+  }
+  if (weightEntries.length < 2) {
+    summary.recommendation = "Log body weight consistently before judging the calorie trend.";
+    return summary;
+  }
+  if (protein.bodyWeightLb && proteinAverage && proteinAverage < protein.floor) {
+    summary.tone = "hot";
+    summary.recommendation = `Protein is below target: ${fmt(proteinAverage)}g avg vs ${fmt(protein.floor)}g floor. Bring protein up before judging calories.`;
+    return summary;
+  }
+  if (!protein.bodyWeightLb || !proteinAverage) {
+    summary.recommendation = "Log body weight and protein so Coach can verify the hypertrophy protein floor.";
+    return summary;
+  }
+
+  if (goal === "bulk") {
+    if (weeklyWeightRate <= 0) {
+      summary.recommendation = "Bulk trend is flat or down. Add about +150-250 cal/day and watch the next 2 weeks.";
+    } else {
+      summary.tone = "good";
+      summary.recommendation = "Bulk trend is moving up. Keep calories steady unless weight jumps faster than intended.";
+    }
+  } else if (goal === "cut") {
+    if (weeklyWeightRate >= 0) {
+      summary.recommendation = "Cut trend is flat or up. Reduce about -150-250 cal/day and watch the next 2 weeks.";
+    } else {
+      summary.tone = "good";
+      summary.recommendation = "Cut trend is moving down. Keep protein high and avoid rushing the deficit.";
+    }
+  } else if (Math.abs(weeklyWeightRate) <= 0.25) {
+    summary.tone = "good";
+    summary.recommendation = "Stay the course. Maintenance trend is stable and protein is covered.";
+  } else if (weeklyWeightRate > 0.25) {
+    summary.recommendation = "Maintenance trend is drifting up. Trim about -150-250 cal/day if you want weight steadier.";
+  } else {
+    summary.recommendation = "Maintenance trend is drifting down. Add about +150-250 cal/day if you want weight steadier.";
+  }
+  return summary;
+}
+
+function healthCoachStatMarkup(summary) {
+  const trend = summary.weightTrendLb === null ? "--" : `${summary.weightTrendLb >= 0 ? "+" : ""}${fmt(summary.weightTrendLb, 1)} lb`;
+  const weekly = summary.weeklyWeightRate === null ? "--" : `${summary.weeklyWeightRate >= 0 ? "+" : ""}${fmt(summary.weeklyWeightRate, 2)} lb/wk`;
+  return `
+    <div class="grid four health-summary-grid">
+      <div class="stat"><span class="label">Goal</span><span class="value">${escapeHtml(summary.goalLabel)}</span><span class="hint">nutrition phase</span></div>
+      <div class="stat"><span class="label">Calories</span><span class="value">${summary.calorieAverage ? fmt(summary.calorieAverage) : "--"}</span><span class="hint">7-day avg</span></div>
+      <div class="stat"><span class="label">Protein</span><span class="value">${summary.proteinAverage ? `${fmt(summary.proteinAverage)}g` : "--"}</span><span class="hint">${summary.proteinFloor ? `${fmt(summary.proteinFloor)}g floor` : "needs weight"}</span></div>
+      <div class="stat"><span class="label">Weight</span><span class="value">${trend}</span><span class="hint">${weekly}</span></div>
+    </div>
+  `;
 }
 
 function muscleSetStats() {
@@ -1443,7 +1548,7 @@ function recommendations(todayPlan = null) {
   const action = actionFromSessionPlan(todayPlan);
   const proteinAvg = getAverage("protein", 7);
   const protein = proteinTargets();
-  const trend = weightTrend(14);
+  const health = healthCoachSummary();
   const highRir = stats[0]?.highRir || [];
   const highVolume = stats.filter((stat) => stat.sets > HYPERTROPHY.growthHigh);
   const lowFrequency = stats.filter((stat) => stat.sets >= 5 && stat.sessions < 2).slice(0, 3);
@@ -1518,13 +1623,11 @@ function recommendations(todayPlan = null) {
     });
   }
 
-  if (trend !== null && trend <= 0 && getAverage("calories", 7)) {
-    recs.push({
-      tone: "warn",
-      title: "Weight trend is flat or down",
-      body: "For muscle gain, consider adding a small calorie bump and watching the next 2 weeks of body-weight trend."
-    });
-  }
+  recs.push({
+    tone: health.tone,
+    title: `${health.goalLabel} nutrition check`,
+    body: health.recommendation
+  });
 
   if (highVolume.length) {
     recs.push({
@@ -1542,6 +1645,7 @@ function renderDashboard() {
   const bodyWeight = lastMetric("bodyWeight")?.bodyWeight || 0;
   const proteinAvg = getAverage("protein", 7);
   const protein = proteinTargets();
+  const health = healthCoachSummary();
   const stats = muscleSetStats();
   const covered = stats.filter((stat) => stat.sets >= HYPERTROPHY.minimumSets).length;
   const underTarget = topUnderTargetMuscles(4);
@@ -1580,6 +1684,13 @@ function renderDashboard() {
           `).join("") : `<div class="empty">All tracked muscles have reached the weekly floor.</div>`}
         </div>
       </div>
+    </section>
+
+    <section class="section card coach-action">
+      <span class="badge">Health coach</span>
+      <h3>${escapeHtml(health.goalLabel)} nutrition check</h3>
+      <p>${escapeHtml(health.recommendation)}</p>
+      ${healthCoachStatMarkup(health)}
     </section>
 
     <section class="section chart-panel">
@@ -2607,6 +2718,7 @@ function renderTrends() {
   const e1rmSeries = seriesFromWorkouts(selectedExercise, e1rm);
   const muscleSetSeries = seriesFromMuscle(state.selectedMuscle, "sets");
   const muscleVolumeSeries = seriesFromMuscle(state.selectedMuscle, "volume");
+  const health = healthCoachSummary();
 
   return `
     <section class="trend-section">
@@ -2659,9 +2771,10 @@ function renderTrends() {
       <div class="trend-section-header">
         <div>
           <h2>Health trends</h2>
-          <p class="muted small">Body weight, protein, and calories stay separate from training volume.</p>
+          <p class="muted small">${escapeHtml(health.recommendation)}</p>
         </div>
       </div>
+      ${healthCoachStatMarkup(health)}
       <div class="grid two">
         <div class="chart-panel">
           <div class="chart-header"><h3>Body weight</h3><span class="muted small">daily weight</span></div>
@@ -2859,6 +2972,20 @@ function hypertrophySettings() {
   };
 }
 
+function renderNutritionGoalSelector() {
+  const selected = selectedNutritionGoal();
+  return `
+    <div class="coach-timeframe-options nutrition-goal-options" aria-label="Nutrition goal">
+      ${NUTRITION_GOAL_OPTIONS.map((option) => `
+        <button class="timeframe-chip ${option.id === selected ? "is-active" : ""}" type="button" data-action="nutrition-goal" data-nutrition-goal="${option.id}" aria-pressed="${option.id === selected}">
+          <span>${escapeHtml(option.label)}</span>
+          <small>${escapeHtml(option.hint)}</small>
+        </button>
+      `).join("")}
+    </div>
+  `;
+}
+
 async function renderSettings() {
   const estimate = await storageEstimateMarkup();
   const sampleWorkouts = state.workouts.filter(isSampleEntry).length;
@@ -2873,6 +3000,12 @@ async function renderSettings() {
         <span>Protein floor <strong>${HYPERTROPHY.proteinFloorGPerKg} g/kg/day</strong></span>
       </div>
       <p class="muted small">This is training guidance for personal tracking, not medical advice.</p>
+    </section>
+
+    <section class="section settings-panel">
+      <h2>Nutrition goal</h2>
+      <p class="muted small">Coach uses this to interpret calories and body-weight trend.</p>
+      ${renderNutritionGoalSelector()}
     </section>
 
     <section class="section settings-panel">
@@ -3214,6 +3347,7 @@ async function removeSampleData() {
 function exportSafeSettings() {
   return {
     hypertrophyProfile: hypertrophySettings(),
+    nutritionGoal: selectedNutritionGoal(),
     dayTemplates: getDayTemplates(),
     customExercises: getCustomExercises(),
     lastBackupAt: new Date().toISOString()
@@ -3251,6 +3385,9 @@ async function importPayload(payload) {
   for (const entry of payload.metrics) await dbPut("metrics", entry);
   if (payload.settings?.hypertrophyProfile) {
     await saveSetting("hypertrophyProfile", payload.settings.hypertrophyProfile);
+  }
+  if (NUTRITION_GOAL_OPTIONS.some((option) => option.id === payload.settings?.nutritionGoal)) {
+    await saveSetting("nutritionGoal", payload.settings.nutritionGoal);
   }
   if (Array.isArray(payload.settings?.dayTemplates)) {
     await saveSetting("dayTemplates", payload.settings.dayTemplates);
@@ -3687,6 +3824,13 @@ async function handleAction(action, target) {
     async "signin-supabase"() { await supabaseAuth("signin"); },
     async "push-supabase"() { await pushSupabaseBackup(); },
     async "pull-supabase"() { await pullSupabaseBackup(); },
+    async "nutrition-goal"() {
+      const goal = target.dataset.nutritionGoal;
+      if (!NUTRITION_GOAL_OPTIONS.some((option) => option.id === goal)) return;
+      await saveSetting("nutritionGoal", goal);
+      await render();
+      toast(`Nutrition goal set to ${nutritionGoalLabel(goal)}.`);
+    },
     async "load-sample-data"() { await loadSampleData(); },
     async "remove-sample-data"() { await removeSampleData(); },
     async "clear-all"() { await clearAll(); }

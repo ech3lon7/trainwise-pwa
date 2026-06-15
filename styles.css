@@ -752,6 +752,20 @@ textarea {
   min-width: 84px;
 }
 
+.nutrition-goal-options .timeframe-chip {
+  display: grid;
+  place-items: center;
+  gap: 2px;
+  min-width: 112px;
+  min-height: 48px;
+}
+
+.nutrition-goal-options small {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 700;
+}
+
 .coach-copy-button {
   width: 100%;
   margin-top: 12px;

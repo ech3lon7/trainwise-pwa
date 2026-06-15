@@ -223,6 +223,107 @@ const priorWeekStillRotatesExercises = runScenario(`
 assert.strictEqual(priorWeekStillRotatesExercises.weeklySets, 0, `Expected prior Sunday sets to reset on Monday, got ${priorWeekStillRotatesExercises.weeklySets}`);
 assert.strictEqual(priorWeekStillRotatesExercises.chosen, "Hammer Curl", `Expected prior-week exercise history to still influence rotation, got ${priorWeekStillRotatesExercises.chosen}`);
 
+const nutritionGoalDefault = runScenario(`
+  ${resetAndHelpers}
+  ({
+    goal: selectedNutritionGoal(),
+    label: nutritionGoalLabel(),
+    settingsMarkup: renderNutritionGoalSelector().includes('data-nutrition-goal="bulk"')
+  });
+`);
+
+assert.strictEqual(nutritionGoalDefault.goal, "bulk", `Expected nutrition goal to default to bulk, got ${nutritionGoalDefault.goal}`);
+assert.strictEqual(nutritionGoalDefault.label, "Bulk", `Expected nutrition goal label to default to Bulk, got ${nutritionGoalDefault.label}`);
+assert(nutritionGoalDefault.settingsMarkup, "Expected nutrition goal selector to render the Bulk option.");
+
+const bulkHealthCoach = runScenario(`
+  ${resetAndHelpers}
+  state.settings.nutritionGoal = "bulk";
+  state.metrics = [
+    { id: "m1", date: dateDaysAgo(13), bodyWeight: 180, calories: 2400, protein: 180 },
+    { id: "m2", date: dateDaysAgo(6), bodyWeight: 179.8, calories: 2400, protein: 180 },
+    { id: "m3", date: dateDaysAgo(0), bodyWeight: 179.7, calories: 2400, protein: 180 }
+  ];
+  var coach = healthCoachSummary();
+  ({
+    goal: coach.goal,
+    tone: coach.tone,
+    recommendation: coach.recommendation,
+    calorieAverage: coach.calorieAverage,
+    weeklyWeightRate: coach.weeklyWeightRate
+  });
+`);
+
+assert.strictEqual(bulkHealthCoach.goal, "bulk", `Expected bulk goal, got ${bulkHealthCoach.goal}`);
+assert.strictEqual(bulkHealthCoach.tone, "warn", `Expected bulk flat/down trend to warn, got ${bulkHealthCoach.tone}`);
+assert(bulkHealthCoach.recommendation.includes("+150-250 cal/day"), `Expected bulk recommendation to suggest a small calorie bump, got ${bulkHealthCoach.recommendation}`);
+assert.strictEqual(bulkHealthCoach.calorieAverage, 2400, `Expected 7-day calories to average 2400, got ${bulkHealthCoach.calorieAverage}`);
+assert(bulkHealthCoach.weeklyWeightRate < 0, `Expected weekly weight rate to be negative, got ${bulkHealthCoach.weeklyWeightRate}`);
+
+const cutHealthCoach = runScenario(`
+  ${resetAndHelpers}
+  state.settings.nutritionGoal = "cut";
+  state.metrics = [
+    { id: "m1", date: dateDaysAgo(13), bodyWeight: 180, calories: 2200, protein: 180 },
+    { id: "m2", date: dateDaysAgo(6), bodyWeight: 180.1, calories: 2200, protein: 180 },
+    { id: "m3", date: dateDaysAgo(0), bodyWeight: 180.2, calories: 2200, protein: 180 }
+  ];
+  var coach = healthCoachSummary();
+  ({ tone: coach.tone, recommendation: coach.recommendation });
+`);
+
+assert.strictEqual(cutHealthCoach.tone, "warn", `Expected cut flat/up trend to warn, got ${cutHealthCoach.tone}`);
+assert(cutHealthCoach.recommendation.includes("-150-250 cal/day"), `Expected cut recommendation to suggest a small calorie decrease, got ${cutHealthCoach.recommendation}`);
+
+const maintainHealthCoach = runScenario(`
+  ${resetAndHelpers}
+  state.settings.nutritionGoal = "maintain";
+  state.metrics = [
+    { id: "m1", date: dateDaysAgo(13), bodyWeight: 180, calories: 2300, protein: 180 },
+    { id: "m2", date: dateDaysAgo(6), bodyWeight: 180.1, calories: 2300, protein: 180 },
+    { id: "m3", date: dateDaysAgo(0), bodyWeight: 180.1, calories: 2300, protein: 180 }
+  ];
+  var coach = healthCoachSummary();
+  ({ tone: coach.tone, recommendation: coach.recommendation });
+`);
+
+assert.strictEqual(maintainHealthCoach.tone, "good", `Expected stable maintain trend to be good, got ${maintainHealthCoach.tone}`);
+assert(maintainHealthCoach.recommendation.includes("Stay the course"), `Expected maintain stable trend to stay the course, got ${maintainHealthCoach.recommendation}`);
+
+const missingHealthData = runScenario(`
+  ${resetAndHelpers}
+  state.metrics = [
+    { id: "m1", date: dateDaysAgo(0), bodyWeight: 180, calories: 0, protein: 0 }
+  ];
+  var coach = healthCoachSummary();
+  ({ tone: coach.tone, recommendation: coach.recommendation });
+`);
+
+assert.strictEqual(missingHealthData.tone, "warn", `Expected missing health data to warn, got ${missingHealthData.tone}`);
+assert(missingHealthData.recommendation.includes("Log calories"), `Expected missing calories guidance, got ${missingHealthData.recommendation}`);
+
+const lowProteinPriority = runScenario(`
+  ${resetAndHelpers}
+  state.metrics = [
+    { id: "m1", date: dateDaysAgo(13), bodyWeight: 180, calories: 2600, protein: 90 },
+    { id: "m2", date: dateDaysAgo(6), bodyWeight: 180.2, calories: 2600, protein: 90 },
+    { id: "m3", date: dateDaysAgo(0), bodyWeight: 180.4, calories: 2600, protein: 90 }
+  ];
+  var coach = healthCoachSummary();
+  ({ tone: coach.tone, recommendation: coach.recommendation });
+`);
+
+assert.strictEqual(lowProteinPriority.tone, "hot", `Expected low protein to be top health warning, got ${lowProteinPriority.tone}`);
+assert(lowProteinPriority.recommendation.includes("Protein is below"), `Expected low protein recommendation, got ${lowProteinPriority.recommendation}`);
+
+const nutritionGoalExport = runScenario(`
+  ${resetAndHelpers}
+  state.settings.nutritionGoal = "cut";
+  exportSafeSettings().nutritionGoal;
+`);
+
+assert.strictEqual(nutritionGoalExport, "cut", `Expected backup-safe settings to include nutrition goal, got ${nutritionGoalExport}`);
+
 const secondaryReadiness = runScenario(`
   ${resetAndHelpers}
   var bench = resolveExerciseMeta("Dumbbell Bench Press");
