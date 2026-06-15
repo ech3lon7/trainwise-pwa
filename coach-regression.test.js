@@ -5,10 +5,29 @@ const vm = require("vm");
 let appCode = fs.readFileSync("app.js", "utf8");
 appCode = appCode.replace(/init\(\)\.catch\([\s\S]*?\n\}\);\s*$/, "");
 
+const NativeDate = Date;
+class FixedDate extends NativeDate {
+  constructor(...args) {
+    return args.length ? new NativeDate(...args) : new NativeDate("2026-06-17T12:00:00");
+  }
+
+  static now() {
+    return new NativeDate("2026-06-17T12:00:00").getTime();
+  }
+
+  static parse(value) {
+    return NativeDate.parse(value);
+  }
+
+  static UTC(...args) {
+    return NativeDate.UTC(...args);
+  }
+}
+
 const context = {
   console,
   crypto: { randomUUID: () => `id-${Math.random().toString(16).slice(2)}` },
-  Date,
+  Date: FixedDate,
   Intl,
   Math,
   Number,
@@ -118,6 +137,91 @@ assert(withinCoachTimeWindow(coverage.total, 60), `Expected 1 hour plan to land 
 assert(coverage.regions.includes("push") && coverage.regions.includes("pull") && coverage.regions.includes("legs") && coverage.regions.includes("core"), `Expected balanced regions, got ${coverage.regions.join(", ")}`);
 assert(coverage.noteTitle.includes("Today's Plan"), `Expected Coach note to summarize Today's Plan, got ${coverage.noteTitle}`);
 assert(coverage.noteBody.includes(`${coverage.total}/60`), `Expected Coach note to use active plan estimate, got ${coverage.noteBody}`);
+
+const mondayWeekBoundary = runScenario(`
+  ${resetAndHelpers}
+  var RealDate = Date;
+  Date = class extends RealDate {
+    constructor(...args) {
+      return args.length ? new RealDate(...args) : new RealDate("2026-06-15T12:00:00");
+    }
+    static now() { return new RealDate("2026-06-15T12:00:00").getTime(); }
+    static parse(value) { return RealDate.parse(value); }
+    static UTC(...args) { return RealDate.UTC(...args); }
+  };
+  var chest = muscleGroups.find((muscle) => muscle.id === "chest");
+  var sunday = { ...makeWorkout(chest, 0, 4), id: "sunday", date: "2026-06-14", createdAt: "2026-06-14T12:00:00.000Z" };
+  var monday = { ...makeWorkout(chest, 0, 3), id: "monday", date: "2026-06-15", createdAt: "2026-06-15T12:00:00.000Z" };
+  state.workouts = [sunday, monday];
+  var stats = muscleSetStats().find((stat) => stat.id === "chest");
+  var weeklyVolume = getWeeklyVolume();
+  var weekStart = isoFromLocalDate(currentTrainingWeekStart());
+  Date = RealDate;
+  ({ sets: stats.sets, sessions: stats.sessions, weeklyVolume, weekStart });
+`);
+
+assert.strictEqual(mondayWeekBoundary.weekStart, "2026-06-15", `Expected Monday week to start on 2026-06-15, got ${mondayWeekBoundary.weekStart}`);
+assert.strictEqual(mondayWeekBoundary.sets, 3, `Expected Monday boundary to exclude prior Sunday sets and include Monday sets, got ${mondayWeekBoundary.sets}`);
+assert.strictEqual(mondayWeekBoundary.sessions, 1, `Expected Monday boundary to count only Monday touch, got ${mondayWeekBoundary.sessions}`);
+assert.strictEqual(mondayWeekBoundary.weeklyVolume, 600, `Expected weekly volume to exclude Sunday and include Monday only, got ${mondayWeekBoundary.weeklyVolume}`);
+
+const wednesdayWeekBoundary = runScenario(`
+  ${resetAndHelpers}
+  var RealDate = Date;
+  Date = class extends RealDate {
+    constructor(...args) {
+      return args.length ? new RealDate(...args) : new RealDate("2026-06-17T12:00:00");
+    }
+    static now() { return new RealDate("2026-06-17T12:00:00").getTime(); }
+    static parse(value) { return RealDate.parse(value); }
+    static UTC(...args) { return RealDate.UTC(...args); }
+  };
+  var chest = muscleGroups.find((muscle) => muscle.id === "chest");
+  var sunday = { ...makeWorkout(chest, 0, 4), id: "sunday", date: "2026-06-14", createdAt: "2026-06-14T12:00:00.000Z" };
+  var monday = { ...makeWorkout(chest, 0, 3), id: "monday", date: "2026-06-15", createdAt: "2026-06-15T12:00:00.000Z" };
+  var wednesday = { ...makeWorkout(chest, 0, 2), id: "wednesday", date: "2026-06-17", createdAt: "2026-06-17T12:00:00.000Z" };
+  state.workouts = [sunday, monday, wednesday];
+  var stats = muscleSetStats().find((stat) => stat.id === "chest");
+  var weekStart = isoFromLocalDate(currentTrainingWeekStart());
+  Date = RealDate;
+  ({ sets: stats.sets, sessions: stats.sessions, weekStart });
+`);
+
+assert.strictEqual(wednesdayWeekBoundary.weekStart, "2026-06-15", `Expected Wednesday week to start on Monday 2026-06-15, got ${wednesdayWeekBoundary.weekStart}`);
+assert.strictEqual(wednesdayWeekBoundary.sets, 5, `Expected Wednesday boundary to count Monday-Wednesday and exclude Sunday, got ${wednesdayWeekBoundary.sets}`);
+assert.strictEqual(wednesdayWeekBoundary.sessions, 2, `Expected Wednesday boundary to count Monday and Wednesday touches, got ${wednesdayWeekBoundary.sessions}`);
+
+const priorWeekStillRotatesExercises = runScenario(`
+  ${resetAndHelpers}
+  var RealDate = Date;
+  Date = class extends RealDate {
+    constructor(...args) {
+      return args.length ? new RealDate(...args) : new RealDate("2026-06-15T12:00:00");
+    }
+    static now() { return new RealDate("2026-06-15T12:00:00").getTime(); }
+    static parse(value) { return RealDate.parse(value); }
+    static UTC(...args) { return RealDate.UTC(...args); }
+  };
+  state.settings.customExercises = [
+    { id: "curl", name: "Bicep Curl", primaryMuscles: ["biceps"], secondaryMuscles: [], equipment: "dumbbells", reps: "8-15", rest: "60-120 sec", cue: "Curl.", userCreated: true },
+    { id: "hammer", name: "Hammer Curl", primaryMuscles: ["biceps"], secondaryMuscles: [], equipment: "dumbbells", reps: "8-15", rest: "60-120 sec", cue: "Hammer.", userCreated: true }
+  ];
+  var biceps = muscleGroups.find((muscle) => muscle.id === "biceps");
+  var sundayCurl = {
+    ...makeWorkout(biceps, 0, 4, { exercise: "Bicep Curl", exerciseId: "curl", primaryMuscles: ["biceps"], restSeconds: 90 }),
+    id: "sunday-curl",
+    date: "2026-06-14",
+    createdAt: "2026-06-14T12:00:00.000Z"
+  };
+  state.workouts = [sundayCurl];
+  var weeklySets = muscleSetStats().find((stat) => stat.id === "biceps").sets;
+  var chosen = chooseExerciseForMuscle("biceps");
+  Date = RealDate;
+  ({ weeklySets, chosen: chosen?.name });
+`);
+
+assert.strictEqual(priorWeekStillRotatesExercises.weeklySets, 0, `Expected prior Sunday sets to reset on Monday, got ${priorWeekStillRotatesExercises.weeklySets}`);
+assert.strictEqual(priorWeekStillRotatesExercises.chosen, "Hammer Curl", `Expected prior-week exercise history to still influence rotation, got ${priorWeekStillRotatesExercises.chosen}`);
 
 const secondaryReadiness = runScenario(`
   ${resetAndHelpers}
@@ -232,6 +336,103 @@ assert(withinCoachTimeWindow(timeframe.total50, 50), `Expected 50 min plan to la
 assert(withinCoachTimeWindow(timeframe.total60, 60), `Expected 60 min plan to land near 60 min, got ${timeframe.total60}`);
 assert(timeframe.items60 >= timeframe.items50, `Expected 60 min to keep or add coverage, got ${timeframe.items50} and ${timeframe.items60}`);
 assert(timeframe.sets60 > timeframe.sets50, `Expected 60 min to add useful sets, got ${timeframe.sets50} and ${timeframe.sets60}`);
+
+const allFloorCoveredTimeframes = runScenario(`
+  ${resetAndHelpers}
+  state.workouts = muscleGroups.map((muscle) => makeWorkout(muscle, 2, 10));
+  [30, 40, 50, 60, 75].map((minutes) => {
+    var plan = buildTodayPlan(minutes).sessionPlan;
+    return {
+      minutes,
+      total: plan.totalMinutes,
+      itemCount: plan.items.length,
+      setCount: plan.items.reduce((sum, item) => sum + item.sets, 0)
+    };
+  });
+`);
+
+for (const result of allFloorCoveredTimeframes) {
+  assert(withinCoachTimeWindow(result.total, result.minutes), `Expected floor-covered ${result.minutes} min plan to land near target, got ${result.total}`);
+  assert(result.itemCount > 0, `Expected floor-covered ${result.minutes} min plan to include useful work.`);
+}
+
+const nearOptimumTimeframe = runScenario(`
+  ${resetAndHelpers}
+  state.workouts = muscleGroups.map((muscle) => makeWorkout(muscle, 2, 18));
+  var plan = buildTodayPlan(60).sessionPlan;
+  ({
+    total: plan.totalMinutes,
+    itemCount: plan.items.length,
+    setCount: plan.items.reduce((sum, item) => sum + item.sets, 0),
+    detail: plan.items.map((item) => item.muscle.label + ":" + item.sets).join(", ")
+  });
+`);
+
+assert(withinCoachTimeWindow(nearOptimumTimeframe.total, 60), `Expected 18/20 muscles to still fill 1 hour with more muscle slots, got ${nearOptimumTimeframe.total}: ${nearOptimumTimeframe.detail}`);
+assert(nearOptimumTimeframe.itemCount > 6, `Expected 18/20 1 hour plan to relax the old 6-exercise cap, got ${nearOptimumTimeframe.itemCount}`);
+
+const highVolumeTimeframe = runScenario(`
+  ${resetAndHelpers}
+  state.workouts = muscleGroups.map((muscle) => makeWorkout(muscle, 2, 20));
+  var plan = buildTodayPlan(60);
+  ({
+    mode: plan.mode,
+    total: plan.sessionPlan.totalMinutes,
+    hasHighVolumeReason: plan.why.join(" ").includes("High-volume filler"),
+    maxProjectedSets: Math.max(...plan.sessionPlan.items.map((item) => item.muscle.sets + item.sets))
+  });
+`);
+
+assert.strictEqual(highVolumeTimeframe.mode, "session", `Expected all-optimum muscles to build a time-fill session, got ${highVolumeTimeframe.mode}`);
+assert(withinCoachTimeWindow(highVolumeTimeframe.total, 60), `Expected all-optimum 1 hour plan to land near target with labeled high-volume filler, got ${highVolumeTimeframe.total}`);
+assert(highVolumeTimeframe.hasHighVolumeReason, "Expected all-optimum time-fill plan to label high-volume filler in Why this?");
+assert(highVolumeTimeframe.maxProjectedSets <= 22, `Expected high-volume filler to cap projected sets at 22, got ${highVolumeTimeframe.maxProjectedSets}`);
+
+const restartTimeframe = runScenario(`
+  ${resetAndHelpers}
+  state.workouts = [];
+  var plan = buildTodayPlan(60);
+  ({
+    mode: plan.mode,
+    total: plan.sessionPlan.totalMinutes,
+    itemCount: plan.sessionPlan.items.length,
+    maxSets: Math.max(...plan.sessionPlan.items.map((item) => item.sets))
+  });
+`);
+
+assert.strictEqual(restartTimeframe.mode, "restart", `Expected no-workout case to remain restart mode, got ${restartTimeframe.mode}`);
+assert(withinCoachTimeWindow(restartTimeframe.total, 60), `Expected restart 1 hour plan to fill time with more muscles, got ${restartTimeframe.total}`);
+assert(restartTimeframe.itemCount > 5, `Expected restart 1 hour plan to relax the old 5-exercise cap, got ${restartTimeframe.itemCount}`);
+assert(restartTimeframe.maxSets <= 3, `Expected restart plan to keep per-muscle volume controlled, got max ${restartTimeframe.maxSets}`);
+
+const insufficientLibraryShortfall = runScenario(`
+  ${resetAndHelpers}
+  state.settings.customExercises = [{
+    id: "custom-chest-only",
+    name: "Chest Only Exercise",
+    primaryMuscles: ["chest"],
+    secondaryMuscles: [],
+    equipment: "dumbbells",
+    reps: "8-12",
+    rest: "90-180 sec",
+    cue: "Single coverage test.",
+    userCreated: true
+  }];
+  state.workouts = muscleGroups.map((muscle) => makeWorkout(muscle, 2, 20));
+  var plan = buildTodayPlan(60);
+  ({
+    total: plan.sessionPlan.totalMinutes,
+    itemCount: plan.sessionPlan.items.length,
+    exerciseNames: plan.sessionPlan.items.map((item) => item.exercise.name),
+    shortfallReason: plan.sessionPlan.shortfallReason || "",
+    why: plan.why.join(" ")
+  });
+`);
+
+assert(insufficientLibraryShortfall.total < 57, `Expected limited library plan to stay short rather than invent exercises, got ${insufficientLibraryShortfall.total}`);
+assert(insufficientLibraryShortfall.exerciseNames.every((name) => name === "Chest Only Exercise"), `Expected limited library plan to use only the real library exercise, got ${insufficientLibraryShortfall.exerciseNames.join(", ")}`);
+assert(insufficientLibraryShortfall.shortfallReason.includes("library-safe"), `Expected limited library shortfall reason, got ${insufficientLibraryShortfall.shortfallReason}`);
+assert(insufficientLibraryShortfall.why.includes("library-safe"), `Expected Why this? to explain shortfall, got ${insufficientLibraryShortfall.why}`);
 
 const shortRestTimeframe = runScenario(`
   ${resetAndHelpers}
@@ -348,11 +549,12 @@ const allUnderdeveloped = runScenario(`
   ({
     total: plan.sessionPlan.totalMinutes,
     itemCount: plan.sessionPlan.items.length,
-    fits: plan.sessionPlan.totalMinutes <= 60
+    fits: plan.sessionPlan.totalMinutes <= 63
   });
 `);
 
-assert(allUnderdeveloped.fits, `Expected all-underdeveloped plan to fit within limit, got ${allUnderdeveloped.total}`);
+assert(allUnderdeveloped.fits, `Expected all-underdeveloped plan to fit within time window, got ${allUnderdeveloped.total}`);
+assert(withinCoachTimeWindow(allUnderdeveloped.total, 60), `Expected all-underdeveloped 1 hour plan to land near 60 min, got ${allUnderdeveloped.total}`);
 assert(allUnderdeveloped.itemCount >= 4, `Expected all-underdeveloped to cover at least 4 muscles, got ${allUnderdeveloped.itemCount}`);
 
 const optimumPlanAction = runScenario(`
@@ -381,7 +583,7 @@ assert(optimumPlanAction.hasBody, `Expected action to have body text, got mode=$
 
 const emptyPlanAction = runScenario(`
   ${resetAndHelpers}
-  state.workouts = muscleGroups.map((muscle) => makeWorkout(muscle, 2, 20));
+  state.workouts = muscleGroups.map((muscle) => makeWorkout(muscle, 2, 22));
   var plan = buildTodayPlan(60);
   var action = actionFromSessionPlan(plan);
   ({
@@ -392,8 +594,8 @@ const emptyPlanAction = runScenario(`
   });
 `);
 
-assert.notStrictEqual(emptyPlanAction.mode, "session", "Expected all muscles at 20 sets to stay in progression/recovery mode instead of forcing more volume.");
-assert.strictEqual(emptyPlanAction.itemCount, 0, `Expected all-optimum plan to have no forced session items, got ${emptyPlanAction.itemCount}`);
+assert.notStrictEqual(emptyPlanAction.mode, "session", "Expected all muscles at the high-volume filler ceiling to stay in progression/recovery mode instead of forcing more volume.");
+assert.strictEqual(emptyPlanAction.itemCount, 0, `Expected all-ceiling plan to have no forced session items, got ${emptyPlanAction.itemCount}`);
 assert(emptyPlanAction.hasTitle, `Expected action to have a title even with no items, got mode=${emptyPlanAction.mode}`);
 assert(emptyPlanAction.hasBody, `Expected action to have body text even with no items, got mode=${emptyPlanAction.mode}`);
 

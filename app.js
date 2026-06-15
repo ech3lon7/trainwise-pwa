@@ -3,7 +3,7 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 2;
 const STORES = ["workouts", "metrics", "settings"];
-const APP_VERSION = "1.5.10";
+const APP_VERSION = "1.5.12";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 let dbOpenPromise = null;
 let chartId = 0;
@@ -23,6 +23,7 @@ const HYPERTROPHY = {
   minimumSets: 10,
   growthLow: 12,
   growthHigh: 20,
+  highVolumeFillMax: 22,
   idealRirMin: 1,
   idealRirMax: 3,
   highRirDiscount: 0.5,
@@ -384,6 +385,15 @@ function recentDays(days) {
   return start;
 }
 
+function currentTrainingWeekStart(date = new Date()) {
+  const start = new Date(date);
+  const day = start.getDay();
+  const daysSinceMonday = day === 0 ? 6 : day - 1;
+  start.setDate(start.getDate() - daysSinceMonday);
+  start.setHours(0, 0, 0, 0);
+  return start;
+}
+
 function daysBetween(a, b) {
   const first = parseLocalDate(a);
   const second = parseLocalDate(b);
@@ -667,7 +677,7 @@ function progressionTargetForExercise(exerciseName) {
 }
 
 function weeklyWorkouts() {
-  const start = recentDays(7);
+  const start = currentTrainingWeekStart();
   return state.workouts.filter((entry) => parseLocalDate(entry.date) >= start);
 }
 
@@ -919,12 +929,24 @@ function plannedOptimumGap(item) {
   return Math.max(0, HYPERTROPHY.growthHigh - (item.muscle.sets + item.sets));
 }
 
+function planSetCeilingForTarget(target, allowHighVolume = false) {
+  if (target.sets < HYPERTROPHY.minimumSets) return HYPERTROPHY.minimumSets;
+  return allowHighVolume ? HYPERTROPHY.highVolumeFillMax : HYPERTROPHY.growthHigh;
+}
+
+function planSetGap(target, allowHighVolume = false) {
+  return Math.max(0, Math.ceil(planSetCeilingForTarget(target, allowHighVolume) - target.sets));
+}
+
+function plannedSetGap(item, allowHighVolume = false) {
+  return Math.max(0, Math.ceil(planSetCeilingForTarget(item.muscle, allowHighVolume) - (item.muscle.sets + item.sets)));
+}
+
 function planPriorityReason(item) {
-  const targetSets = item.muscle.sets < HYPERTROPHY.minimumSets
-    ? HYPERTROPHY.minimumSets
-    : HYPERTROPHY.growthHigh;
+  const highVolume = item.phase === "high-volume";
+  const targetSets = planSetCeilingForTarget(item.muscle, highVolume);
   const parts = [
-    `${item.muscle.label} is ${fmt(item.muscle.sets, 1)}/${targetSets} hard sets`,
+    `${highVolume ? "High-volume filler: " : ""}${item.muscle.label} is ${fmt(item.muscle.sets, 1)}/${targetSets} hard sets`,
     `${item.muscle.sessions}/2 touches`
   ];
   if (item.muscle.daysSince !== null) parts.push(`last hit ${item.muscle.daysSince}d ago`);
@@ -957,15 +979,16 @@ function coachTimeframeSelectionLabel(minutes = selectedCoachTimeframeMinutes())
 
 function sessionPlanCaps(limitMinutes, restart = false) {
   const limit = Math.min(75, Math.max(30, Number(limitMinutes) || SESSION_LIMIT_MINUTES));
+  const maxItems = limit <= 30 ? 4 : limit <= 40 ? 5 : limit <= 50 ? 6 : limit <= 60 ? 8 : 10;
   if (restart) {
     return {
-      maxItems: limit <= 30 ? 2 : limit <= 40 ? 3 : limit <= 50 ? 4 : 5,
+      maxItems,
       minSets: 2,
       maxSets: limit <= 40 ? 2 : limit <= 60 ? 3 : 4
     };
   }
   return {
-    maxItems: limit <= 30 ? 3 : limit <= 40 ? 4 : limit <= 50 ? 5 : limit <= 60 ? 6 : 8,
+    maxItems,
     minSets: 2,
     maxSets: limit <= 30 ? 4 : limit <= 40 ? 5 : limit <= 50 ? 6 : limit <= 60 ? 8 : 10
   };
@@ -975,23 +998,25 @@ function plannedExerciseMinutes(item, sets = item.sets) {
   return estimateExerciseMinutes(item.exercise, sets);
 }
 
-function initialSetsForPlanTarget(target, caps) {
-  return Math.max(1, Math.min(caps.minSets, caps.maxSets, Math.ceil(target.deficit)));
+function initialSetsForPlanTarget(target, caps, allowHighVolume = false) {
+  const gap = planSetGap(target, allowHighVolume);
+  if (!gap) return 0;
+  return Math.max(1, Math.min(caps.minSets, caps.maxSets, gap));
 }
 
-function maxSetsForPlanTarget(target, caps, fillToTime = false) {
-  const minimumGap = Math.max(1, Math.ceil(target.deficit));
-  if (!fillToTime) return Math.max(1, Math.min(caps.maxSets, minimumGap));
-  const growthGap = Math.max(minimumGap, Math.ceil(HYPERTROPHY.growthHigh - target.sets));
-  return Math.max(1, Math.min(caps.maxSets, growthGap));
+function maxSetsForPlanTarget(target, caps, fillToTime = false, allowHighVolume = false) {
+  const targetGap = planSetGap(target, allowHighVolume);
+  if (!targetGap) return 0;
+  if (fillToTime) return Math.max(1, Math.min(caps.maxSets, targetGap));
+  return Math.max(1, Math.min(caps.maxSets, Math.max(1, Math.ceil(target.deficit))));
 }
 
 function buildSessionPlan(limitMinutes = SESSION_LIMIT_MINUTES, options = {}) {
   const restart = options.restart || false;
   const targetMuscles = Array.isArray(options.targetMuscles) ? options.targetMuscles : selectedCoachTargetMuscles();
   const cappedLimit = Math.min(75, Math.max(30, Number(limitMinutes) || SESSION_LIMIT_MINUTES));
-  const targetFloor = restart ? 0 : Math.max(0, cappedLimit - COACH_TIME_TOLERANCE_MINUTES);
-  const hardLimit = cappedLimit + (restart ? 0 : COACH_TIME_TOLERANCE_MINUTES);
+  const targetFloor = Math.max(0, cappedLimit - COACH_TIME_TOLERANCE_MINUTES);
+  const hardLimit = cappedLimit + COACH_TIME_TOLERANCE_MINUTES;
   const caps = sessionPlanCaps(cappedLimit, restart);
   const allStats = muscleSetStats()
     .map(muscleReadiness)
@@ -1006,6 +1031,8 @@ function buildSessionPlan(limitMinutes = SESSION_LIMIT_MINUTES, options = {}) {
 
   const addTargetToPlan = (target, addOptions = {}) => {
     const trackMissing = addOptions.trackMissing !== false;
+    const allowHighVolume = addOptions.allowHighVolume === true;
+    const phase = addOptions.phase || (target.sets < HYPERTROPHY.minimumSets ? "floor" : "optimum");
     const exercise = chooseExerciseForMuscle(target.id, usedExercises);
     if (!exercise) {
       if (trackMissing && !missingIds.has(target.id)) {
@@ -1014,14 +1041,15 @@ function buildSessionPlan(limitMinutes = SESSION_LIMIT_MINUTES, options = {}) {
       }
       return false;
     }
-    let sets = initialSetsForPlanTarget(target, caps);
+    let sets = initialSetsForPlanTarget(target, caps, allowHighVolume);
+    if (!sets) return false;
     let minutes = estimateExerciseMinutes(exercise, sets);
     while (sets > 1 && totalMinutes + minutes > hardLimit) {
       sets -= 1;
       minutes = estimateExerciseMinutes(exercise, sets);
     }
     if (totalMinutes + minutes > hardLimit) return false;
-    items.push({ muscle: target, exercise, sets, minutes, reason: "" });
+    items.push({ muscle: target, exercise, sets, minutes, reason: "", phase });
     usedExercises.add(exercise.id);
     totalMinutes += minutes;
     return true;
@@ -1042,7 +1070,6 @@ function buildSessionPlan(limitMinutes = SESSION_LIMIT_MINUTES, options = {}) {
   if (!restart && (optimumCandidates.length || targetMuscles.length)) {
     const supplementalTargets = allStats.filter((target) => (
       target.sets < HYPERTROPHY.growthHigh
-      && (!targetMuscles.length || stats.length || isCoachTargetMuscle(target.id, targetMuscles))
       && !items.some((item) => item.muscle.id === target.id)
     )).sort((a, b) => (
       Number(isCoachTargetMuscle(b.id, targetMuscles)) - Number(isCoachTargetMuscle(a.id, targetMuscles))
@@ -1053,7 +1080,7 @@ function buildSessionPlan(limitMinutes = SESSION_LIMIT_MINUTES, options = {}) {
     for (const group of [freshSupplemental, recentSupplemental]) {
       for (const target of group) {
         if (totalMinutes >= targetFloor || items.length >= caps.maxItems) break;
-        addTargetToPlan(target, { trackMissing: stats.length === 0 });
+        addTargetToPlan(target, { phase: "optimum", trackMissing: stats.length === 0 });
       }
       if (totalMinutes >= targetFloor || items.length >= caps.maxItems) break;
     }
@@ -1073,25 +1100,58 @@ function buildSessionPlan(limitMinutes = SESSION_LIMIT_MINUTES, options = {}) {
     }
   }
 
-  let changed = true;
-  while (changed) {
-    changed = false;
-    const eligible = items
-      .filter((item) => item.sets < maxSetsForPlanTarget(item.muscle, caps, !restart && (optimumCandidates.length > 0 || targetMuscles.length > 0)))
-      .sort((a, b) => (
-        Number(isCoachTargetMuscle(b.muscle.id, targetMuscles)) - Number(isCoachTargetMuscle(a.muscle.id, targetMuscles))
-      ) || (plannedOptimumGap(b) - plannedOptimumGap(a)) || (b.muscle.deficit - a.muscle.deficit) || (a.sets - b.sets) || (plannedExerciseMinutes(a, a.sets + 1) - plannedExerciseMinutes(b, b.sets + 1)));
-    for (const item of eligible) {
-      const nextMinutes = plannedExerciseMinutes(item, item.sets + 1);
-      const extraMinutes = nextMinutes - item.minutes;
-      if (totalMinutes + extraMinutes > hardLimit) continue;
-      item.sets += 1;
-      item.minutes = nextMinutes;
-      totalMinutes += extraMinutes;
-      changed = true;
-      break;
+  const addSetsToExisting = (fillOptions = {}) => {
+    const allowHighVolume = fillOptions.allowHighVolume === true;
+    let changed = true;
+    while (changed) {
+      changed = false;
+      const eligible = items
+        .filter((item) => item.sets < maxSetsForPlanTarget(
+          item.muscle,
+          caps,
+          allowHighVolume || (!restart && (optimumCandidates.length > 0 || targetMuscles.length > 0)),
+          allowHighVolume
+        ))
+        .sort((a, b) => (
+          Number(isCoachTargetMuscle(b.muscle.id, targetMuscles)) - Number(isCoachTargetMuscle(a.muscle.id, targetMuscles))
+        ) || (plannedSetGap(b, allowHighVolume) - plannedSetGap(a, allowHighVolume)) || (plannedOptimumGap(b) - plannedOptimumGap(a)) || (b.muscle.deficit - a.muscle.deficit) || (a.sets - b.sets) || (plannedExerciseMinutes(a, a.sets + 1) - plannedExerciseMinutes(b, b.sets + 1)));
+      for (const item of eligible) {
+        const nextMinutes = plannedExerciseMinutes(item, item.sets + 1);
+        const extraMinutes = nextMinutes - item.minutes;
+        if (totalMinutes + extraMinutes > hardLimit) continue;
+        item.sets += 1;
+        item.minutes = nextMinutes;
+        if (allowHighVolume && item.muscle.sets + item.sets > HYPERTROPHY.growthHigh) item.phase = "high-volume";
+        totalMinutes += extraMinutes;
+        changed = true;
+        break;
+      }
+    }
+  };
+
+  addSetsToExisting();
+
+  if (!restart && totalMinutes < targetFloor) {
+    const highVolumeTargets = balancedCoverageTargets(allStats.filter((target) => (
+      target.sets < HYPERTROPHY.highVolumeFillMax
+      && !items.some((item) => item.muscle.id === target.id)
+    )).sort((a, b) => (
+      Number(isCoachTargetMuscle(b.id, targetMuscles)) - Number(isCoachTargetMuscle(a.id, targetMuscles))
+    ) || (a.sets - b.sets) || coachMusclePrioritySort(a, b)));
+
+    for (const target of highVolumeTargets) {
+      if (totalMinutes >= targetFloor || items.length >= caps.maxItems) break;
+      addTargetToPlan(target, { phase: "high-volume", allowHighVolume: true, trackMissing: false });
     }
   }
+
+  if (totalMinutes < targetFloor) {
+    addSetsToExisting({ allowHighVolume: !restart });
+  }
+
+  const shortfallReason = totalMinutes < targetFloor
+    ? `Estimated ${totalMinutes}/${cappedLimit} min because no library-safe remaining work fits without exceeding time or volume limits.`
+    : "";
 
   const plannedIds = new Set(items.map((item) => item.muscle.id));
   const deprioritized = stats
@@ -1106,6 +1166,7 @@ function buildSessionPlan(limitMinutes = SESSION_LIMIT_MINUTES, options = {}) {
     limitMinutes: cappedLimit,
     targetFloorMinutes: targetFloor,
     hardLimitMinutes: hardLimit,
+    shortfallReason,
     restart
   };
 }
@@ -1150,6 +1211,10 @@ function buildTodayPlan(limitMinutes = selectedCoachTimeframeMinutes()) {
     missingReasons.push(...sessionPlan.missing.map((muscle) => `Add a primary exercise for ${muscle.label}.`));
     why.push(`Add a primary exercise for ${sessionPlan.missing.map((muscle) => muscle.label).join(", ")} to unlock better plans.`);
   }
+  if (sessionPlan.shortfallReason) {
+    notes.push(sessionPlan.shortfallReason);
+    why.push(sessionPlan.shortfallReason);
+  }
   if (protein.bodyWeightLb && proteinAvg && proteinAvg < protein.floor) {
     notes.push(`Protein is under target: ${fmt(proteinAvg)}g avg vs ${fmt(protein.floor)}g floor.`);
   } else if (!protein.bodyWeightLb || !proteinAvg) {
@@ -1163,11 +1228,13 @@ function buildTodayPlan(limitMinutes = selectedCoachTimeframeMinutes()) {
     return {
       mode: restart ? "restart" : "session",
       title: restart ? "Restart session" : "Today's Plan",
-      subtitle: restart
-        ? `Small, useful work capped at ${coachTimeframeLabel(limitMinutes)}.`
-        : belowMinimum.length
-          ? `Best minimum gaps to train next, built for about ${coachTimeframeLabel(limitMinutes)}.`
-          : `Best gaps toward 20 hard sets, built for about ${coachTimeframeLabel(limitMinutes)}.`,
+      subtitle: sessionPlan.shortfallReason
+        ? `Estimated ${sessionPlan.totalMinutes}/${sessionPlan.limitMinutes} min; limited by library-safe coverage.`
+        : restart
+          ? `Small, useful work built for about ${coachTimeframeLabel(limitMinutes)}.`
+          : belowMinimum.length
+            ? `Best minimum gaps to train next, built for about ${coachTimeframeLabel(limitMinutes)}.`
+            : `Best gaps toward 20 hard sets, built for about ${coachTimeframeLabel(limitMinutes)}.`,
       sessionPlan,
       why,
       explanation: { selected: selectedReasons, skipped: skippedReasons, missing: missingReasons, notes },
@@ -1486,7 +1553,7 @@ function renderDashboard() {
     <section class="hero">
       <div>
         <h2 class="hero-title">Build the floor first.</h2>
-        <p class="hero-copy">Reach 10 hard sets per muscle each rolling week, train muscles twice, and keep most work 1-3 reps from failure.</p>
+        <p class="hero-copy">Reach 10 hard sets per muscle each Monday-start week, train muscles twice, and keep most work 1-3 reps from failure.</p>
       </div>
       <div class="grid three">
         <div class="stat"><span class="label">Hypertrophy floor</span><span class="value accent-green">${covered}/${stats.length}</span><span class="hint">muscles at 10 sets</span></div>
@@ -1516,7 +1583,7 @@ function renderDashboard() {
     </section>
 
     <section class="section chart-panel">
-      <div class="chart-header"><h3>Weekly hard sets</h3><span class="muted small">${fmt(weeklyVolume)} lb total load logged</span></div>
+      <div class="chart-header"><h3>This week's hard sets</h3><span class="muted small">${fmt(weeklyVolume)} lb total load logged</span></div>
       ${muscleProgressMarkup(stats, true)}
     </section>
 
@@ -2738,7 +2805,7 @@ function renderCoach() {
     <section class="hero">
       <div>
         <h2 class="hero-title">Hypertrophy is counted in hard sets.</h2>
-        <p class="hero-copy">Minimum-first coaching: 10 hard sets per muscle, 2 weekly touches, 1-3 RIR, enough protein, and gradual overload.</p>
+        <p class="hero-copy">Minimum-first coaching: 10 hard sets per muscle each Monday-start week, 2 touches, 1-3 RIR, enough protein, and gradual overload.</p>
       </div>
     </section>
     ${renderCoachTimeframeSelector()}
