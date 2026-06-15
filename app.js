@@ -3,7 +3,7 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 2;
 const STORES = ["workouts", "metrics", "settings"];
-const APP_VERSION = "1.5.13";
+const APP_VERSION = "1.5.14";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 let dbOpenPromise = null;
 let chartId = 0;
@@ -22,6 +22,12 @@ const NUTRITION_GOAL_OPTIONS = [
   { id: "bulk", label: "Bulk", hint: "Lean gain" },
   { id: "maintain", label: "Maintain", hint: "Hold steady" },
   { id: "cut", label: "Cut", hint: "Slow loss" }
+];
+const NUTRITION_MEALS = [
+  { id: "breakfast", label: "Breakfast" },
+  { id: "lunch", label: "Lunch" },
+  { id: "dinner", label: "Dinner" },
+  { id: "snacks", label: "Snacks" }
 ];
 
 const HYPERTROPHY = {
@@ -108,6 +114,7 @@ const state = {
   dismissedRecordTrophies: new Set(),
   templateQueue: [],
   draftDate: todayISO(),
+  metricDate: todayISO(),
   draftNotes: "",
   setRows: [
     { weight: "", reps: 10, rir: 2, restSeconds: null },
@@ -690,9 +697,161 @@ function getWeeklyVolume() {
   return weeklyWorkouts().reduce((sum, entry) => sum + workoutVolume(entry), 0);
 }
 
+function emptyNutritionMeals() {
+  return Object.fromEntries(NUTRITION_MEALS.map((meal) => [meal.id, { calories: 0, protein: 0 }]));
+}
+
+function metricHasMealData(entry = {}) {
+  return NUTRITION_MEALS.some((meal) => {
+    const source = entry.meals?.[meal.id];
+    return parseNum(source?.calories) > 0 || parseNum(source?.protein) > 0;
+  });
+}
+
+function nutritionMealsFromData(data = {}) {
+  const meals = emptyNutritionMeals();
+  for (const meal of NUTRITION_MEALS) {
+    meals[meal.id] = {
+      calories: parseNum(data[`meal-${meal.id}-calories`]),
+      protein: parseNum(data[`meal-${meal.id}-protein`])
+    };
+  }
+  return meals;
+}
+
+function normalizeMetricMeals(entry = {}) {
+  const meals = emptyNutritionMeals();
+  for (const meal of NUTRITION_MEALS) {
+    meals[meal.id] = {
+      calories: parseNum(entry.meals?.[meal.id]?.calories),
+      protein: parseNum(entry.meals?.[meal.id]?.protein)
+    };
+  }
+  if (!metricHasMealData(entry)) {
+    meals.snacks.calories = parseNum(entry.calories);
+    meals.snacks.protein = parseNum(entry.protein);
+  }
+  return meals;
+}
+
+function nutritionMealTotals(meals = emptyNutritionMeals()) {
+  return NUTRITION_MEALS.reduce((totals, meal) => {
+    totals.calories += parseNum(meals[meal.id]?.calories);
+    totals.protein += parseNum(meals[meal.id]?.protein);
+    return totals;
+  }, { calories: 0, protein: 0 });
+}
+
+function metricTimestamp(entry = {}) {
+  return String(entry.updatedAt || entry.createdAt || "");
+}
+
+function sortMetricsAsc(entries = []) {
+  return [...entries].sort((a, b) => {
+    const dateCompare = String(a.date || "").localeCompare(String(b.date || ""));
+    if (dateCompare) return dateCompare;
+    return metricTimestamp(a).localeCompare(metricTimestamp(b));
+  });
+}
+
+function normalizeMetricEntry(entry = {}) {
+  const meals = normalizeMetricMeals(entry);
+  const totals = metricHasMealData(entry)
+    ? nutritionMealTotals(meals)
+    : { calories: parseNum(entry.calories), protein: parseNum(entry.protein) };
+  return {
+    ...entry,
+    id: entry.id || uid(),
+    date: entry.date || todayISO(),
+    bodyWeight: parseNum(entry.bodyWeight),
+    calories: totals.calories,
+    protein: totals.protein,
+    meals,
+    notes: String(entry.notes || "").trim(),
+    createdAt: entry.createdAt || new Date().toISOString(),
+    updatedAt: entry.updatedAt || entry.createdAt || new Date().toISOString()
+  };
+}
+
+function metricEntriesForDate(date, entries = state.metrics) {
+  return entries.filter((entry) => entry.date === date);
+}
+
+function mergeMetricEntries(entries = [], date = entries[0]?.date || todayISO()) {
+  const dated = sortMetricsAsc(entries.filter((entry) => (entry.date || date) === date));
+  if (!dated.length) return null;
+  const mergedMeals = emptyNutritionMeals();
+  const normalized = dated.map(normalizeMetricEntry);
+  for (const entry of normalized) {
+    for (const meal of NUTRITION_MEALS) {
+      mergedMeals[meal.id].calories += parseNum(entry.meals[meal.id]?.calories);
+      mergedMeals[meal.id].protein += parseNum(entry.meals[meal.id]?.protein);
+    }
+  }
+  const totals = nutritionMealTotals(mergedMeals);
+  const latest = normalized[normalized.length - 1];
+  const first = normalized[0];
+  const latestWeight = [...normalized].reverse().find((entry) => entry.bodyWeight > 0)?.bodyWeight || 0;
+  const latestNotes = [...normalized].reverse().find((entry) => entry.notes)?.notes || "";
+  return {
+    ...latest,
+    date,
+    bodyWeight: latestWeight,
+    calories: totals.calories,
+    protein: totals.protein,
+    meals: mergedMeals,
+    notes: latestNotes,
+    createdAt: first.createdAt,
+    updatedAt: latest.updatedAt || latest.createdAt
+  };
+}
+
+function canonicalMetricEntries(entries = state.metrics) {
+  const byDate = new Map();
+  for (const entry of entries) {
+    if (!entry?.date) continue;
+    if (!byDate.has(entry.date)) byDate.set(entry.date, []);
+    byDate.get(entry.date).push(entry);
+  }
+  return [...byDate.entries()]
+    .map(([date, items]) => mergeMetricEntries(items, date))
+    .filter(Boolean)
+    .sort((a, b) => {
+      const dateCompare = String(b.date || "").localeCompare(String(a.date || ""));
+      if (dateCompare) return dateCompare;
+      return metricTimestamp(b).localeCompare(metricTimestamp(a));
+    });
+}
+
+function metricForDate(date) {
+  return mergeMetricEntries(metricEntriesForDate(date), date);
+}
+
+function metricDuplicateIdsForDate(date, keepId) {
+  return metricEntriesForDate(date)
+    .filter((entry) => entry.id && entry.id !== keepId)
+    .map((entry) => entry.id);
+}
+
+function metricEntryFromFormData(data = {}, existing = null) {
+  const meals = nutritionMealsFromData(data);
+  const totals = nutritionMealTotals(meals);
+  return {
+    id: existing?.id || uid(),
+    date: data.date || existing?.date || todayISO(),
+    bodyWeight: parseNum(data.bodyWeight),
+    calories: totals.calories,
+    protein: totals.protein,
+    meals,
+    notes: String(data.notes || "").trim(),
+    createdAt: existing?.createdAt || new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+}
+
 function getAverage(field, days) {
   const start = recentDays(days);
-  const values = state.metrics
+  const values = canonicalMetricEntries()
     .filter((entry) => parseLocalDate(entry.date) >= start && entry[field] > 0)
     .map((entry) => entry[field]);
   if (!values.length) return 0;
@@ -700,12 +859,12 @@ function getAverage(field, days) {
 }
 
 function lastMetric(field) {
-  return state.metrics.find((entry) => Number.isFinite(entry[field]) && entry[field] > 0);
+  return canonicalMetricEntries().find((entry) => Number.isFinite(entry[field]) && entry[field] > 0);
 }
 
 function weightTrend(days = 14) {
   const start = recentDays(days);
-  const entries = state.metrics
+  const entries = canonicalMetricEntries()
     .filter((entry) => parseLocalDate(entry.date) >= start && entry.bodyWeight > 0)
     .sort((a, b) => a.date.localeCompare(b.date));
   if (entries.length < 2) return null;
@@ -734,7 +893,7 @@ function nutritionGoalLabel(goal = selectedNutritionGoal()) {
 
 function metricEntriesForField(field, days) {
   const start = recentDays(days);
-  return state.metrics
+  return canonicalMetricEntries()
     .filter((entry) => parseLocalDate(entry.date) >= start && Number.isFinite(entry[field]) && entry[field] > 0)
     .sort((a, b) => a.date.localeCompare(b.date));
 }
@@ -1421,7 +1580,7 @@ function seriesFromWorkouts(exercise, mapper) {
 }
 
 function seriesFromMetrics(field) {
-  return state.metrics
+  return canonicalMetricEntries()
     .filter((entry) => entry[field] > 0)
     .sort((a, b) => a.date.localeCompare(b.date))
     .map((entry) => ({
@@ -1730,19 +1889,63 @@ function listWorkout(entry) {
 }
 
 function listMetric(entry) {
+  const metric = normalizeMetricEntry(entry);
   const parts = [];
-  if (entry.bodyWeight) parts.push(`${fmt(entry.bodyWeight, 1)} lb`);
-  if (entry.calories) parts.push(`${fmt(entry.calories)} cal`);
-  if (entry.protein) parts.push(`${fmt(entry.protein)}g protein`);
+  if (metric.bodyWeight) parts.push(`${fmt(metric.bodyWeight, 1)} lb`);
+  if (metric.calories) parts.push(`${fmt(metric.calories)} cal`);
+  if (metric.protein) parts.push(`${fmt(metric.protein)}g protein`);
   return `
     <div class="list-item">
       <div>
-        <strong>${escapeHtml(entry.date)}</strong>
+        <strong>${escapeHtml(metric.date)}</strong>
         <span class="muted small">${escapeHtml(parts.join(" - ") || "Metric entry")}</span>
       </div>
-      <button class="delete-small" type="button" aria-label="Delete metric" data-action="delete-metric" data-id="${escapeHtml(entry.id)}">x</button>
+      <button class="delete-small" type="button" aria-label="Delete metric" data-action="delete-metric" data-id="${escapeHtml(metric.id)}" data-date="${escapeHtml(metric.date)}">x</button>
     </div>
   `;
+}
+
+function renderNutritionMealFields(meals = emptyNutritionMeals()) {
+  return `
+    <div class="nutrition-meal-grid">
+      ${NUTRITION_MEALS.map((meal) => `
+        <section class="nutrition-meal-card">
+          <h3>${escapeHtml(meal.label)}</h3>
+          <div class="field-row compact-metric-row">
+            <div class="field">
+              <label for="meal-${meal.id}-calories">Calories</label>
+              <input id="meal-${meal.id}-calories" name="meal-${meal.id}-calories" data-meal-field="calories" type="number" inputmode="decimal" min="0" step="1" value="${escapeHtml(meals[meal.id]?.calories || "")}">
+            </div>
+            <div class="field">
+              <label for="meal-${meal.id}-protein">Protein</label>
+              <input id="meal-${meal.id}-protein" name="meal-${meal.id}-protein" data-meal-field="protein" type="number" inputmode="decimal" min="0" step="1" value="${escapeHtml(meals[meal.id]?.protein || "")}" placeholder="g">
+            </div>
+          </div>
+        </section>
+      `).join("")}
+    </div>
+  `;
+}
+
+function nutritionTotalSummaryMarkup(metric) {
+  const totals = nutritionMealTotals(metric?.meals || emptyNutritionMeals());
+  return `
+    <div class="nutrition-total-strip" aria-live="polite">
+      <span><strong data-nutrition-total="calories">${fmt(totals.calories)}</strong><small>calories</small></span>
+      <span><strong data-nutrition-total="protein">${fmt(totals.protein)}</strong><small>g protein</small></span>
+      <span><strong>${metric?.bodyWeight ? fmt(metric.bodyWeight, 1) : "--"}</strong><small>lb body weight</small></span>
+    </div>
+  `;
+}
+
+function refreshNutritionFormTotals(form = document.getElementById("metric-form")) {
+  if (!form) return;
+  const data = Object.fromEntries(new FormData(form));
+  const totals = nutritionMealTotals(nutritionMealsFromData(data));
+  const calories = form.querySelector('[data-nutrition-total="calories"]');
+  const protein = form.querySelector('[data-nutrition-total="protein"]');
+  if (calories) calories.textContent = fmt(totals.calories);
+  if (protein) protein.textContent = fmt(totals.protein);
 }
 
 function defaultSetRows(count = 3) {
@@ -2427,6 +2630,10 @@ function renderLog() {
   const draft = ensureWorkoutDraft();
   const lockLabel = draft.some((item) => item.editingWorkoutId) ? "Update workout" : "Lock in workout";
   if (state.logHistoryExercise) return exerciseHistoryScreen(state.logHistoryExercise);
+  const metricDate = state.metricDate || todayISO();
+  const metric = metricForDate(metricDate);
+  const metricFormEntry = metric || { date: metricDate, bodyWeight: 0, calories: 0, protein: 0, meals: emptyNutritionMeals(), notes: "" };
+  const metricButtonLabel = metric ? "Update metrics" : "Save metrics";
 
   return `
     <section class="form-panel">
@@ -2482,18 +2689,18 @@ function renderLog() {
         <form id="metric-form">
           <div class="field">
             <label for="metric-date">Date</label>
-            <input id="metric-date" name="date" type="date" required value="${todayISO()}">
+            <input id="metric-date" name="date" type="date" required value="${escapeHtml(metricDate)}">
           </div>
-          <div class="field-row">
-            <div class="field"><label for="bodyWeight">Body weight</label><input id="bodyWeight" name="bodyWeight" type="number" inputmode="decimal" min="0" step="0.1" placeholder="lb"></div>
-            <div class="field"><label for="calories">Calories</label><input id="calories" name="calories" type="number" inputmode="decimal" min="0" step="1"></div>
-            <div class="field"><label for="protein">Protein</label><input id="protein" name="protein" type="number" inputmode="decimal" min="0" step="1" placeholder="g"></div>
+          ${nutritionTotalSummaryMarkup(metricFormEntry)}
+          <div class="field-row metric-daily-row">
+            <div class="field"><label for="bodyWeight">Body weight</label><input id="bodyWeight" name="bodyWeight" type="number" inputmode="decimal" min="0" step="0.1" value="${escapeHtml(metricFormEntry.bodyWeight || "")}" placeholder="lb"></div>
           </div>
+          ${renderNutritionMealFields(metricFormEntry.meals)}
           <div class="field">
             <label for="metric-notes">Notes</label>
-            <textarea id="metric-notes" name="notes" placeholder="Sleep, hunger, stress, digestion, or anything that explains the trend."></textarea>
+            <textarea id="metric-notes" name="notes" placeholder="Sleep, hunger, stress, digestion, or anything that explains the trend.">${escapeHtml(metricFormEntry.notes || "")}</textarea>
           </div>
-          <button class="primary-button" type="submit">Save metrics</button>
+          <button class="primary-button" type="submit">${metricButtonLabel}</button>
         </form>
       `}
     </section>
@@ -3205,19 +3412,16 @@ async function saveWorkout(form) {
 
 async function saveMetric(form) {
   const data = Object.fromEntries(new FormData(form));
-  const entry = {
-    id: uid(),
-    date: data.date,
-    bodyWeight: parseNum(data.bodyWeight),
-    calories: parseNum(data.calories),
-    protein: parseNum(data.protein),
-    notes: data.notes.trim(),
-    createdAt: new Date().toISOString()
-  };
+  const date = data.date || todayISO();
+  const existing = metricForDate(date);
+  const entry = metricEntryFromFormData(data, existing);
+  const duplicateIds = metricDuplicateIdsForDate(date, entry.id);
   await dbPut("metrics", entry);
+  await Promise.all(duplicateIds.map((id) => dbDelete("metrics", id)));
   await loadState();
+  state.metricDate = date;
   await render();
-  toast("Metrics saved.");
+  toast(existing ? "Metrics updated." : "Metrics saved.");
 }
 
 function isSampleEntry(entry) {
@@ -3257,14 +3461,25 @@ function sampleMetric(daysAgo) {
   const date = dateDaysAgo(daysAgo);
   const progress = 41 - daysAgo;
   const wave = Math.sin(progress / 3);
+  const calories = Math.round(2380 + progress * 7 + wave * 70);
+  const protein = Math.round(126 + progress * 0.95 + wave * 6);
+  const meals = {
+    breakfast: { calories: Math.round(calories * 0.24), protein: Math.round(protein * 0.24) },
+    lunch: { calories: Math.round(calories * 0.32), protein: Math.round(protein * 0.32) },
+    dinner: { calories: Math.round(calories * 0.34), protein: Math.round(protein * 0.34) },
+    snacks: { calories: 0, protein: 0 }
+  };
+  meals.snacks.calories = calories - meals.breakfast.calories - meals.lunch.calories - meals.dinner.calories;
+  meals.snacks.protein = protein - meals.breakfast.protein - meals.lunch.protein - meals.dinner.protein;
   return {
     id: `${SAMPLE_BATCH}-metric-${date}`,
     sample: true,
     sampleBatch: SAMPLE_BATCH,
     date,
     bodyWeight: 181 + progress * 0.08 + wave * 0.25,
-    calories: Math.round(2380 + progress * 7 + wave * 70),
-    protein: Math.round(126 + progress * 0.95 + wave * 6),
+    calories,
+    protein,
+    meals,
     notes: "Sample nutrition data for chart testing.",
     createdAt: `${date}T08:00:00.000Z`
   };
@@ -3361,7 +3576,7 @@ function exportPayload() {
     exportedAt: new Date().toISOString(),
     settings: exportSafeSettings(),
     workouts: state.workouts.filter((entry) => !isSampleEntry(entry)),
-    metrics: state.metrics.filter((entry) => !isSampleEntry(entry))
+    metrics: canonicalMetricEntries(state.metrics.filter((entry) => !isSampleEntry(entry)))
   };
 }
 
@@ -3808,7 +4023,10 @@ async function handleAction(action, target) {
       toast("Lift deleted.");
     },
     async "delete-metric"() {
-      await dbDelete("metrics", target.dataset.id);
+      const ids = target.dataset.date
+        ? metricEntriesForDate(target.dataset.date).map((entry) => entry.id).filter(Boolean)
+        : [target.dataset.id].filter(Boolean);
+      await Promise.all(ids.map((id) => dbDelete("metrics", id)));
       await loadState();
       await render();
       toast("Metric deleted.");
@@ -4003,6 +4221,10 @@ document.addEventListener("change", async (event) => {
       loadWorkoutDateDraft(newDate);
       await render();
     }
+    if (event.target.matches("#metric-date")) {
+      state.metricDate = event.target.value || todayISO();
+      await render();
+    }
     if (event.target.matches("#trend-exercise")) {
       state.selectedExercise = event.target.value;
       await render();
@@ -4027,6 +4249,9 @@ document.addEventListener("change", async (event) => {
 
 document.addEventListener("input", async (event) => {
   try {
+    if (event.target.matches("[data-meal-field]")) {
+      refreshNutritionFormTotals(event.target.closest("#metric-form"));
+    }
     if (event.target.matches("[data-set-field]")) {
       const section = event.target.closest(".exercise-draft");
       readDraftFromForm();
