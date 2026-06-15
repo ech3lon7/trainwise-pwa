@@ -3,7 +3,7 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 2;
 const STORES = ["workouts", "metrics", "settings"];
-const APP_VERSION = "1.5.14";
+const APP_VERSION = "1.5.15";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 let dbOpenPromise = null;
 let chartId = 0;
@@ -701,11 +701,15 @@ function emptyNutritionMeals() {
   return Object.fromEntries(NUTRITION_MEALS.map((meal) => [meal.id, { calories: 0, protein: 0 }]));
 }
 
-function metricHasMealData(entry = {}) {
+function nutritionMealsHaveData(meals = {}) {
   return NUTRITION_MEALS.some((meal) => {
-    const source = entry.meals?.[meal.id];
+    const source = meals?.[meal.id];
     return parseNum(source?.calories) > 0 || parseNum(source?.protein) > 0;
   });
+}
+
+function metricHasMealData(entry = {}) {
+  return nutritionMealsHaveData(entry.meals);
 }
 
 function nutritionMealsFromData(data = {}) {
@@ -727,10 +731,6 @@ function normalizeMetricMeals(entry = {}) {
       protein: parseNum(entry.meals?.[meal.id]?.protein)
     };
   }
-  if (!metricHasMealData(entry)) {
-    meals.snacks.calories = parseNum(entry.calories);
-    meals.snacks.protein = parseNum(entry.protein);
-  }
   return meals;
 }
 
@@ -740,6 +740,19 @@ function nutritionMealTotals(meals = emptyNutritionMeals()) {
     totals.protein += parseNum(meals[meal.id]?.protein);
     return totals;
   }, { calories: 0, protein: 0 });
+}
+
+function nutritionQuickTotalsFromData(data = {}) {
+  return {
+    calories: parseNum(data.calories),
+    protein: parseNum(data.protein)
+  };
+}
+
+function nutritionFormTotalsFromData(data = {}) {
+  const meals = nutritionMealsFromData(data);
+  if (nutritionMealsHaveData(meals)) return nutritionMealTotals(meals);
+  return nutritionQuickTotalsFromData(data);
 }
 
 function metricTimestamp(entry = {}) {
@@ -756,9 +769,15 @@ function sortMetricsAsc(entries = []) {
 
 function normalizeMetricEntry(entry = {}) {
   const meals = normalizeMetricMeals(entry);
-  const totals = metricHasMealData(entry)
-    ? nutritionMealTotals(meals)
-    : { calories: parseNum(entry.calories), protein: parseNum(entry.protein) };
+  const mealDetail = nutritionMealsHaveData(meals);
+  const quickTotals = mealDetail
+    ? { calories: 0, protein: 0 }
+    : {
+        calories: parseNum(entry.quickCalories ?? entry.calories),
+        protein: parseNum(entry.quickProtein ?? entry.protein)
+      };
+  const mealTotals = nutritionMealTotals(meals);
+  const totals = mealDetail ? mealTotals : quickTotals;
   return {
     ...entry,
     id: entry.id || uid(),
@@ -767,6 +786,9 @@ function normalizeMetricEntry(entry = {}) {
     calories: totals.calories,
     protein: totals.protein,
     meals,
+    mealDetail,
+    quickCalories: quickTotals.calories,
+    quickProtein: quickTotals.protein,
     notes: String(entry.notes || "").trim(),
     createdAt: entry.createdAt || new Date().toISOString(),
     updatedAt: entry.updatedAt || entry.createdAt || new Date().toISOString()
@@ -782,13 +804,26 @@ function mergeMetricEntries(entries = [], date = entries[0]?.date || todayISO())
   if (!dated.length) return null;
   const mergedMeals = emptyNutritionMeals();
   const normalized = dated.map(normalizeMetricEntry);
+  let quickCalories = 0;
+  let quickProtein = 0;
+  let mealDetail = false;
   for (const entry of normalized) {
-    for (const meal of NUTRITION_MEALS) {
-      mergedMeals[meal.id].calories += parseNum(entry.meals[meal.id]?.calories);
-      mergedMeals[meal.id].protein += parseNum(entry.meals[meal.id]?.protein);
+    if (entry.mealDetail) {
+      mealDetail = true;
+      for (const meal of NUTRITION_MEALS) {
+        mergedMeals[meal.id].calories += parseNum(entry.meals[meal.id]?.calories);
+        mergedMeals[meal.id].protein += parseNum(entry.meals[meal.id]?.protein);
+      }
+    } else {
+      quickCalories += parseNum(entry.quickCalories);
+      quickProtein += parseNum(entry.quickProtein);
     }
   }
-  const totals = nutritionMealTotals(mergedMeals);
+  const mealTotals = nutritionMealTotals(mergedMeals);
+  const totals = {
+    calories: quickCalories + mealTotals.calories,
+    protein: quickProtein + mealTotals.protein
+  };
   const latest = normalized[normalized.length - 1];
   const first = normalized[0];
   const latestWeight = [...normalized].reverse().find((entry) => entry.bodyWeight > 0)?.bodyWeight || 0;
@@ -800,6 +835,9 @@ function mergeMetricEntries(entries = [], date = entries[0]?.date || todayISO())
     calories: totals.calories,
     protein: totals.protein,
     meals: mergedMeals,
+    mealDetail,
+    quickCalories,
+    quickProtein,
     notes: latestNotes,
     createdAt: first.createdAt,
     updatedAt: latest.updatedAt || latest.createdAt
@@ -835,14 +873,19 @@ function metricDuplicateIdsForDate(date, keepId) {
 
 function metricEntryFromFormData(data = {}, existing = null) {
   const meals = nutritionMealsFromData(data);
-  const totals = nutritionMealTotals(meals);
+  const mealDetail = nutritionMealsHaveData(meals);
+  const quickTotals = nutritionQuickTotalsFromData(data);
+  const totals = mealDetail ? nutritionMealTotals(meals) : quickTotals;
   return {
     id: existing?.id || uid(),
     date: data.date || existing?.date || todayISO(),
     bodyWeight: parseNum(data.bodyWeight),
     calories: totals.calories,
     protein: totals.protein,
-    meals,
+    meals: mealDetail ? meals : emptyNutritionMeals(),
+    mealDetail,
+    quickCalories: mealDetail ? 0 : quickTotals.calories,
+    quickProtein: mealDetail ? 0 : quickTotals.protein,
     notes: String(data.notes || "").trim(),
     createdAt: existing?.createdAt || new Date().toISOString(),
     updatedAt: new Date().toISOString()
@@ -1905,6 +1948,29 @@ function listMetric(entry) {
   `;
 }
 
+function renderNutritionQuickTotals(metric = {}) {
+  const showQuickValues = !metric.mealDetail;
+  const readOnly = metric.mealDetail ? " readonly aria-disabled=\"true\"" : "";
+  return `
+    <section class="nutrition-quick-card ${metric.mealDetail ? "is-overridden" : ""}">
+      <h3>Daily total</h3>
+      <div class="field-row compact-metric-row">
+        <div class="field">
+          <label for="calories">Calories</label>
+          <input id="calories" name="calories" data-quick-field="calories" type="number" inputmode="decimal" min="0" step="1" value="${escapeHtml(showQuickValues && metric.calories ? metric.calories : "")}"${readOnly}>
+        </div>
+        <div class="field">
+          <label for="protein">Protein</label>
+          <input id="protein" name="protein" data-quick-field="protein" type="number" inputmode="decimal" min="0" step="1" value="${escapeHtml(showQuickValues && metric.protein ? metric.protein : "")}" placeholder="g"${readOnly}>
+        </div>
+      </div>
+      <p class="nutrition-override-message ${metric.mealDetail ? "is-visible" : ""}" data-nutrition-override-message aria-live="polite">
+        Using meal details for today's total. Clear meal entries to edit daily total.
+      </p>
+    </section>
+  `;
+}
+
 function renderNutritionMealFields(meals = emptyNutritionMeals()) {
   return `
     <div class="nutrition-meal-grid">
@@ -1928,11 +1994,10 @@ function renderNutritionMealFields(meals = emptyNutritionMeals()) {
 }
 
 function nutritionTotalSummaryMarkup(metric) {
-  const totals = nutritionMealTotals(metric?.meals || emptyNutritionMeals());
   return `
     <div class="nutrition-total-strip" aria-live="polite">
-      <span><strong data-nutrition-total="calories">${fmt(totals.calories)}</strong><small>calories</small></span>
-      <span><strong data-nutrition-total="protein">${fmt(totals.protein)}</strong><small>g protein</small></span>
+      <span><strong data-nutrition-total="calories">${fmt(metric?.calories || 0)}</strong><small>calories</small></span>
+      <span><strong data-nutrition-total="protein">${fmt(metric?.protein || 0)}</strong><small>g protein</small></span>
       <span><strong>${metric?.bodyWeight ? fmt(metric.bodyWeight, 1) : "--"}</strong><small>lb body weight</small></span>
     </div>
   `;
@@ -1941,11 +2006,21 @@ function nutritionTotalSummaryMarkup(metric) {
 function refreshNutritionFormTotals(form = document.getElementById("metric-form")) {
   if (!form) return;
   const data = Object.fromEntries(new FormData(form));
-  const totals = nutritionMealTotals(nutritionMealsFromData(data));
+  const hasMealDetail = nutritionMealsHaveData(nutritionMealsFromData(data));
+  const totals = nutritionFormTotalsFromData(data);
   const calories = form.querySelector('[data-nutrition-total="calories"]');
   const protein = form.querySelector('[data-nutrition-total="protein"]');
   if (calories) calories.textContent = fmt(totals.calories);
   if (protein) protein.textContent = fmt(totals.protein);
+  const quickCard = form.querySelector(".nutrition-quick-card");
+  const message = form.querySelector("[data-nutrition-override-message]");
+  quickCard?.classList.toggle("is-overridden", hasMealDetail);
+  message?.classList.toggle("is-visible", hasMealDetail);
+  form.querySelectorAll("[data-quick-field]").forEach((input) => {
+    input.readOnly = hasMealDetail;
+    input.setAttribute("aria-disabled", String(hasMealDetail));
+    if (!hasMealDetail) input.removeAttribute("aria-disabled");
+  });
 }
 
 function defaultSetRows(count = 3) {
@@ -2695,6 +2770,7 @@ function renderLog() {
           <div class="field-row metric-daily-row">
             <div class="field"><label for="bodyWeight">Body weight</label><input id="bodyWeight" name="bodyWeight" type="number" inputmode="decimal" min="0" step="0.1" value="${escapeHtml(metricFormEntry.bodyWeight || "")}" placeholder="lb"></div>
           </div>
+          ${renderNutritionQuickTotals(metricFormEntry)}
           ${renderNutritionMealFields(metricFormEntry.meals)}
           <div class="field">
             <label for="metric-notes">Notes</label>
@@ -4249,7 +4325,7 @@ document.addEventListener("change", async (event) => {
 
 document.addEventListener("input", async (event) => {
   try {
-    if (event.target.matches("[data-meal-field]")) {
+    if (event.target.matches("[data-meal-field], [data-quick-field]")) {
       refreshNutritionFormTotals(event.target.closest("#metric-form"));
     }
     if (event.target.matches("[data-set-field]")) {

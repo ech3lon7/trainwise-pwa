@@ -123,6 +123,57 @@ assert(!appCode.includes("exercise-title-dumbbell"), "Expected extra dumbbell ic
 assert(stylesCode.includes(".nutrition-meal-grid"), "Expected nutrition meal buckets to have dedicated layout styling.");
 assert(mobileCss.includes(".nutrition-meal-grid"), "Expected nutrition meal buckets to stack safely on mobile.");
 assert(stylesCode.includes(".nutrition-total-strip"), "Expected nutrition form to show live daily totals.");
+assert(stylesCode.includes(".nutrition-quick-card"), "Expected quick daily totals to have dedicated layout styling.");
+assert(stylesCode.includes(".nutrition-quick-card.is-overridden"), "Expected quick daily totals to show an overridden state.");
+assert(stylesCode.includes(".nutrition-override-message"), "Expected meal override message to have dedicated styling.");
+
+const nutritionQuickTotals = runScenario(`
+  ${reset}
+  var entry = metricEntryFromFormData({
+    date: "2026-06-15",
+    bodyWeight: "181.5",
+    calories: "2400",
+    protein: "180",
+    notes: "Fast entry"
+  });
+  ({
+    calories: entry.calories,
+    protein: entry.protein,
+    bodyWeight: entry.bodyWeight,
+    hasMealDetail: metricHasMealData(entry),
+    snackCalories: entry.meals.snacks.calories,
+    note: entry.notes
+  });
+`);
+
+assert.strictEqual(nutritionQuickTotals.calories, 2400, `Expected quick calories to save as day total, got ${nutritionQuickTotals.calories}`);
+assert.strictEqual(nutritionQuickTotals.protein, 180, `Expected quick protein to save as day total, got ${nutritionQuickTotals.protein}`);
+assert.strictEqual(nutritionQuickTotals.bodyWeight, 181.5, `Expected quick body weight parse, got ${nutritionQuickTotals.bodyWeight}`);
+assert.strictEqual(nutritionQuickTotals.hasMealDetail, false, "Expected quick totals not to be classified as meal detail.");
+assert.strictEqual(nutritionQuickTotals.snackCalories, 0, `Expected quick totals not to prefill Snacks, got ${nutritionQuickTotals.snackCalories}`);
+assert.strictEqual(nutritionQuickTotals.note, "Fast entry", `Expected quick notes to persist, got ${nutritionQuickTotals.note}`);
+
+const nutritionMealsOverrideQuickTotals = runScenario(`
+  ${reset}
+  var entry = metricEntryFromFormData({
+    date: "2026-06-15",
+    calories: "2400",
+    protein: "180",
+    "meal-breakfast-calories": "500",
+    "meal-breakfast-protein": "40"
+  });
+  ({
+    calories: entry.calories,
+    protein: entry.protein,
+    breakfastCalories: entry.meals.breakfast.calories,
+    snackCalories: entry.meals.snacks.calories
+  });
+`);
+
+assert.strictEqual(nutritionMealsOverrideQuickTotals.calories, 500, `Expected meal detail to override quick calories, got ${nutritionMealsOverrideQuickTotals.calories}`);
+assert.strictEqual(nutritionMealsOverrideQuickTotals.protein, 40, `Expected meal detail to override quick protein, got ${nutritionMealsOverrideQuickTotals.protein}`);
+assert.strictEqual(nutritionMealsOverrideQuickTotals.breakfastCalories, 500, `Expected breakfast calories to persist, got ${nutritionMealsOverrideQuickTotals.breakfastCalories}`);
+assert.strictEqual(nutritionMealsOverrideQuickTotals.snackCalories, 0, `Expected unused snacks to stay empty, got ${nutritionMealsOverrideQuickTotals.snackCalories}`);
 
 const nutritionMealRollup = runScenario(`
   ${reset}
@@ -199,6 +250,7 @@ const nutritionDuplicateMerge = runScenario(`
     bodyWeight: merged.bodyWeight,
     notes: merged.notes,
     snacksCalories: merged.meals.snacks.calories,
+    quickCalories: merged.quickCalories,
     lunchProtein: merged.meals.lunch.protein,
     canonicalCount: canonical.length,
     duplicateIds: metricDuplicateIdsForDate("2026-06-15", merged.id)
@@ -210,7 +262,8 @@ assert.strictEqual(nutritionDuplicateMerge.calories, 1700, `Expected duplicate c
 assert.strictEqual(nutritionDuplicateMerge.protein, 135, `Expected duplicate protein to merge, got ${nutritionDuplicateMerge.protein}`);
 assert.strictEqual(nutritionDuplicateMerge.bodyWeight, 181, `Expected newest body weight to win, got ${nutritionDuplicateMerge.bodyWeight}`);
 assert.strictEqual(nutritionDuplicateMerge.notes, "New", `Expected newest notes to win, got ${nutritionDuplicateMerge.notes}`);
-assert.strictEqual(nutritionDuplicateMerge.snacksCalories, 1000, `Expected legacy calories to preserve in snacks, got ${nutritionDuplicateMerge.snacksCalories}`);
+assert.strictEqual(nutritionDuplicateMerge.quickCalories, 1000, `Expected legacy calories to preserve as quick totals, got ${nutritionDuplicateMerge.quickCalories}`);
+assert.strictEqual(nutritionDuplicateMerge.snacksCalories, 0, `Expected legacy calories not to prefill Snacks, got ${nutritionDuplicateMerge.snacksCalories}`);
 assert.strictEqual(nutritionDuplicateMerge.lunchProtein, 55, `Expected meal protein to preserve, got ${nutritionDuplicateMerge.lunchProtein}`);
 assert.strictEqual(nutritionDuplicateMerge.canonicalCount, 2, `Expected canonical metrics to collapse same-date duplicates, got ${nutritionDuplicateMerge.canonicalCount}`);
 assert.deepEqual(nutritionDuplicateMerge.duplicateIds, ["old"], `Expected old duplicate id to be deleted, got ${nutritionDuplicateMerge.duplicateIds.join(", ")}`);
@@ -250,8 +303,35 @@ assert(nutritionFormMarkup.includes("Lunch"), "Expected nutrition form to includ
 assert(nutritionFormMarkup.includes("Dinner"), "Expected nutrition form to include Dinner meal bucket.");
 assert(nutritionFormMarkup.includes("Snacks"), "Expected nutrition form to include Snacks meal bucket.");
 assert(nutritionFormMarkup.includes("Update metrics"), "Expected existing date to render Update metrics button.");
-assert(nutritionFormMarkup.includes('value="2400"'), "Expected legacy daily calories to prefill into the meal form.");
+assert(nutritionFormMarkup.includes('id="calories"'), "Expected nutrition form to include quick calorie totals.");
+assert(nutritionFormMarkup.includes('id="protein"'), "Expected nutrition form to include quick protein totals.");
+assert(nutritionFormMarkup.includes('id="calories" name="calories"'), "Expected quick calories input to use the legacy calories name.");
+assert(nutritionFormMarkup.includes('id="meal-snacks-calories" name="meal-snacks-calories" data-meal-field="calories" type="number" inputmode="decimal" min="0" step="1" value=""'), "Expected legacy daily calories not to prefill Snacks.");
+assert(nutritionFormMarkup.includes('id="calories" name="calories" data-quick-field="calories" type="number" inputmode="decimal" min="0" step="1" value="2400"'), "Expected legacy daily calories to prefill quick totals.");
 assert(nutritionFormMarkup.includes("Legacy total"), "Expected existing notes to prefill.");
+
+const nutritionMealOverrideMarkup = runScenario(`
+  ${reset}
+  state.logMode = "metrics";
+  state.metricDate = "2026-06-15";
+  state.metrics = [
+    {
+      id: "meal-detail",
+      date: "2026-06-15",
+      calories: 500,
+      protein: 40,
+      mealDetail: true,
+      meals: { breakfast: { calories: 500, protein: 40 } },
+      createdAt: "2026-06-15T08:00:00.000Z"
+    }
+  ];
+  renderLog();
+`);
+
+assert(nutritionMealOverrideMarkup.includes("nutrition-quick-card is-overridden"), "Expected quick daily total card to show overridden state when meals exist.");
+assert(nutritionMealOverrideMarkup.includes("Using meal details for today"), "Expected override message to explain meal details are active.");
+assert(nutritionMealOverrideMarkup.includes('id="calories" name="calories" data-quick-field="calories" type="number" inputmode="decimal" min="0" step="1" value="" readonly aria-disabled="true"'), "Expected quick calories input to lock when meal details exist.");
+assert(nutritionMealOverrideMarkup.includes('id="protein" name="protein" data-quick-field="protein" type="number" inputmode="decimal" min="0" step="1" value="" placeholder="g" readonly aria-disabled="true"'), "Expected quick protein input to lock when meal details exist.");
 
 const setRecords = runScenario(`
   ${reset}
