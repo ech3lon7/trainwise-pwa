@@ -3,7 +3,7 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 2;
 const STORES = ["workouts", "metrics", "settings"];
-const APP_VERSION = "1.5.17";
+const APP_VERSION = "1.5.18";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 let dbOpenPromise = null;
 let chartId = 0;
@@ -106,6 +106,12 @@ const state = {
   selectedExercise: "Push-up",
   selectedMuscle: "chest",
   editingExerciseId: null,
+  exerciseSearch: "",
+  exerciseMuscleFilter: "all",
+  exerciseSort: "recent",
+  exerciseFormDraft: null,
+  exerciseFormErrors: {},
+  openExerciseActionMenu: null,
   editingWorkoutId: null,
   openExerciseMenu: null,
   logHistoryExercise: "",
@@ -441,7 +447,7 @@ function normalizeExerciseDefinition(exercise) {
     .filter((muscle) => !primaryMuscles.includes(muscle));
   const id = String(exercise.id || `user-${normalizeName(name)}`).trim();
 
-  return {
+  const normalized = {
     id,
     name,
     primaryMuscles,
@@ -454,14 +460,18 @@ function normalizeExerciseDefinition(exercise) {
     createdAt: exercise.createdAt || new Date().toISOString(),
     updatedAt: exercise.updatedAt || exercise.createdAt || new Date().toISOString()
   };
+  if (exercise.archivedAt) normalized.archivedAt = String(exercise.archivedAt);
+  return normalized;
 }
 
-function getCustomExercises() {
+function getCustomExercises(options = {}) {
+  const includeArchived = options.includeArchived === true;
   const source = Array.isArray(state.settings.customExercises) ? state.settings.customExercises : [];
   const seen = new Set();
   return source
     .map(normalizeExerciseDefinition)
     .filter(Boolean)
+    .filter((exercise) => includeArchived || !exercise.archivedAt)
     .filter((exercise) => {
       const key = normalizeName(exercise.name);
       if (!key || seen.has(key)) return false;
@@ -493,7 +503,7 @@ function exerciseNames() {
 }
 
 function allExerciseMetadata() {
-  return [...exerciseDatabase(), ...legacyExerciseMetadata.map((exercise) => ({
+  return [...getCustomExercises({ includeArchived: true }), ...legacyExerciseMetadata.map((exercise) => ({
     id: `legacy-${normalizeName(exercise.name)}`,
     cue: "Legacy exercise mapped for hypertrophy set tracking.",
     ...exercise
@@ -553,6 +563,58 @@ function exerciseHistoryForIdentity(exerciseOrName, workouts = state.workouts, n
     .filter((entry) => sameExerciseIdentity(entry, exerciseOrName))
     .sort((a, b) => a.date.localeCompare(b.date) || String(a.createdAt || "").localeCompare(String(b.createdAt || "")));
   return newestFirst ? entries.reverse() : entries;
+}
+
+function exerciseUsageStats(exerciseOrName) {
+  const entries = exerciseHistoryForIdentity(exerciseOrName, state.workouts, true);
+  return {
+    sessionCount: entries.length,
+    lastUsedAt: entries[0]?.date || "",
+    hasLogs: entries.length > 0
+  };
+}
+
+function exerciseRemovalMode(exerciseOrName) {
+  return exerciseUsageStats(exerciseOrName).hasLogs ? "archive" : "delete";
+}
+
+function exerciseCoverageStats() {
+  const active = getCustomExercises();
+  return muscleGroups.map((muscle) => {
+    const count = active.filter((exercise) => (exercise.primaryMuscles || []).includes(muscle.id)).length;
+    return { ...muscle, count, missing: count === 0 };
+  });
+}
+
+function exerciseMatchesMuscle(exercise, muscleId) {
+  if (!muscleId || muscleId === "all") return true;
+  return (exercise.primaryMuscles || []).includes(muscleId) || (exercise.secondaryMuscles || []).includes(muscleId);
+}
+
+function filteredExerciseList(options = {}) {
+  const search = normalizeName(options.search ?? state.exerciseSearch);
+  const muscle = options.muscle ?? state.exerciseMuscleFilter ?? "all";
+  const sort = options.sort ?? state.exerciseSort ?? "recent";
+  let exercises = getCustomExercises({ includeArchived: options.includeArchived === true })
+    .filter((exercise) => options.archivedOnly ? !!exercise.archivedAt : !exercise.archivedAt)
+    .filter((exercise) => !search || normalizeName(exercise.name).includes(search))
+    .filter((exercise) => exerciseMatchesMuscle(exercise, muscle));
+
+  const usageById = new Map(exercises.map((exercise) => [exercise.id, exerciseUsageStats(exercise)]));
+  exercises = exercises.sort((a, b) => {
+    const aUsage = usageById.get(a.id);
+    const bUsage = usageById.get(b.id);
+    if (sort === "most") {
+      return (bUsage.sessionCount - aUsage.sessionCount) || a.name.localeCompare(b.name);
+    }
+    if (sort === "muscle") {
+      const muscleCompare = muscleLabel(a.primaryMuscles?.[0]).localeCompare(muscleLabel(b.primaryMuscles?.[0]));
+      return muscleCompare || a.name.localeCompare(b.name);
+    }
+    if (sort === "az") return a.name.localeCompare(b.name);
+    return String(bUsage.lastUsedAt || "").localeCompare(String(aUsage.lastUsedAt || "")) || a.name.localeCompare(b.name);
+  });
+  return exercises;
 }
 
 function workoutMeta(entry) {
@@ -667,6 +729,97 @@ function parseRepRange(value) {
   if (!nums.length) return { low: 8, high: 15 };
   if (nums.length === 1) return { low: Math.max(1, nums[0] - 2), high: nums[0] };
   return { low: Math.max(1, nums[0]), high: Math.max(nums[0], nums[1]) };
+}
+
+function normalizeRepRangeInput(value) {
+  const text = String(value || "").trim();
+  if (!text) return "8-15";
+  const match = /^(\d+)(?:\s*-\s*(\d+))?$/.exec(text);
+  if (!match) return null;
+  const low = Number(match[1]);
+  const high = match[2] ? Number(match[2]) : null;
+  if (low <= 0 || (high !== null && (high <= 0 || high < low))) return null;
+  return high === null ? String(low) : `${low}-${high}`;
+}
+
+function parseRestInputPart(value) {
+  const text = String(value || "").trim().toLowerCase();
+  const clock = /^(\d+):([0-5]\d)$/.exec(text);
+  if (clock) return Number(clock[1]) * 60 + Number(clock[2]);
+  const simple = /^(\d+)(?:\s*(sec|secs|second|seconds|s|min|mins|minute|minutes|m))?$/.exec(text);
+  if (!simple) return null;
+  const amount = Number(simple[1]);
+  if (amount <= 0) return null;
+  const unit = simple[2] || "sec";
+  return unit.startsWith("m") && unit !== "ms" ? amount * 60 : amount;
+}
+
+function normalizeRestRangeInput(value) {
+  const text = String(value || "").trim();
+  if (!text) return "60-120 sec";
+  const parts = text.split(/\s*-\s*/);
+  if (parts.length > 2) return null;
+  const first = parseRestInputPart(parts[0]);
+  const second = parts.length === 2 ? parseRestInputPart(parts[1]) : null;
+  if (!Number.isFinite(first) || first <= 0) return null;
+  if (parts.length === 2 && (!Number.isFinite(second) || second < first)) return null;
+  return parts.length === 2 ? `${first}-${second} sec` : `${first} sec`;
+}
+
+function formDataValue(data, key) {
+  if (data?.get) return data.get(key);
+  return data?.[key];
+}
+
+function formDataValues(data, key) {
+  if (data?.getAll) return data.getAll(key);
+  const value = data?.[key];
+  return Array.isArray(value) ? value : value === undefined || value === null ? [] : [value];
+}
+
+function exerciseFormValuesFromInput(data = {}) {
+  return {
+    name: String(formDataValue(data, "name") || "").trim(),
+    primaryMuscle: String(formDataValue(data, "primaryMuscle") || "chest"),
+    secondaryMuscles: formDataValues(data, "secondaryMuscles").map((value) => String(value)),
+    equipment: String(formDataValue(data, "equipment") || "").trim(),
+    reps: String(formDataValue(data, "reps") || "").trim(),
+    rest: String(formDataValue(data, "rest") || "").trim(),
+    cue: String(formDataValue(data, "cue") || "").trim()
+  };
+}
+
+function validateExerciseFormInput(data = {}, editingId = state.editingExerciseId) {
+  const values = exerciseFormValuesFromInput(data);
+  const errors = {};
+  const validMuscleIds = new Set(muscleGroups.map((muscle) => muscle.id));
+  if (!values.name) errors.name = "Exercise name is required.";
+  const primaryMuscle = validMuscleIds.has(values.primaryMuscle) ? values.primaryMuscle : "chest";
+  const duplicate = getCustomExercises({ includeArchived: true }).find((exercise) => (
+    exercise.id !== editingId && normalizeName(exercise.name) === normalizeName(values.name)
+  ));
+  if (duplicate) errors.name = "That custom exercise already exists.";
+  const reps = normalizeRepRangeInput(values.reps);
+  if (!reps) errors.reps = "Use a rep target like 10 or 8-15.";
+  const rest = normalizeRestRangeInput(values.rest);
+  if (!rest) errors.rest = "Use rest like 60 sec, 90-120 sec, or 1:30.";
+  const secondaryMuscles = uniqueMuscles(values.secondaryMuscles).filter((muscle) => muscle !== primaryMuscle);
+
+  if (Object.keys(errors).length) return { ok: false, errors, values: { ...values, primaryMuscle } };
+  return {
+    ok: true,
+    errors: {},
+    values: { ...values, primaryMuscle },
+    exercise: {
+      name: values.name,
+      primaryMuscles: [primaryMuscle],
+      secondaryMuscles,
+      equipment: values.equipment || "custom",
+      reps,
+      rest,
+      cue: values.cue || "Custom exercise. Keep form strict and progress gradually."
+    }
+  };
 }
 
 function exerciseHistoryEntries(exerciseName, newestFirst = true) {
@@ -2377,6 +2530,16 @@ function refreshNutritionFormTotals(form = document.getElementById("metric-form"
   });
 }
 
+function syncSecondaryMuscleCheckboxes(form = document.getElementById("exercise-form")) {
+  if (!form) return;
+  const primary = form.querySelector("#exercise-primary")?.value || "";
+  form.querySelectorAll('input[name="secondaryMuscles"]').forEach((input) => {
+    const isPrimary = input.value === primary;
+    input.disabled = isPrimary;
+    if (isPrimary) input.checked = false;
+  });
+}
+
 function defaultSetRows(count = 3) {
   return Array.from({ length: count }, () => ({ weight: "", reps: 10, rir: 2, restSeconds: null }));
 }
@@ -2860,11 +3023,11 @@ async function deleteDayTemplate() {
   toast("Template deleted.");
 }
 
-function secondaryMuscleCheckboxes(selected = []) {
+function secondaryMuscleCheckboxes(selected = [], primaryMuscle = "") {
   const selectedSet = new Set(selected);
   return muscleGroups.map((muscle) => `
     <label class="check-card">
-      <input type="checkbox" name="secondaryMuscles" value="${muscle.id}" ${selectedSet.has(muscle.id) ? "checked" : ""}>
+      <input type="checkbox" name="secondaryMuscles" value="${muscle.id}" ${selectedSet.has(muscle.id) ? "checked" : ""} ${primaryMuscle === muscle.id ? "disabled" : ""}>
       <span>${escapeHtml(muscle.label)}</span>
     </label>
   `).join("");
@@ -2880,33 +3043,135 @@ function exerciseMuscleBadges(exercise) {
   return `<div class="badge-row">${primary}${secondary}</div>`;
 }
 
-function exerciseCard(exercise, editable = false) {
+function exerciseFormErrorMarkup(errors = {}, key) {
+  return errors[key] ? `<p class="exercise-form-error" role="alert">${escapeHtml(errors[key])}</p>` : "";
+}
+
+function exerciseFormValues(editing = null) {
+  if (state.exerciseFormDraft) return state.exerciseFormDraft;
+  return {
+    name: editing?.name || "",
+    primaryMuscle: editing?.primaryMuscles?.[0] || state.draftTargetMuscle || "chest",
+    secondaryMuscles: editing?.secondaryMuscles || [],
+    equipment: editing?.equipment || "",
+    reps: editing?.reps || "",
+    rest: editing?.rest || "",
+    cue: editing?.cue || ""
+  };
+}
+
+function exerciseUsageMetaMarkup(exercise) {
+  const usage = exerciseUsageStats(exercise);
   return `
-    <div class="exercise-definition ${editable ? "custom" : ""}">
-      <div>
-        <div class="exercise-definition-title">
-          <strong>${escapeHtml(exercise.name)}</strong>
-        </div>
-        ${exerciseMuscleBadges(exercise)}
-        <p class="muted small">${escapeHtml(exercise.equipment || "custom")} - ${escapeHtml(exercise.reps || "8-15")} reps - ${escapeHtml(exercise.rest || "60-120 sec")}</p>
-        <p class="muted micro">${escapeHtml(exercise.cue || "Keep form strict and progress gradually.")}</p>
-      </div>
-      <div class="row-actions">
-        <button class="ghost-mini" type="button" data-action="log-exercise" data-exercise="${escapeHtml(exercise.name)}">Log</button>
-        ${editable ? `<button class="ghost-mini" type="button" data-action="edit-exercise" data-id="${escapeHtml(exercise.id)}">Edit</button>` : ""}
-        ${editable ? `<button class="delete-small" type="button" aria-label="Delete exercise" data-action="delete-exercise" data-id="${escapeHtml(exercise.id)}">x</button>` : ""}
+    <div class="exercise-card-meta">
+      <span><strong>${usage.sessionCount}</strong><small>sessions</small></span>
+      <span><strong>${usage.lastUsedAt ? escapeHtml(formatShortDate(usage.lastUsedAt)) : "--"}</strong><small>last used</small></span>
+      <span class="exercise-status-pill ${exercise.archivedAt ? "archived" : "active"}">${exercise.archivedAt ? "Archived" : "Active"}</span>
+    </div>
+  `;
+}
+
+function exerciseCardActions(exercise, editable = false) {
+  if (!editable) return "";
+  const archived = !!exercise.archivedAt;
+  const removalMode = exerciseRemovalMode(exercise);
+  const secondary = archived
+    ? `
+      <button class="ghost-mini" type="button" data-action="restore-exercise" data-id="${escapeHtml(exercise.id)}">Restore</button>
+      ${removalMode === "delete" ? `<button class="delete-small text-delete" type="button" data-action="delete-exercise" data-id="${escapeHtml(exercise.id)}">Delete</button>` : ""}
+    `
+    : `
+      <button class="ghost-mini" type="button" data-action="edit-exercise" data-id="${escapeHtml(exercise.id)}">Edit</button>
+      <button class="ghost-mini" type="button" data-action="archive-exercise" data-id="${escapeHtml(exercise.id)}">${removalMode === "archive" ? "Archive" : "Delete"}</button>
+    `;
+  const menuOpen = state.openExerciseActionMenu === exercise.id;
+  return `
+    <div class="row-actions exercise-card-actions">
+      ${archived ? "" : `<button class="ghost-mini primary-card-action" type="button" data-action="log-exercise" data-exercise="${escapeHtml(exercise.name)}">Log</button>`}
+      <div class="exercise-secondary-actions">${secondary}</div>
+      <div class="exercise-action-menu-wrap">
+        <button class="icon-button" type="button" aria-label="Exercise actions" data-action="toggle-exercise-action-menu" data-id="${escapeHtml(exercise.id)}">...</button>
+        ${menuOpen ? `<div class="exercise-action-menu">${secondary}</div>` : ""}
       </div>
     </div>
   `;
 }
 
+function exerciseCard(exercise, editable = false) {
+  return `
+    <div class="exercise-definition ${editable ? "custom" : ""} ${exercise.archivedAt ? "removed-exercise" : ""}">
+      <div>
+        <div class="exercise-definition-title">
+          <strong>${escapeHtml(exercise.name)}</strong>
+        </div>
+        ${exerciseMuscleBadges(exercise)}
+        ${exerciseUsageMetaMarkup(exercise)}
+        <p class="muted small">${escapeHtml(exercise.equipment || "custom")} - ${escapeHtml(exercise.reps || "8-15")} reps - ${escapeHtml(exercise.rest || "60-120 sec")}</p>
+        <p class="muted micro">${escapeHtml(exercise.cue || "Keep form strict and progress gradually.")}</p>
+      </div>
+      ${exerciseCardActions(exercise, editable)}
+    </div>
+  `;
+}
+
+function exerciseCoverageMarkup() {
+  return `
+    <section class="section chart-panel exercise-coverage-panel">
+      <div class="chart-header">
+        <h3>Primary coverage</h3>
+        <span class="muted small">${exerciseCoverageStats().filter((item) => !item.missing).length}/${muscleGroups.length} muscles covered</span>
+      </div>
+      <div class="exercise-coverage-grid">
+        ${exerciseCoverageStats().map((item) => `
+          <div class="coverage-chip ${item.missing ? "is-missing" : ""}">
+            <span><strong>${escapeHtml(item.label)}</strong><small>${item.count} primary</small></span>
+            ${item.missing ? `<button class="ghost-mini" type="button" data-action="exercise-add-primary" data-muscle-id="${item.id}">Add primary</button>` : ""}
+          </div>
+        `).join("")}
+      </div>
+    </section>
+  `;
+}
+
+function exerciseLibraryControlsMarkup() {
+  return `
+    <section class="section form-panel exercise-library-controls">
+      <div class="field exercise-search-field">
+        <label for="exercise-search">Search exercises</label>
+        <input id="exercise-search" data-exercise-search value="${escapeHtml(state.exerciseSearch)}" placeholder="Bench, row, curl">
+      </div>
+      <div class="exercise-control-row">
+        <div class="exercise-filter-row" aria-label="Filter exercises by muscle">
+          <button class="pill ${state.exerciseMuscleFilter === "all" ? "is-active" : ""}" type="button" data-action="exercise-filter-muscle" data-muscle-id="all">All</button>
+          ${muscleGroups.map((muscle) => `
+            <button class="pill ${state.exerciseMuscleFilter === muscle.id ? "is-active" : ""}" type="button" data-action="exercise-filter-muscle" data-muscle-id="${muscle.id}">${escapeHtml(muscle.label)}</button>
+          `).join("")}
+        </div>
+        <div class="field compact-field exercise-sort-field">
+          <label for="exercise-sort">Sort</label>
+          <select id="exercise-sort" data-exercise-sort>
+            <option value="recent" ${state.exerciseSort === "recent" ? "selected" : ""}>Recent</option>
+            <option value="az" ${state.exerciseSort === "az" ? "selected" : ""}>A-Z</option>
+            <option value="muscle" ${state.exerciseSort === "muscle" ? "selected" : ""}>Muscle</option>
+            <option value="most" ${state.exerciseSort === "most" ? "selected" : ""}>Most logged</option>
+          </select>
+        </div>
+      </div>
+    </section>
+  `;
+}
+
 function renderExercises() {
-  const customExercises = getCustomExercises();
-  const editing = customExercises.find((exercise) => exercise.id === state.editingExerciseId);
-  const primary = editing?.primaryMuscles?.[0] || "chest";
+  const allCustomExercises = getCustomExercises({ includeArchived: true });
+  const editing = allCustomExercises.find((exercise) => exercise.id === state.editingExerciseId);
+  const values = exerciseFormValues(editing);
+  const errors = state.exerciseFormErrors || {};
+  const primary = values.primaryMuscle || "chest";
   const primaryOptions = muscleGroups.map((muscle) => `
     <option value="${muscle.id}" ${primary === muscle.id ? "selected" : ""}>${escapeHtml(muscle.label)}</option>
   `).join("");
+  const visibleExercises = filteredExerciseList();
+  const archivedExercises = filteredExerciseList({ includeArchived: true, archivedOnly: true, search: state.exerciseSearch, muscle: state.exerciseMuscleFilter, sort: "az" });
 
   return `
     <section class="hero">
@@ -2916,13 +3181,16 @@ function renderExercises() {
       </div>
     </section>
 
+    ${exerciseCoverageMarkup()}
+
     <section class="section form-panel">
       <h3>${editing ? "Edit exercise" : "Add exercise"}</h3>
       <form id="exercise-form">
         <div class="field-row exercise-form-grid">
           <div class="field">
             <label for="exercise-name">Exercise name</label>
-            <input id="exercise-name" name="name" required placeholder="V-Bar Pulldown" value="${escapeHtml(editing?.name || "")}">
+            <input id="exercise-name" name="name" required placeholder="V-Bar Pulldown" value="${escapeHtml(values.name || "")}">
+            ${exerciseFormErrorMarkup(errors, "name")}
           </div>
           <div class="field">
             <label for="exercise-primary">Primary muscle</label>
@@ -2931,25 +3199,27 @@ function renderExercises() {
         </div>
         <div class="field">
           <label>Secondary muscles</label>
-          <div class="checkbox-grid">${secondaryMuscleCheckboxes(editing?.secondaryMuscles || [])}</div>
+          <div class="checkbox-grid">${secondaryMuscleCheckboxes(values.secondaryMuscles || [], primary)}</div>
         </div>
         <div class="field-row">
           <div class="field">
             <label for="exercise-equipment">Equipment</label>
-            <input id="exercise-equipment" name="equipment" placeholder="Cable, dumbbell, machine" value="${escapeHtml(editing?.equipment || "")}">
+            <input id="exercise-equipment" name="equipment" placeholder="Cable, dumbbell, machine" value="${escapeHtml(values.equipment || "")}">
           </div>
           <div class="field">
             <label for="exercise-reps">Rep range</label>
-            <input id="exercise-reps" name="reps" placeholder="8-15" value="${escapeHtml(editing?.reps || "")}">
+            <input id="exercise-reps" name="reps" placeholder="8-15" value="${escapeHtml(values.reps || "")}">
+            ${exerciseFormErrorMarkup(errors, "reps")}
           </div>
           <div class="field">
             <label for="exercise-rest">Rest range</label>
-            <input id="exercise-rest" name="rest" placeholder="60-120 sec" value="${escapeHtml(editing?.rest || "")}">
+            <input id="exercise-rest" name="rest" placeholder="60-120 sec" value="${escapeHtml(values.rest || "")}">
+            ${exerciseFormErrorMarkup(errors, "rest")}
           </div>
         </div>
         <div class="field">
           <label for="exercise-cue">Cue / notes</label>
-          <textarea id="exercise-cue" name="cue" placeholder="Setup, form cues, pain-free path, progression notes.">${escapeHtml(editing?.cue || "")}</textarea>
+          <textarea id="exercise-cue" name="cue" placeholder="Setup, form cues, pain-free path, progression notes.">${escapeHtml(values.cue || "")}</textarea>
         </div>
         <div class="grid two">
           <button class="primary-button" type="submit">${editing ? "Update exercise" : "Save exercise"}</button>
@@ -2958,13 +3228,25 @@ function renderExercises() {
       </form>
     </section>
 
+    ${exerciseLibraryControlsMarkup()}
+
     <section class="section chart-panel">
       <div class="chart-header">
         <h3>Your exercise database</h3>
-        <span class="muted small">${customExercises.length} custom</span>
+        <span class="muted small">${visibleExercises.length}/${getCustomExercises().length} active</span>
       </div>
       <div class="exercise-list">
-        ${customExercises.length ? customExercises.map((exercise) => exerciseCard(exercise, true)).join("") : `<div class="empty">Add the movements you actually do, then TrainWise can credit them to the right muscle groups.</div>`}
+        ${visibleExercises.length ? visibleExercises.map((exercise) => exerciseCard(exercise, true)).join("") : `<div class="empty">No active exercises match this view.</div>`}
+      </div>
+    </section>
+
+    <section class="section chart-panel">
+      <div class="chart-header">
+        <h3>Archived exercises</h3>
+        <span class="muted small">${archivedExercises.length} archived</span>
+      </div>
+      <div class="exercise-list">
+        ${archivedExercises.length ? archivedExercises.map((exercise) => exerciseCard(exercise, true)).join("") : `<div class="empty">Archived movements will appear here when you retire them.</div>`}
       </div>
     </section>
   `;
@@ -2998,9 +3280,18 @@ function exerciseMuscleIcons(meta) {
 }
 
 function exerciseOptions(selected) {
-  return exerciseNames().map((name) => `
+  const activeNames = exerciseNames();
+  const options = activeNames.map((name) => `
     <option value="${escapeHtml(name)}" ${name === selected ? "selected" : ""}>${escapeHtml(name)}</option>
-  `).join("");
+  `);
+  if (selected && !activeNames.includes(selected)) {
+    const archived = getCustomExercises({ includeArchived: true }).find((exercise) => normalizeName(exercise.name) === normalizeName(selected) && exercise.archivedAt);
+    const label = archived ? `${selected} (archived)` : `${selected} (not in library)`;
+    options.unshift(`
+    <option value="${escapeHtml(selected)}" selected>${escapeHtml(label)}</option>
+  `);
+  }
+  return options.join("");
 }
 
 function muscleOptions(selected) {
@@ -3767,28 +4058,20 @@ async function render({ animate = false } = {}) {
 
 async function saveExercise(form) {
   const formData = new FormData(form);
-  const name = String(formData.get("name") || "").trim();
-  if (!name) throw new Error("Exercise name is required.");
-  const primaryMuscle = String(formData.get("primaryMuscle") || "chest");
-  const secondaryMuscles = formData.getAll("secondaryMuscles")
-    .map((value) => String(value))
-    .filter((muscle) => muscle !== primaryMuscle);
-  const customExercises = getCustomExercises();
-  const duplicate = customExercises.find((exercise) => (
-    exercise.id !== state.editingExerciseId && normalizeName(exercise.name) === normalizeName(name)
-  ));
-  if (duplicate) throw new Error("That custom exercise already exists.");
-
+  const validation = validateExerciseFormInput(formData);
+  if (!validation.ok) {
+    state.exerciseFormDraft = validation.values;
+    state.exerciseFormErrors = validation.errors;
+    await render();
+    toast("Fix exercise fields.");
+    return;
+  }
+  const customExercises = getCustomExercises({ includeArchived: true });
   const existing = customExercises.find((exercise) => exercise.id === state.editingExerciseId);
   const exercise = normalizeExerciseDefinition({
     id: existing?.id || `user-${uid()}`,
-    name,
-    primaryMuscles: [primaryMuscle],
-    secondaryMuscles,
-    equipment: String(formData.get("equipment") || "").trim() || "custom",
-    reps: String(formData.get("reps") || "").trim() || "8-15",
-    rest: String(formData.get("rest") || "").trim() || "60-120 sec",
-    cue: String(formData.get("cue") || "").trim() || "Custom exercise. Keep form strict and progress gradually.",
+    ...validation.exercise,
+    archivedAt: existing?.archivedAt || "",
     createdAt: existing?.createdAt || new Date().toISOString(),
     updatedAt: new Date().toISOString()
   });
@@ -3798,6 +4081,8 @@ async function saveExercise(form) {
 
   await saveSetting("customExercises", nextExercises);
   state.editingExerciseId = null;
+  state.exerciseFormDraft = null;
+  state.exerciseFormErrors = {};
   state.selectedExercise = exercise.name;
   state.draftTargetMuscle = exercise.primaryMuscles[0] || "chest";
   await render();
@@ -4016,7 +4301,7 @@ function exportSafeSettings() {
     hypertrophyProfile: hypertrophySettings(),
     nutritionGoal: selectedNutritionGoal(),
     dayTemplates: getDayTemplates(),
-    customExercises: getCustomExercises(),
+    customExercises: getCustomExercises({ includeArchived: true }),
     lastBackupAt: new Date().toISOString()
   };
 }
@@ -4488,16 +4773,86 @@ async function handleAction(action, target) {
     async "edit-exercise"() {
       state.activeTab = "exercises";
       state.editingExerciseId = target.dataset.id;
+      state.exerciseFormDraft = null;
+      state.exerciseFormErrors = {};
+      state.openExerciseActionMenu = null;
       await render();
     },
-    async "cancel-exercise-edit"() { state.editingExerciseId = null; await render(); },
-    async "exercise-clear-form"() { state.editingExerciseId = null; await render(); },
-    async "delete-exercise"() {
-      const exercise = getCustomExercises().find((item) => item.id === target.dataset.id);
+    async "cancel-exercise-edit"() {
+      state.editingExerciseId = null;
+      state.exerciseFormDraft = null;
+      state.exerciseFormErrors = {};
+      await render();
+    },
+    async "exercise-clear-form"() {
+      state.editingExerciseId = null;
+      state.exerciseFormDraft = null;
+      state.exerciseFormErrors = {};
+      await render();
+    },
+    async "toggle-exercise-action-menu"() {
+      state.openExerciseActionMenu = state.openExerciseActionMenu === target.dataset.id ? null : target.dataset.id;
+      await render();
+    },
+    async "exercise-filter-muscle"() {
+      state.exerciseMuscleFilter = target.dataset.muscleId || "all";
+      await render();
+    },
+    async "exercise-add-primary"() {
+      const muscleId = target.dataset.muscleId;
+      if (!muscleGroups.some((muscle) => muscle.id === muscleId)) return;
+      state.editingExerciseId = null;
+      state.exerciseFormErrors = {};
+      state.exerciseFormDraft = {
+        name: "",
+        primaryMuscle: muscleId,
+        secondaryMuscles: [],
+        equipment: "",
+        reps: "",
+        rest: "",
+        cue: ""
+      };
+      await render();
+    },
+    async "archive-exercise"() {
+      const exercises = getCustomExercises({ includeArchived: true });
+      const exercise = exercises.find((item) => item.id === target.dataset.id);
       if (!exercise) throw new Error("Exercise not found.");
-      if (!confirm(`Delete "${exercise.name}" from your exercise database? Existing logs stay intact.`)) return;
-      await saveSetting("customExercises", getCustomExercises().filter((item) => item.id !== exercise.id));
+      const mode = exerciseRemovalMode(exercise);
+      if (mode === "delete") {
+        if (!confirm(`Delete "${exercise.name}" from your exercise database?`)) return;
+        await saveSetting("customExercises", exercises.filter((item) => item.id !== exercise.id));
+        toast("Exercise deleted.");
+      } else {
+        if (!confirm(`Archive "${exercise.name}"? Existing logs stay intact.`)) return;
+        const archived = { ...exercise, archivedAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+        await saveSetting("customExercises", exercises.map((item) => item.id === exercise.id ? archived : item));
+        toast("Exercise archived.");
+      }
       if (state.editingExerciseId === exercise.id) state.editingExerciseId = null;
+      state.openExerciseActionMenu = null;
+      await render();
+    },
+    async "restore-exercise"() {
+      const exercises = getCustomExercises({ includeArchived: true });
+      const exercise = exercises.find((item) => item.id === target.dataset.id);
+      if (!exercise) throw new Error("Exercise not found.");
+      const restored = { ...exercise, updatedAt: new Date().toISOString() };
+      delete restored.archivedAt;
+      await saveSetting("customExercises", exercises.map((item) => item.id === exercise.id ? restored : item));
+      state.openExerciseActionMenu = null;
+      await render();
+      toast("Exercise restored.");
+    },
+    async "delete-exercise"() {
+      const exercises = getCustomExercises({ includeArchived: true });
+      const exercise = exercises.find((item) => item.id === target.dataset.id);
+      if (!exercise) throw new Error("Exercise not found.");
+      if (exerciseRemovalMode(exercise) !== "delete") throw new Error("Archived exercises with logs can be restored, not permanently deleted.");
+      if (!confirm(`Permanently delete "${exercise.name}" from your exercise database?`)) return;
+      await saveSetting("customExercises", exercises.filter((item) => item.id !== exercise.id));
+      if (state.editingExerciseId === exercise.id) state.editingExerciseId = null;
+      state.openExerciseActionMenu = null;
       await render();
       toast("Exercise deleted.");
     },
@@ -4791,6 +5146,13 @@ document.addEventListener("change", async (event) => {
       state.selectedExercise = event.target.value;
       await render();
     }
+    if (event.target.matches("#exercise-primary")) {
+      syncSecondaryMuscleCheckboxes(event.target.closest("#exercise-form"));
+    }
+    if (event.target.matches("[data-exercise-sort]")) {
+      state.exerciseSort = ["recent", "az", "muscle", "most"].includes(event.target.value) ? event.target.value : "recent";
+      await render();
+    }
     if (event.target.matches("#history-date")) {
       state.historyMode = "dates";
       state.historyDate = event.target.value || "";
@@ -4824,6 +5186,14 @@ document.addEventListener("input", async (event) => {
       state.historySearch = event.target.value;
       await render();
       const input = document.getElementById("history-search");
+      input?.focus();
+      input?.setSelectionRange?.(caret, caret);
+    }
+    if (event.target.matches("[data-exercise-search]")) {
+      const caret = event.target.selectionStart || 0;
+      state.exerciseSearch = event.target.value;
+      await render();
+      const input = document.getElementById("exercise-search");
       input?.focus();
       input?.setSelectionRange?.(caret, caret);
     }

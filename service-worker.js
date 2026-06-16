@@ -1,27 +1,27 @@
 "use strict";
 
-const CACHE_NAME = "trainwise-cache-v39";
+const CACHE_NAME = "trainwise-cache-v40";
 const ASSETS = [
   "./",
   "./index.html",
-  "./styles.css?v=1.5.17",
-  "./app.js?v=1.5.17",
-  "./manifest.webmanifest?v=1.5.17",
-  "./icon.svg?v=1.5.17",
-  "./icon-512.png?v=1.5.17",
-  "./apple-touch-icon.png?v=1.5.17",
-  "./assets/muscles/abs.png?v=1.5.17",
-  "./assets/muscles/back.png?v=1.5.17",
-  "./assets/muscles/bicep.png?v=1.5.17",
-  "./assets/muscles/calves.png?v=1.5.17",
-  "./assets/muscles/chest.png?v=1.5.17",
-  "./assets/muscles/glutes.png?v=1.5.17",
-  "./assets/muscles/hamstrings.png?v=1.5.17",
-  "./assets/muscles/quads.png?v=1.5.17",
-  "./assets/muscles/shoulders.png?v=1.5.17",
-  "./assets/muscles/triceps.png?v=1.5.17",
-  "./assets/dumbbell.png?v=1.5.17",
-  "./assets/dumbbell.svg?v=1.5.17"
+  "./styles.css?v=1.5.18",
+  "./app.js?v=1.5.18",
+  "./manifest.webmanifest?v=1.5.18",
+  "./icon.svg?v=1.5.18",
+  "./icon-512.png?v=1.5.18",
+  "./apple-touch-icon.png?v=1.5.18",
+  "./assets/muscles/abs.png?v=1.5.18",
+  "./assets/muscles/back.png?v=1.5.18",
+  "./assets/muscles/bicep.png?v=1.5.18",
+  "./assets/muscles/calves.png?v=1.5.18",
+  "./assets/muscles/chest.png?v=1.5.18",
+  "./assets/muscles/glutes.png?v=1.5.18",
+  "./assets/muscles/hamstrings.png?v=1.5.18",
+  "./assets/muscles/quads.png?v=1.5.18",
+  "./assets/muscles/shoulders.png?v=1.5.18",
+  "./assets/muscles/triceps.png?v=1.5.18",
+  "./assets/dumbbell.png?v=1.5.18",
+  "./assets/dumbbell.svg?v=1.5.18"
 ];
 
 function shouldHandleRequest(request) {
@@ -30,12 +30,10 @@ function shouldHandleRequest(request) {
   const url = new URL(request.url);
   return url.origin === self.location.origin;
 }
-
 function shouldCacheResponse(request, response) {
   if (!shouldHandleRequest(request)) return false;
   return !!response?.ok && response.type !== "opaque";
 }
-
 self.addEventListener("install", (event) => {
   event.waitUntil(
     caches.open(CACHE_NAME)
