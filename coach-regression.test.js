@@ -920,4 +920,41 @@ const muscleChartScale = runScenario(`
 
 assert.strictEqual(muscleChartScale, 50, `Expected 10 sets to fill half of the 20-set chart target, got ${muscleChartScale}`);
 
+const pendingBodyweightDraft = runScenario(`
+  ${resetAndHelpers}
+  state.settings.customExercises = [{
+    id: "pushup",
+    name: "Push-up",
+    primaryMuscles: ["chest"],
+    secondaryMuscles: ["triceps"],
+    equipment: "bodyweight",
+    reps: "8-20",
+    rest: "60-90 sec",
+    cue: "Bodyweight pending test.",
+    userCreated: true
+  }];
+  state.draftDate = todayISO();
+  state.workoutDraft = [{
+    draftId: "pushup-draft",
+    editingWorkoutId: null,
+    exercise: "Push-up",
+    targetMuscle: "chest",
+    notes: "",
+    setRows: [
+      { weight: 0, reps: 12, rir: 2, restSeconds: 60 },
+      { weight: 0, reps: 10, rir: 2, restSeconds: 60 }
+    ]
+  }];
+  var pending = coachPendingWorkoutEntries();
+  ({
+    count: pending.length,
+    sets: pending[0]?.sets || 0,
+    weight: pending[0]?.weight ?? null
+  });
+`);
+
+assert.strictEqual(pendingBodyweightDraft.count, 1, `Expected unsaved bodyweight draft to count as pending Coach work, got ${pendingBodyweightDraft.count}`);
+assert.strictEqual(pendingBodyweightDraft.sets, 2, `Expected pending bodyweight draft sets to count, got ${pendingBodyweightDraft.sets}`);
+assert.strictEqual(pendingBodyweightDraft.weight, 0, `Expected pending bodyweight draft to allow zero load, got ${pendingBodyweightDraft.weight}`);
+
 console.log("coach regression tests passed");
