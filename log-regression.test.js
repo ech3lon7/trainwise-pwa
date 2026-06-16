@@ -558,6 +558,41 @@ assert.deepEqual(coachPlanCopy.firstWeights, [100, 120], `Expected copied previo
 assert.strictEqual(coachPlanCopy.repeatedPrevious, 95, `Expected missing planned sets to repeat last previous row, got ${coachPlanCopy.repeatedPrevious}`);
 assert(coachPlanCopy.editingIds.every((id) => id === null), "Expected Coach copied drafts to be unsaved templates.");
 
+const coachPlanCopyUsesPlanTarget = runScenario(`
+  ${reset}
+  state.workouts = [
+    makeWorkout({
+      exercise: "Bench Press",
+      exerciseId: "custom-bench",
+      primaryMuscles: ["chest"],
+      secondaryMuscles: ["triceps"],
+      setRows: [
+        { weight: 100, reps: 10, rir: 0, restSeconds: 120 },
+        { weight: 95, reps: 9, rir: 1, restSeconds: 120 }
+      ]
+    })
+  ];
+  copyCoachPlanToLog({
+    sessionPlan: {
+      items: [
+        {
+          exercise: resolveExerciseMeta("Bench Press"),
+          muscle: { id: "chest" },
+          sets: 2,
+          reason: "Bench reset",
+          planTarget: { kind: "reset", label: "Reset target 95 lb", loadMultiplier: 0.95 }
+        }
+      ]
+    }
+  });
+  state.workoutDraft[0].setRows.map((row) => ({ weight: row.weight, reps: row.reps, rir: row.rir }));
+`);
+
+assert.deepEqual(coachPlanCopyUsesPlanTarget, [
+  { weight: 95, reps: 10, rir: 2 },
+  { weight: 90, reps: 9, rir: 2 }
+], `Expected Coach reset target to adjust copied set rows, got ${JSON.stringify(coachPlanCopyUsesPlanTarget)}`);
+
 const emptyDateReset = runScenario(`
   ${reset}
   state.workouts = [makeWorkout({ date: "2026-06-10" })];

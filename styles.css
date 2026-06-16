@@ -736,6 +736,13 @@ textarea {
   line-height: 1.35;
 }
 
+.today-plan-target {
+  display: block;
+  margin-top: 3px;
+  color: var(--text) !important;
+  font-weight: 800;
+}
+
 .today-plan-dose {
   display: grid;
   place-items: center;
