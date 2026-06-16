@@ -166,6 +166,37 @@ h3 {
   gap: 8px;
 }
 
+.log-draft-notice {
+  position: fixed;
+  left: max(16px, calc((100vw - 920px) / 2));
+  right: max(16px, calc((100vw - 920px) / 2));
+  bottom: calc(18px + env(safe-area-inset-bottom));
+  z-index: 26;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  padding: 10px 12px;
+  border: 1px solid rgba(53, 213, 140, 0.34);
+  border-radius: 8px;
+  background: rgba(15, 20, 16, 0.98);
+  box-shadow: 0 14px 38px rgba(0, 0, 0, 0.28);
+}
+
+.log-draft-notice p {
+  margin: 3px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.3;
+}
+
+.log-draft-notice-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
 .modal-backdrop {
   position: fixed;
   inset: 0;
@@ -2378,6 +2409,17 @@ textarea {
 
   .app-banner-actions {
     justify-content: flex-start;
+  }
+
+  .log-draft-notice {
+    left: 12px;
+    right: 12px;
+    bottom: calc(94px + env(safe-area-inset-bottom));
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .log-draft-notice p {
+    display: none;
   }
 
   .mobile-quick-actions {

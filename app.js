@@ -3,7 +3,7 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 2;
 const STORES = ["workouts", "metrics", "settings"];
-const APP_VERSION = "1.5.19";
+const APP_VERSION = "1.5.20";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 const DRAFT_RECOVERY_KEY = "trainwise-draft-recovery-v1";
 let dbOpenPromise = null;
@@ -137,6 +137,7 @@ const state = {
   draggingDraftId: null,
   quickActionsOpen: false,
   appBanner: null,
+  logDraftNotice: null,
   undoAction: null,
   pendingImport: null,
   dismissedRecordTrophies: new Set(),
@@ -303,6 +304,19 @@ function announce(message, options = {}) {
 
 function clearBanner() {
   state.appBanner = null;
+}
+
+function showLogDraftNotice() {
+  if (state.activeTab !== "log") return;
+  state.logDraftNotice = {
+    id: uid(),
+    message: "Draft saved locally.",
+    detail: "Restore it if the Log screen gets cleared before lock-in."
+  };
+}
+
+function clearLogDraftNotice() {
+  state.logDraftNotice = null;
 }
 
 function setUndoAction(label, payload) {
@@ -1516,14 +1530,7 @@ function preserveVisibleDraft(reason = "navigation") {
   if (active === "log" && state.logMode === "strength") readDraftFromForm();
   if (active === "log" && state.logMode === "metrics") state.metricFormDraft = metricDraftFromForm();
   if (active === "exercises") state.exerciseFormDraft = exerciseFormDraftFromForm() || state.exerciseFormDraft;
-  if (saveDraftRecovery(reason)) {
-    showBanner("Draft saved locally.", {
-      tone: "good",
-      detail: "You can restore it from this banner if a date or tab change clears the screen.",
-      action: "restore-draft",
-      actionLabel: "Restore"
-    });
-  }
+  saveDraftRecovery(reason);
 }
 
 function coachPendingWorkoutEntries() {
@@ -4137,6 +4144,37 @@ function renderAppBanner() {
   `;
 }
 
+function renderLogDraftNotice() {
+  if (state.activeTab !== "log" || !state.logDraftNotice) return "";
+  const notice = state.logDraftNotice;
+  return `
+    <section class="log-draft-notice" role="status" aria-live="polite">
+      <div>
+        <strong>${escapeHtml(notice.message)}</strong>
+        <p>${escapeHtml(notice.detail)}</p>
+      </div>
+      <div class="log-draft-notice-actions">
+        <button class="ghost-mini" type="button" data-action="restore-draft">Restore</button>
+        <button class="icon-button" type="button" data-action="dismiss-log-draft-notice" aria-label="Dismiss draft saved message">x</button>
+      </div>
+    </section>
+  `;
+}
+
+function syncLogDraftNoticeDom() {
+  const existing = document.querySelector(".log-draft-notice");
+  const markup = renderLogDraftNotice();
+  if (!markup) {
+    existing?.remove();
+    return;
+  }
+  if (existing) {
+    existing.outerHTML = markup;
+    return;
+  }
+  els.app.insertAdjacentHTML("afterbegin", markup);
+}
+
 function renderMobileQuickActions() {
   const plan = buildTodayPlan(selectedCoachTimeframeMinutes());
   const canCopyPlan = !!plan.sessionPlan.items.length;
@@ -4183,7 +4221,7 @@ function renderImportPreview() {
 }
 
 function renderAppChrome() {
-  return `${renderAppBanner()}${renderImportPreview()}${renderMobileQuickActions()}`;
+  return `${renderAppBanner()}${renderImportPreview()}${renderLogDraftNotice()}${renderMobileQuickActions()}`;
 }
 
 function dataSafetySummaryMarkup() {
@@ -5205,9 +5243,14 @@ async function handleAction(action, target) {
       clearBanner();
       await render();
     },
+    async "dismiss-log-draft-notice"() {
+      clearLogDraftNotice();
+      syncLogDraftNoticeDom();
+    },
     async "undo-last-action"() { await undoLastAction(); },
     async "restore-draft"() {
       if (!restoreDraftRecovery()) throw new Error("No saved draft found.");
+      clearLogDraftNotice();
       showBanner("Draft restored.", { tone: "good" });
       await render();
     },
@@ -5824,17 +5867,26 @@ document.addEventListener("input", async (event) => {
     }
     if (event.target.closest("#metric-form") && !event.target.matches("[data-shared-date-input]")) {
       state.metricFormDraft = metricDraftFromForm(event.target.closest("#metric-form"));
-      saveDraftRecovery("nutrition-input");
+      if (saveDraftRecovery("nutrition-input")) {
+        showLogDraftNotice();
+        syncLogDraftNoticeDom();
+      }
     }
     if (event.target.matches("[data-set-field]")) {
       const section = event.target.closest(".exercise-draft");
       readDraftFromForm();
-      saveDraftRecovery("strength-input");
+      if (saveDraftRecovery("strength-input")) {
+        showLogDraftNotice();
+        syncLogDraftNoticeDom();
+      }
       if (section?.dataset.draftId) refreshDraftRecordTrophies(section.dataset.draftId);
     }
     if (event.target.matches("[data-draft-field='notes']")) {
       readDraftFromForm();
-      saveDraftRecovery("strength-input");
+      if (saveDraftRecovery("strength-input")) {
+        showLogDraftNotice();
+        syncLogDraftNoticeDom();
+      }
     }
     if (event.target.matches("[data-history-search]")) {
       const caret = event.target.selectionStart || 0;

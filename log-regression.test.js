@@ -145,9 +145,9 @@ assert(stylesCode.includes(".modal-backdrop"), "Expected import preview modal st
 assert(stylesCode.includes(".data-safety-grid"), "Expected data safety summary styling.");
 assert(stylesCode.includes(".widget-preference-list"), "Expected Today widget preference styling.");
 assert(stylesCode.includes(".collapsible-panel"), "Expected secondary settings/notes panels to be collapsible.");
-assert(indexCode.includes("v=1.5.19"), "Expected index shell references to use bumped app version.");
+assert(indexCode.includes("v=1.5.20"), "Expected index shell references to use bumped app version.");
 assert(!indexCode.includes('id="app" class="app-content" aria-live'), "Expected broad app aria-live to be removed in favor of targeted live regions.");
-assert(serviceWorkerCode.includes("trainwise-cache-v41"), "Expected service worker cache version bump.");
+assert(serviceWorkerCode.includes("trainwise-cache-v42"), "Expected service worker cache version bump.");
 
 const nutritionQuickTotals = runScenario(`
   ${reset}
@@ -1018,7 +1018,9 @@ assert.strictEqual(exerciseCoverageAndFilters.hasArchiveSection, true, "Expected
 const mobileQolMarkup = runScenario(`
   ${reset}
   state.quickActionsOpen = true;
-  state.appBanner = { message: "Draft saved locally.", tone: "good", detail: "Restore it.", action: "restore-draft", actionLabel: "Restore" };
+  state.activeTab = "log";
+  state.appBanner = { message: "Workout locked in.", tone: "good", detail: "Undo is available.", action: "undo-last-action", actionLabel: "Undo" };
+  state.logDraftNotice = { message: "Draft saved locally.", detail: "Restore it." };
   state.pendingImport = {
     source: "test-backup.json",
     summary: { workouts: 2, metrics: 1, customExercises: 3, newestDate: "2026-06-15" }
@@ -1027,6 +1029,8 @@ const mobileQolMarkup = runScenario(`
   state.settings.dashboardWidgetOrder = ["health", "weeklySets", "nextLift", "lowestSets", "bodyWeight", "protein"];
   ({
     banner: renderAppBanner(),
+    logNotice: renderLogDraftNotice(),
+    hiddenNotice: (state.activeTab = "exercises", renderLogDraftNotice()),
     quick: renderMobileQuickActions(),
     modal: renderImportPreview(),
     widgets: selectedDashboardWidgets(),
@@ -1036,8 +1040,11 @@ const mobileQolMarkup = runScenario(`
   });
 `);
 
-assert(mobileQolMarkup.banner.includes("Draft saved locally."), "Expected app banner to render persistent message.");
-assert(mobileQolMarkup.banner.includes('data-action="restore-draft"'), "Expected banner action to be rendered.");
+assert(!mobileQolMarkup.banner.includes("Draft saved locally."), "Expected draft-save message to stay out of the top app banner.");
+assert(mobileQolMarkup.banner.includes("Workout locked in."), "Expected normal app banner messages to remain supported.");
+assert(mobileQolMarkup.logNotice.includes("Draft saved locally."), "Expected Log draft notice to render the draft-save message.");
+assert(mobileQolMarkup.logNotice.includes('data-action="restore-draft"'), "Expected Log draft notice to include restore action.");
+assert.strictEqual(mobileQolMarkup.hiddenNotice, "", "Expected Log draft notice to stay hidden outside the Log tab.");
 assert(mobileQolMarkup.quick.includes("Log strength"), "Expected quick action sheet to include strength logging.");
 assert(mobileQolMarkup.quick.includes("Log nutrition"), "Expected quick action sheet to include nutrition logging.");
 assert(mobileQolMarkup.quick.includes("Copy Coach plan"), "Expected quick action sheet to include Coach copy.");
