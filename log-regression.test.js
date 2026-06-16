@@ -727,6 +727,68 @@ const removedExerciseDeletion = runScenario(`
 
 assert.deepEqual(removedExerciseDeletion, ["row"], `Expected removed same-date exercise to be deleted on save, got ${removedExerciseDeletion.join(", ")}`);
 
+const lockInUndoRemovesChartEntry = runScenario(`
+  ${reset}
+  var badEntry = makeWorkout({
+    id: "bad-lock",
+    setRows: [{ weight: 0, reps: 1, rir: 2, restSeconds: 120 }],
+    weight: 0,
+    reps: 1
+  });
+  state.workouts = [badEntry];
+  var before = seriesFromWorkouts("Bench Press", workoutVolume);
+  var payload = workoutSaveUndoPayload([badEntry], [], []);
+  state.workouts = applyWorkoutSaveUndoSnapshot(state.workouts, payload);
+  var after = seriesFromWorkouts("Bench Press", workoutVolume);
+  ({
+    undoType: payload.type,
+    savedEntryIds: payload.savedEntryIds,
+    previousCount: payload.previousEntries.length,
+    beforeCount: before.length,
+    beforeVolume: before[0]?.value,
+    afterCount: after.length
+  });
+`);
+
+assert.strictEqual(lockInUndoRemovesChartEntry.undoType, "save-workout", "Expected lock-in save to create a workout undo payload.");
+assert.deepEqual(lockInUndoRemovesChartEntry.savedEntryIds, ["bad-lock"], `Expected undo to target the saved workout, got ${lockInUndoRemovesChartEntry.savedEntryIds.join(", ")}`);
+assert.strictEqual(lockInUndoRemovesChartEntry.previousCount, 0, "Expected new lock-in undo not to restore prior entries.");
+assert.strictEqual(lockInUndoRemovesChartEntry.beforeCount, 1, "Expected accidental lock-in to appear in chart series before undo.");
+assert.strictEqual(lockInUndoRemovesChartEntry.beforeVolume, 0, `Expected accidental zero-volume lock-in to tank chart value, got ${lockInUndoRemovesChartEntry.beforeVolume}`);
+assert.strictEqual(lockInUndoRemovesChartEntry.afterCount, 0, "Expected undoing lock-in to remove the saved entry from chart series.");
+
+const updateUndoRestoresPreviousChartEntry = runScenario(`
+  ${reset}
+  var previous = makeWorkout({
+    id: "bench-edit",
+    setRows: [{ weight: 100, reps: 10, rir: 2, restSeconds: 120 }],
+    weight: 100,
+    reps: 10
+  });
+  var updated = makeWorkout({
+    id: "bench-edit",
+    setRows: [{ weight: 0, reps: 1, rir: 2, restSeconds: 120 }],
+    weight: 0,
+    reps: 1
+  });
+  state.workouts = [updated];
+  var before = seriesFromWorkouts("Bench Press", workoutVolume);
+  var payload = workoutSaveUndoPayload([updated], [], [previous]);
+  state.workouts = applyWorkoutSaveUndoSnapshot(state.workouts, payload);
+  var after = seriesFromWorkouts("Bench Press", workoutVolume);
+  ({
+    previousCount: payload.previousEntries.length,
+    beforeVolume: before[0]?.value,
+    afterVolume: after[0]?.value,
+    afterCount: after.length
+  });
+`);
+
+assert.strictEqual(updateUndoRestoresPreviousChartEntry.previousCount, 1, "Expected update undo to snapshot the overwritten workout.");
+assert.strictEqual(updateUndoRestoresPreviousChartEntry.beforeVolume, 0, `Expected bad update to show zero volume before undo, got ${updateUndoRestoresPreviousChartEntry.beforeVolume}`);
+assert.strictEqual(updateUndoRestoresPreviousChartEntry.afterVolume, 1000, `Expected undoing update to restore previous chart volume, got ${updateUndoRestoresPreviousChartEntry.afterVolume}`);
+assert.strictEqual(updateUndoRestoresPreviousChartEntry.afterCount, 1, "Expected undoing update to keep the restored chart entry.");
+
 const backupValidation = runScenario(`
   ${reset}
   var invalidMessage = "";

@@ -4479,6 +4479,8 @@ async function saveWorkout(form) {
   });
 
   const staleWorkoutIds = staleWorkoutIdsForSavedDraft(data.date, entries);
+  const undoPayload = workoutSaveUndoPayload(entries, staleWorkoutIds);
+  setUndoAction(hadExisting ? "Undo workout update" : "Undo workout lock-in", undoPayload);
   await dbPutBatch("workouts", entries);
   await Promise.all(staleWorkoutIds.map((id) => dbDelete("workouts", id)));
   const first = entries[0];
@@ -4500,7 +4502,12 @@ async function saveWorkout(form) {
   state.loadedWorkoutDateIds = entries.map((entry) => entry.id).filter(Boolean);
   await loadState();
   clearDraftRecovery();
-  announce(hadExisting ? "Workout updated." : "Workout locked in.", { tone: "good" });
+  announce(hadExisting ? "Workout updated." : "Workout locked in.", {
+    tone: "good",
+    detail: "Charts updated. Undo is available if this was accidental.",
+    action: "undo-last-action",
+    actionLabel: "Undo"
+  });
   await render();
 }
 
@@ -4848,6 +4855,11 @@ async function undoLastAction() {
   const { payload } = undo;
   if (payload.type === "delete-workout" && payload.entry) {
     await dbPut("workouts", payload.entry);
+  } else if (payload.type === "save-workout") {
+    const restoredEntries = [...(payload.previousEntries || []), ...(payload.staleEntries || [])];
+    await Promise.all((payload.savedEntryIds || []).map((id) => dbDelete("workouts", id)));
+    await dbPutBatch("workouts", restoredEntries);
+    clearWorkoutDraft(payload.date || todayISO());
   } else if (payload.type === "delete-metrics" && Array.isArray(payload.entries)) {
     for (const entry of payload.entries) await dbPut("metrics", entry);
   } else if (payload.type === "custom-exercises" && Array.isArray(payload.previous)) {
@@ -5085,6 +5097,40 @@ function staleWorkoutIdsForSavedDraft(date, savedEntries = []) {
     const existing = state.workouts.find((entry) => entry.id === id);
     return existing?.date === date;
   });
+}
+
+function clonePlain(value) {
+  return value === undefined ? value : JSON.parse(JSON.stringify(value));
+}
+
+function workoutSaveUndoPayload(savedEntries = [], staleWorkoutIds = [], workouts = state.workouts) {
+  const workoutById = new Map((workouts || []).map((entry) => [entry.id, entry]));
+  const savedEntryIds = savedEntries.map((entry) => entry.id).filter(Boolean);
+  const previousEntries = savedEntryIds
+    .map((id) => workoutById.get(id))
+    .filter(Boolean)
+    .map(clonePlain);
+  const staleEntries = (staleWorkoutIds || [])
+    .map((id) => workoutById.get(id))
+    .filter(Boolean)
+    .map(clonePlain);
+  return {
+    type: "save-workout",
+    date: savedEntries[0]?.date || previousEntries[0]?.date || staleEntries[0]?.date || state.draftDate || todayISO(),
+    savedEntryIds,
+    previousEntries,
+    staleEntries
+  };
+}
+
+function applyWorkoutSaveUndoSnapshot(workouts = [], payload = {}) {
+  const removeIds = new Set(payload.savedEntryIds || []);
+  const restored = [...(payload.previousEntries || []), ...(payload.staleEntries || [])].map(clonePlain);
+  const restoredIds = new Set(restored.map((entry) => entry.id).filter(Boolean));
+  return [
+    ...(workouts || []).filter((entry) => !removeIds.has(entry.id) && !restoredIds.has(entry.id)),
+    ...restored
+  ];
 }
 
 function clearWorkoutDraft(date = todayISO()) {
