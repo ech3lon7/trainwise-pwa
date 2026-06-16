@@ -6,6 +6,7 @@ let appCode = fs.readFileSync("app.js", "utf8");
 appCode = appCode.replace(/init\(\)\.catch\([\s\S]*?\n\}\);\s*$/, "");
 const stylesCode = fs.readFileSync("styles.css", "utf8");
 const serviceWorkerCode = fs.readFileSync("service-worker.js", "utf8");
+const indexCode = fs.readFileSync("index.html", "utf8");
 
 const context = {
   console,
@@ -137,6 +138,16 @@ assert(appCode.includes("Stored only in this browser on this device"), "Expected
 assert(stylesCode.includes(".exercise-library-controls"), "Expected Exercises library controls to have dedicated styling.");
 assert(stylesCode.includes(".exercise-coverage-grid"), "Expected Exercises coverage panel to have dedicated styling.");
 assert(stylesCode.includes(".exercise-action-menu"), "Expected Exercises card action menu styling.");
+assert(stylesCode.includes(".mobile-quick-actions"), "Expected mobile quick actions to have dedicated styling.");
+assert(stylesCode.includes(".app-banner"), "Expected persistent app banner styling.");
+assert(stylesCode.includes(".date-control"), "Expected shared date control styling.");
+assert(stylesCode.includes(".modal-backdrop"), "Expected import preview modal styling.");
+assert(stylesCode.includes(".data-safety-grid"), "Expected data safety summary styling.");
+assert(stylesCode.includes(".widget-preference-list"), "Expected Today widget preference styling.");
+assert(stylesCode.includes(".collapsible-panel"), "Expected secondary settings/notes panels to be collapsible.");
+assert(indexCode.includes("v=1.5.19"), "Expected index shell references to use bumped app version.");
+assert(!indexCode.includes('id="app" class="app-content" aria-live'), "Expected broad app aria-live to be removed in favor of targeted live regions.");
+assert(serviceWorkerCode.includes("trainwise-cache-v41"), "Expected service worker cache version bump.");
 
 const nutritionQuickTotals = runScenario(`
   ${reset}
@@ -941,6 +952,73 @@ assert.deepEqual(exerciseCoverageAndFilters.archivedNames, ["Curl"], `Expected a
 assert.strictEqual(exerciseCoverageAndFilters.hasSearch, true, "Expected Exercises markup to include search input.");
 assert.strictEqual(exerciseCoverageAndFilters.hasCoverage, true, "Expected Exercises markup to include coverage panel.");
 assert.strictEqual(exerciseCoverageAndFilters.hasArchiveSection, true, "Expected Exercises markup to include archived section.");
+
+const mobileQolMarkup = runScenario(`
+  ${reset}
+  state.quickActionsOpen = true;
+  state.appBanner = { message: "Draft saved locally.", tone: "good", detail: "Restore it.", action: "restore-draft", actionLabel: "Restore" };
+  state.pendingImport = {
+    source: "test-backup.json",
+    summary: { workouts: 2, metrics: 1, customExercises: 3, newestDate: "2026-06-15" }
+  };
+  state.settings.dashboardWidgets = ["health", "weeklySets"];
+  state.settings.dashboardWidgetOrder = ["health", "weeklySets", "nextLift", "lowestSets", "bodyWeight", "protein"];
+  ({
+    banner: renderAppBanner(),
+    quick: renderMobileQuickActions(),
+    modal: renderImportPreview(),
+    widgets: selectedDashboardWidgets(),
+    order: dashboardWidgetOrder(),
+    date: renderDateControl({ id: "workout-date", name: "date", value: "2026-06-15" }),
+    settings: renderDashboardWidgetSelector()
+  });
+`);
+
+assert(mobileQolMarkup.banner.includes("Draft saved locally."), "Expected app banner to render persistent message.");
+assert(mobileQolMarkup.banner.includes('data-action="restore-draft"'), "Expected banner action to be rendered.");
+assert(mobileQolMarkup.quick.includes("Log strength"), "Expected quick action sheet to include strength logging.");
+assert(mobileQolMarkup.quick.includes("Log nutrition"), "Expected quick action sheet to include nutrition logging.");
+assert(mobileQolMarkup.quick.includes("Copy Coach plan"), "Expected quick action sheet to include Coach copy.");
+assert(mobileQolMarkup.modal.includes("Review backup import"), "Expected import preview dialog.");
+assert(mobileQolMarkup.modal.includes("2</strong> workouts"), "Expected import preview workout count.");
+assert.deepEqual(mobileQolMarkup.widgets, ["health", "weeklySets"], `Expected selected dashboard widgets to persist, got ${mobileQolMarkup.widgets.join(", ")}`);
+assert.strictEqual(mobileQolMarkup.order[0], "health", `Expected widget order to persist, got ${mobileQolMarkup.order.join(", ")}`);
+assert(mobileQolMarkup.date.includes('data-action="date-step"'), "Expected shared date control to include previous/next actions.");
+assert(mobileQolMarkup.date.includes('data-action="date-today"'), "Expected shared date control to include Today action.");
+assert(mobileQolMarkup.settings.includes('data-action="toggle-dashboard-widget"'), "Expected widget settings markup to include preference controls.");
+
+const backupPreviewSummary = runScenario(`
+  ${reset}
+  var summary = backupImportSummary({
+    settings: {
+      customExercises: [
+        { id: "custom-bench", name: "Bench Press", primaryMuscles: ["chest"], secondaryMuscles: [], reps: "8-12", rest: "90 sec" }
+      ],
+      dashboardWidgets: ["health"],
+      dashboardWidgetOrder: ["health", "nextLift"]
+    },
+    workouts: [
+      makeWorkout({ id: "w1", date: "2026-06-14" }),
+      makeWorkout({ id: "w2", date: "2026-06-16" })
+    ],
+    metrics: [
+      { id: "m1", date: "2026-06-15", calories: 2400, protein: 180 }
+    ]
+  });
+  ({
+    workouts: summary.workouts,
+    metrics: summary.metrics,
+    customExercises: summary.customExercises,
+    newestDate: summary.newestDate,
+    dashboardWidgets: summary.normalized.settings.dashboardWidgets
+  });
+`);
+
+assert.strictEqual(backupPreviewSummary.workouts, 2, `Expected import summary workout count, got ${backupPreviewSummary.workouts}`);
+assert.strictEqual(backupPreviewSummary.metrics, 1, `Expected import summary metric count, got ${backupPreviewSummary.metrics}`);
+assert.strictEqual(backupPreviewSummary.customExercises, 1, `Expected import summary exercise count, got ${backupPreviewSummary.customExercises}`);
+assert.strictEqual(backupPreviewSummary.newestDate, "2026-06-16", `Expected newest import date, got ${backupPreviewSummary.newestDate}`);
+assert.deepEqual(backupPreviewSummary.dashboardWidgets, ["health"], `Expected dashboard widgets to normalize through import summary, got ${backupPreviewSummary.dashboardWidgets.join(", ")}`);
 
 const supabasePasswordExport = runScenario(`
   ${reset}

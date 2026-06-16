@@ -39,6 +39,16 @@ button {
   cursor: pointer;
 }
 
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+summary:focus-visible,
+.interactive-chart:focus-visible {
+  outline: 2px solid rgba(53, 213, 140, 0.75);
+  outline-offset: 3px;
+}
+
 @keyframes fadeInUp {
   from { opacity: 0; transform: translateY(12px); }
   to { opacity: 1; transform: translateY(0); }
@@ -119,6 +129,64 @@ h3 {
   max-width: 920px;
   margin: 0 auto;
   min-width: 0;
+}
+
+.app-banner {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  margin-bottom: 14px;
+  padding: 12px;
+  border: 1px solid rgba(53, 213, 140, 0.22);
+  border-radius: 8px;
+  background: rgba(23, 27, 23, 0.96);
+  box-shadow: 0 12px 34px rgba(0, 0, 0, 0.2);
+}
+
+.app-banner.warn {
+  border-color: rgba(242, 208, 107, 0.28);
+}
+
+.app-banner.good {
+  border-color: rgba(53, 213, 140, 0.34);
+}
+
+.app-banner p {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.app-banner-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 35;
+  display: grid;
+  place-items: end center;
+  padding: 16px 14px calc(104px + env(safe-area-inset-bottom));
+  background: rgba(0, 0, 0, 0.48);
+}
+
+.modal-panel {
+  width: min(100%, 560px);
+  padding: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  background: rgba(23, 27, 23, 0.98);
+  box-shadow: 0 22px 60px rgba(0, 0, 0, 0.36);
+}
+
+.import-preview-grid {
+  margin: 12px 0;
 }
 
 .app-content.content-enter {
@@ -334,6 +402,50 @@ h3 {
   color: var(--green);
 }
 
+.mobile-quick-actions {
+  display: none;
+}
+
+.mobile-quick-toggle {
+  display: grid;
+  place-items: center;
+  width: 56px;
+  height: 56px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--green);
+  color: #08120b;
+  font-size: 30px;
+  font-weight: 900;
+  box-shadow: 0 14px 30px rgba(53, 213, 140, 0.26);
+}
+
+.mobile-quick-sheet {
+  display: grid;
+  gap: 8px;
+  width: min(260px, calc(100vw - 28px));
+  margin-bottom: 10px;
+  padding: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  background: rgba(18, 22, 18, 0.96);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.34);
+  backdrop-filter: blur(16px);
+}
+
+.mobile-quick-sheet button {
+  min-height: 44px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text);
+  font-weight: 800;
+}
+
+.mobile-quick-sheet button:disabled {
+  opacity: 0.5;
+}
+
 .ghost-button {
   padding: 0 14px;
   border: 1px solid rgba(255, 255, 255, 0.12);
@@ -411,6 +523,125 @@ textarea {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 10px;
+}
+
+.date-control-field {
+  width: 100%;
+}
+
+.date-control {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr) 44px auto auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.date-control input {
+  min-width: 0;
+}
+
+.date-step-button {
+  min-height: 44px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text);
+  font-size: 24px;
+  line-height: 1;
+}
+
+.date-today-button,
+.date-clear-button {
+  min-width: 74px;
+  white-space: nowrap;
+}
+
+.data-safety-grid,
+.widget-preference-list {
+  display: grid;
+  gap: 8px;
+}
+
+.data-safety-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.data-safety-grid span,
+.widget-preference-row {
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.045);
+}
+
+.data-safety-grid strong {
+  display: block;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.data-safety-grid small {
+  display: block;
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.widget-preference-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+}
+
+.widget-preference-row strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.widget-toggle {
+  min-width: 74px;
+}
+
+.compact-reorder {
+  margin: 0;
+}
+
+.collapsible-panel summary {
+  cursor: pointer;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  min-height: 44px;
+  list-style: none;
+}
+
+.collapsible-panel summary::-webkit-details-marker {
+  display: none;
+}
+
+.collapsible-panel summary span {
+  color: var(--text);
+  font-size: 18px;
+  font-weight: 800;
+}
+
+.collapsible-panel summary small {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.collapsible-panel[open] summary {
+  margin-bottom: 12px;
 }
 
 .metric-daily-row {
@@ -658,6 +889,10 @@ textarea {
   line-height: 1.45;
 }
 
+.coach-notes-panel .coach-card + .coach-card {
+  margin-top: 8px;
+}
+
 .coach-action h3 {
   margin-top: 8px;
 }
@@ -741,6 +976,18 @@ textarea {
   margin-top: 3px;
   color: var(--text) !important;
   font-weight: 800;
+}
+
+.mini-action-row {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+
+.mini-action-row .ghost-mini {
+  min-height: 32px;
+  padding: 0 9px;
 }
 
 .today-plan-dose {
@@ -2121,6 +2368,31 @@ textarea {
 }
 
 @media (max-width: 720px) {
+  .app-shell {
+    padding-bottom: calc(120px + env(safe-area-inset-bottom));
+  }
+
+  .app-banner {
+    grid-template-columns: 1fr;
+  }
+
+  .app-banner-actions {
+    justify-content: flex-start;
+  }
+
+  .mobile-quick-actions {
+    position: fixed;
+    right: 20px;
+    bottom: calc(82px + env(safe-area-inset-bottom));
+    z-index: 24;
+    display: grid;
+    justify-items: end;
+  }
+
+  .modal-backdrop {
+    padding-bottom: calc(128px + env(safe-area-inset-bottom));
+  }
+
   .grid.two,
   .grid.three,
   .grid.four,
@@ -2139,6 +2411,32 @@ textarea {
 
   .field-row {
     grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .date-control {
+    grid-template-columns: 42px minmax(0, 1fr) 42px;
+  }
+
+  .date-today-button,
+  .date-clear-button {
+    grid-column: span 1;
+    min-width: 0;
+  }
+
+  .date-control .date-today-button {
+    grid-column: 1 / 3;
+  }
+
+  .date-control .date-clear-button {
+    grid-column: 3 / 4;
+  }
+
+  .data-safety-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .widget-preference-row {
+    grid-template-columns: auto minmax(0, 1fr) auto;
   }
 
   .metric-daily-row,
@@ -2350,6 +2648,28 @@ textarea {
 
   .field-row {
     grid-template-columns: 1fr;
+  }
+
+  .date-control {
+    grid-template-columns: 38px minmax(0, 1fr) 38px;
+    gap: 6px;
+  }
+
+  .date-control .ghost-button {
+    min-width: 0;
+  }
+
+  .data-safety-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .widget-preference-row {
+    grid-template-columns: 1fr auto;
+  }
+
+  .widget-toggle {
+    grid-column: 1 / -1;
+    width: 100%;
   }
 
   .nutrition-total-strip {

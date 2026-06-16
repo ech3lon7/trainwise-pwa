@@ -3,8 +3,9 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 2;
 const STORES = ["workouts", "metrics", "settings"];
-const APP_VERSION = "1.5.18";
+const APP_VERSION = "1.5.19";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
+const DRAFT_RECOVERY_KEY = "trainwise-draft-recovery-v1";
 let dbOpenPromise = null;
 let chartId = 0;
 let reloadingForUpdate = false;
@@ -29,6 +30,15 @@ const NUTRITION_MEALS = [
   { id: "dinner", label: "Dinner" },
   { id: "snacks", label: "Snacks" }
 ];
+const TODAY_WIDGET_OPTIONS = [
+  { id: "nextLift", label: "Next lift" },
+  { id: "lowestSets", label: "Lowest set counts" },
+  { id: "health", label: "Health coach" },
+  { id: "weeklySets", label: "Weekly hard sets" },
+  { id: "bodyWeight", label: "Body weight" },
+  { id: "protein", label: "Protein" }
+];
+const DEFAULT_TODAY_WIDGETS = TODAY_WIDGET_OPTIONS.map((option) => option.id);
 
 const HYPERTROPHY = {
   minimumSets: 10,
@@ -111,6 +121,7 @@ const state = {
   exerciseSort: "recent",
   exerciseFormDraft: null,
   exerciseFormErrors: {},
+  metricFormDraft: null,
   openExerciseActionMenu: null,
   editingWorkoutId: null,
   openExerciseMenu: null,
@@ -124,6 +135,10 @@ const state = {
   coachTimeframeMinutes: SESSION_LIMIT_MINUTES,
   coachTargetMuscles: [],
   draggingDraftId: null,
+  quickActionsOpen: false,
+  appBanner: null,
+  undoAction: null,
+  pendingImport: null,
   dismissedRecordTrophies: new Set(),
   templateQueue: [],
   draftDate: todayISO(),
@@ -185,6 +200,37 @@ function formatShortDate(value) {
   return date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
+function formatDateTime(value) {
+  if (!value) return "Never";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "Never";
+  return date.toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+}
+
+function shiftISODate(value, deltaDays) {
+  const date = parseLocalDate(value || todayISO());
+  if (Number.isNaN(date.getTime())) return todayISO();
+  date.setDate(date.getDate() + deltaDays);
+  return isoFromLocalDate(date);
+}
+
+function renderDateControl({ id, name = "", label = "Date", value = todayISO(), className = "", inputClass = "", clearable = false, required = true } = {}) {
+  const safeId = escapeHtml(id);
+  const safeValue = escapeHtml(value || todayISO());
+  return `
+    <div class="field date-control-field ${escapeHtml(className)}">
+      <label for="${safeId}">${escapeHtml(label)}</label>
+      <div class="date-control">
+        <button class="date-step-button" type="button" data-action="date-step" data-date-input="${safeId}" data-date-delta="-1" aria-label="Previous day">&lsaquo;</button>
+        <input id="${safeId}" class="${escapeHtml(inputClass)}" ${name ? `name="${escapeHtml(name)}"` : ""} type="date" ${required ? "required" : ""} value="${safeValue}" data-shared-date-input>
+        <button class="date-step-button" type="button" data-action="date-step" data-date-input="${safeId}" data-date-delta="1" aria-label="Next day">&rsaquo;</button>
+        <button class="ghost-button date-today-button" type="button" data-action="date-today" data-date-input="${safeId}">Today</button>
+        ${clearable ? `<button class="ghost-button date-clear-button" type="button" data-action="date-clear" data-date-input="${safeId}">Clear</button>` : ""}
+      </div>
+    </div>
+  `;
+}
+
 function parseNum(value) {
   const num = Number(value);
   return Number.isFinite(num) ? num : 0;
@@ -237,6 +283,82 @@ function toast(message) {
   els.toast.classList.add("show");
   window.clearTimeout(toast.timer);
   toast.timer = window.setTimeout(() => els.toast.classList.remove("show"), 2600);
+}
+
+function showBanner(message, options = {}) {
+  state.appBanner = {
+    id: uid(),
+    message,
+    tone: options.tone || "info",
+    action: options.action || "",
+    actionLabel: options.actionLabel || "",
+    detail: options.detail || ""
+  };
+}
+
+function announce(message, options = {}) {
+  showBanner(message, options);
+  toast(message);
+}
+
+function clearBanner() {
+  state.appBanner = null;
+}
+
+function setUndoAction(label, payload) {
+  state.undoAction = {
+    id: uid(),
+    label,
+    payload,
+    createdAt: new Date().toISOString()
+  };
+}
+
+function clearUndoAction() {
+  state.undoAction = null;
+}
+
+function safeLocalStorageGet(key) {
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function safeLocalStorageSet(key, value) {
+  try {
+    localStorage.setItem(key, value);
+  } catch {}
+}
+
+function safeLocalStorageRemove(key) {
+  try {
+    localStorage.removeItem(key);
+  } catch {}
+}
+
+function selectedDashboardWidgets() {
+  const valid = new Set(TODAY_WIDGET_OPTIONS.map((option) => option.id));
+  const saved = Array.isArray(state.settings.dashboardWidgets) ? state.settings.dashboardWidgets : DEFAULT_TODAY_WIDGETS;
+  const filtered = saved.filter((id, index, items) => valid.has(id) && items.indexOf(id) === index);
+  return filtered.length ? filtered : [...DEFAULT_TODAY_WIDGETS];
+}
+
+function dashboardWidgetOrder() {
+  const valid = new Set(TODAY_WIDGET_OPTIONS.map((option) => option.id));
+  const saved = Array.isArray(state.settings.dashboardWidgetOrder) ? state.settings.dashboardWidgetOrder : DEFAULT_TODAY_WIDGETS;
+  const ordered = saved.filter((id, index, items) => valid.has(id) && items.indexOf(id) === index);
+  const missing = DEFAULT_TODAY_WIDGETS.filter((id) => !ordered.includes(id));
+  return [...ordered, ...missing];
+}
+
+async function saveDashboardWidgets(enabled, order = dashboardWidgetOrder()) {
+  const valid = new Set(TODAY_WIDGET_OPTIONS.map((option) => option.id));
+  const nextEnabled = enabled.filter((id, index, items) => valid.has(id) && items.indexOf(id) === index);
+  const nextOrder = order.filter((id, index, items) => valid.has(id) && items.indexOf(id) === index);
+  await saveSetting("dashboardWidgets", nextEnabled.length ? nextEnabled : [...DEFAULT_TODAY_WIDGETS]);
+  await saveSetting("dashboardWidgetOrder", nextOrder.length ? nextOrder : [...DEFAULT_TODAY_WIDGETS]);
 }
 
 function sleep(ms) {
@@ -1086,6 +1208,26 @@ function metricEntryFromFormData(data = {}, existing = null) {
   };
 }
 
+function metricDraftFromForm(form = document.getElementById("metric-form")) {
+  if (!form) return null;
+  const data = Object.fromEntries(new FormData(form));
+  const date = data.date || state.metricDate || todayISO();
+  const hasInput = parseNum(data.bodyWeight) > 0
+    || parseNum(data.calories) > 0
+    || parseNum(data.protein) > 0
+    || String(data.notes || "").trim()
+    || nutritionMealsHaveData(nutritionMealsFromData(data));
+  return hasInput ? { date, data, updatedAt: new Date().toISOString() } : null;
+}
+
+function metricEntryForForm(date = state.metricDate || todayISO()) {
+  const saved = metricForDate(date);
+  if (state.metricFormDraft?.date === date) {
+    return metricEntryFromFormData(state.metricFormDraft.data, saved);
+  }
+  return saved || { date, bodyWeight: 0, calories: 0, protein: 0, meals: emptyNutritionMeals(), notes: "" };
+}
+
 function getAverage(field, days) {
   const start = recentDays(days);
   const values = canonicalMetricEntries()
@@ -1286,6 +1428,102 @@ function draftHasMeaningfulWorkoutInput(draft) {
     || (row.rir !== null && row.rir !== 2)
     || (row.restSeconds !== null && row.restSeconds > 0)
   ));
+}
+
+function hasMeaningfulStrengthDraft() {
+  return Array.isArray(state.workoutDraft) && state.workoutDraft.some(draftHasMeaningfulWorkoutInput);
+}
+
+function exerciseFormDraftFromForm(form = document.getElementById("exercise-form")) {
+  if (!form) return null;
+  const values = exerciseFormValuesFromInput(new FormData(form));
+  const hasInput = values.name
+    || values.equipment
+    || values.reps
+    || values.rest
+    || values.cue
+    || (values.secondaryMuscles || []).length
+    || values.primaryMuscle !== "chest";
+  return hasInput ? values : null;
+}
+
+function draftRecoveryPayload(reason = "draft") {
+  return {
+    version: APP_VERSION,
+    reason,
+    savedAt: new Date().toISOString(),
+    strength: hasMeaningfulStrengthDraft()
+      ? {
+          date: state.draftDate,
+          selectedExercise: state.selectedExercise,
+          draftTargetMuscle: state.draftTargetMuscle,
+          workoutDraft: state.workoutDraft
+        }
+      : null,
+    metric: state.metricFormDraft || metricDraftFromForm(),
+    exercise: state.exerciseFormDraft || exerciseFormDraftFromForm()
+  };
+}
+
+function saveDraftRecovery(reason = "draft") {
+  const payload = draftRecoveryPayload(reason);
+  if (!payload.strength && !payload.metric && !payload.exercise) {
+    safeLocalStorageRemove(DRAFT_RECOVERY_KEY);
+    return false;
+  }
+  safeLocalStorageSet(DRAFT_RECOVERY_KEY, JSON.stringify(payload));
+  return true;
+}
+
+function clearDraftRecovery() {
+  safeLocalStorageRemove(DRAFT_RECOVERY_KEY);
+}
+
+function restoreDraftRecovery(payload = null) {
+  let recovery = payload;
+  if (!recovery) {
+    try {
+      recovery = JSON.parse(safeLocalStorageGet(DRAFT_RECOVERY_KEY) || "null");
+    } catch {
+      recovery = null;
+    }
+  }
+  if (!recovery || typeof recovery !== "object") return false;
+  if (recovery.strength?.workoutDraft?.length) {
+    state.draftDate = recovery.strength.date || todayISO();
+    state.selectedExercise = recovery.strength.selectedExercise || state.selectedExercise;
+    state.draftTargetMuscle = recovery.strength.draftTargetMuscle || state.draftTargetMuscle;
+    state.workoutDraft = recovery.strength.workoutDraft.map((draft) => ({
+      ...draft,
+      draftId: draft.draftId || uid(),
+      setRows: normalizeSetRows(draft.setRows)
+    }));
+    syncLegacyDraftFromFirst();
+  }
+  if (recovery.metric?.data) {
+    state.metricFormDraft = recovery.metric;
+    state.metricDate = recovery.metric.date || state.metricDate || todayISO();
+  }
+  if (recovery.exercise) {
+    state.exerciseFormDraft = recovery.exercise;
+    state.exerciseFormErrors = {};
+  }
+  return true;
+}
+
+function preserveVisibleDraft(reason = "navigation") {
+  const active = state.activeTab;
+  if (active === "log" && state.logMode === "strength") readDraftFromForm();
+  if (active === "log" && state.logMode === "metrics") state.metricFormDraft = metricDraftFromForm();
+  if (active === "exercises") state.exerciseFormDraft = exerciseFormDraftFromForm() || state.exerciseFormDraft;
+  if (saveDraftRecovery(reason)) {
+    showBanner("Draft saved locally.", {
+      tone: "good",
+      detail: "You can restore it from this banner if a date or tab change clears the screen.",
+      action: "restore-draft",
+      actionLabel: "Restore"
+    });
+  }
 }
 
 function coachPendingWorkoutEntries() {
@@ -2203,7 +2441,7 @@ function lineChart(points, color = "#35d58c", unit = "") {
   }))));
 
   return `
-    <div class="chart interactive-chart" data-points="${payload}" data-unit="${escapeHtml(unit)}">
+    <div class="chart interactive-chart" data-points="${payload}" data-unit="${escapeHtml(unit)}" tabindex="0" aria-label="Interactive chart. Tap or press to inspect the nearest point.">
       <div class="chart-stage">
         <svg viewBox="0 0 100 100" preserveAspectRatio="none" role="img" aria-label="Interactive trend chart">
           <defs>
@@ -2221,7 +2459,7 @@ function lineChart(points, color = "#35d58c", unit = "") {
         </svg>
         <div class="chart-marker" style="left:${last.x}%; top:${last.y}%"></div>
       </div>
-      <p class="chart-readout">${escapeHtml(chartReadout(last, unit))}</p>
+      <p class="chart-readout" aria-live="polite">${escapeHtml(chartReadout(last, unit))}</p>
       <p class="muted small">${escapeHtml(first.label)} to ${escapeHtml(last.label)}</p>
     </div>
   `;
@@ -2361,6 +2599,55 @@ function renderDashboard() {
   const todayPlan = buildTodayPlan();
   const action = actionFromSessionPlan(todayPlan);
   const firstExercise = todayPlan.sessionPlan.items[0]?.exercise;
+  const widgetMarkup = {
+    nextLift: `
+      <section class="section card coach-action dashboard-widget" data-dashboard-widget="nextLift">
+        <span class="badge">Next best lift</span>
+        <h3>${escapeHtml(action.title)}</h3>
+        <p>${escapeHtml(action.body)}</p>
+        ${firstExercise ? `<p class="muted small">Rest ${escapeHtml(firstExercise.rest)}. ${escapeHtml(firstExercise.cue)}</p>` : ""}
+      </section>
+    `,
+    lowestSets: `
+      <section class="section card dashboard-widget" data-dashboard-widget="lowestSets">
+        <h3>Lowest set counts</h3>
+        <div class="list">
+          ${underTarget.length ? underTarget.map((stat) => `
+            <div class="list-item simple">
+              <strong>${escapeHtml(stat.label)}</strong>
+              <span class="muted small">${fmt(stat.sets, 1)}/${HYPERTROPHY.minimumSets} hard sets - ${stat.sessions}/2 touches</span>
+            </div>
+          `).join("") : `<div class="empty">All tracked muscles have reached the weekly floor.</div>`}
+        </div>
+      </section>
+    `,
+    health: `
+      <section class="section card coach-action dashboard-widget" data-dashboard-widget="health">
+        <span class="badge">Health coach</span>
+        <h3>${escapeHtml(health.goalLabel)} nutrition check</h3>
+        <p>${escapeHtml(health.recommendation)}</p>
+        ${healthCoachStatMarkup(health)}
+      </section>
+    `,
+    weeklySets: `
+      <section class="section chart-panel dashboard-widget" data-dashboard-widget="weeklySets">
+        <div class="chart-header"><h3>This week's hard sets</h3><span class="muted small">Monday-start week - ${fmt(weeklyVolume)} lb load</span></div>
+        ${muscleProgressMarkup(stats, true)}
+      </section>
+    `,
+    bodyWeight: `
+      <section class="section chart-panel dashboard-widget" data-dashboard-widget="bodyWeight">
+        <div class="chart-header"><h3>Body weight</h3><span class="muted small">${bodyWeight ? "logged" : "preview"}</span></div>
+        ${lineChart(seriesFromMetrics("bodyWeight").length ? seriesFromMetrics("bodyWeight") : previewSeries("bodyWeight"), "#f2d06b", " lb")}
+      </section>
+    `,
+    protein: `
+      <section class="section chart-panel dashboard-widget" data-dashboard-widget="protein">
+        <div class="chart-header"><h3>Protein</h3><span class="muted small">${proteinAvg ? `${fmt(proteinAvg)}g avg` : "preview"}</span></div>
+        ${lineChart(seriesFromMetrics("protein").length ? seriesFromMetrics("protein") : previewSeries("protein"), "#ff6b5f", "g")}
+      </section>
+    `
+  };
 
   return `
     <section class="hero">
@@ -2374,49 +2661,7 @@ function renderDashboard() {
         <div class="stat"><span class="label">Protein floor</span><span class="value accent-coral">${protein.floor ? fmt(protein.floor) : "--"}</span><span class="hint">g/day minimum</span></div>
       </div>
     </section>
-
-    <section class="section grid two">
-      <div class="card coach-action">
-        <span class="badge">Next best lift</span>
-        <h3>${escapeHtml(action.title)}</h3>
-        <p>${escapeHtml(action.body)}</p>
-        ${firstExercise ? `<p class="muted small">Rest ${escapeHtml(firstExercise.rest)}. ${escapeHtml(firstExercise.cue)}</p>` : ""}
-      </div>
-      <div class="card">
-        <h3>Lowest set counts</h3>
-        <div class="list">
-          ${underTarget.length ? underTarget.map((stat) => `
-            <div class="list-item simple">
-              <strong>${escapeHtml(stat.label)}</strong>
-              <span class="muted small">${fmt(stat.sets, 1)}/${HYPERTROPHY.minimumSets} hard sets - ${stat.sessions}/2 touches</span>
-            </div>
-          `).join("") : `<div class="empty">All tracked muscles have reached the weekly floor.</div>`}
-        </div>
-      </div>
-    </section>
-
-    <section class="section card coach-action">
-      <span class="badge">Health coach</span>
-      <h3>${escapeHtml(health.goalLabel)} nutrition check</h3>
-      <p>${escapeHtml(health.recommendation)}</p>
-      ${healthCoachStatMarkup(health)}
-    </section>
-
-    <section class="section chart-panel">
-      <div class="chart-header"><h3>This week's hard sets</h3><span class="muted small">${fmt(weeklyVolume)} lb total load logged</span></div>
-      ${muscleProgressMarkup(stats, true)}
-    </section>
-
-    <section class="section grid two">
-      <div class="chart-panel">
-        <div class="chart-header"><h3>Body weight</h3><span class="muted small">${bodyWeight ? "logged" : "preview"}</span></div>
-        ${lineChart(seriesFromMetrics("bodyWeight").length ? seriesFromMetrics("bodyWeight") : previewSeries("bodyWeight"), "#f2d06b", " lb")}
-      </div>
-      <div class="chart-panel">
-        <div class="chart-header"><h3>Protein</h3><span class="muted small">${proteinAvg ? `${fmt(proteinAvg)}g avg` : "preview"}</span></div>
-        ${lineChart(seriesFromMetrics("protein").length ? seriesFromMetrics("protein") : previewSeries("protein"), "#ff6b5f", "g")}
-      </div>
-    </section>
+    ${selectedDashboardWidgets().map((id) => widgetMarkup[id] || "").join("")}
   `;
 }
 
@@ -2432,6 +2677,8 @@ function listWorkout(entry) {
       </div>
       <div class="row-actions">
         <button class="ghost-mini" type="button" data-action="edit-workout" data-id="${escapeHtml(entry.id)}">Edit</button>
+        <button class="ghost-mini" type="button" data-action="open-exercise-trend" data-exercise="${escapeHtml(entry.exercise)}">Trend</button>
+        <button class="ghost-mini" type="button" data-action="open-exercise-history-global" data-exercise="${escapeHtml(entry.exercise)}">History</button>
         <button class="delete-small" type="button" aria-label="Delete workout" data-action="delete-workout" data-id="${escapeHtml(entry.id)}">x</button>
       </div>
     </div>
@@ -3082,6 +3329,8 @@ function exerciseCardActions(exercise, editable = false) {
     `
     : `
       <button class="ghost-mini" type="button" data-action="edit-exercise" data-id="${escapeHtml(exercise.id)}">Edit</button>
+      <button class="ghost-mini" type="button" data-action="open-exercise-trend" data-exercise="${escapeHtml(exercise.name)}">Trend</button>
+      <button class="ghost-mini" type="button" data-action="open-exercise-history-global" data-exercise="${escapeHtml(exercise.name)}">History</button>
       <button class="ghost-mini" type="button" data-action="archive-exercise" data-id="${escapeHtml(exercise.id)}">${removalMode === "archive" ? "Archive" : "Delete"}</button>
     `;
   const menuOpen = state.openExerciseActionMenu === exercise.id;
@@ -3240,15 +3489,12 @@ function renderExercises() {
       </div>
     </section>
 
-    <section class="section chart-panel">
-      <div class="chart-header">
-        <h3>Archived exercises</h3>
-        <span class="muted small">${archivedExercises.length} archived</span>
-      </div>
+    <details class="section chart-panel collapsible-panel archived-exercise-panel">
+      <summary><span>Archived exercises</span><small>${archivedExercises.length} archived</small></summary>
       <div class="exercise-list">
         ${archivedExercises.length ? archivedExercises.map((exercise) => exerciseCard(exercise, true)).join("") : `<div class="empty">Archived movements will appear here when you retire them.</div>`}
       </div>
-    </section>
+    </details>
   `;
 }
 
@@ -3369,7 +3615,7 @@ function renderLog() {
   if (state.logHistoryExercise) return exerciseHistoryScreen(state.logHistoryExercise);
   const metricDate = state.metricDate || todayISO();
   const metric = metricForDate(metricDate);
-  const metricFormEntry = metric || { date: metricDate, bodyWeight: 0, calories: 0, protein: 0, meals: emptyNutritionMeals(), notes: "" };
+  const metricFormEntry = metricEntryForForm(metricDate);
   const metricButtonLabel = metric ? "Update metrics" : "Save metrics";
 
   return `
@@ -3406,13 +3652,7 @@ function renderLog() {
           ` : ""}
 
           <div class="field-row log-date-row">
-            <div class="field">
-              <label for="workout-date">Date</label>
-              <div style="display: flex; gap: 8px; align-items: end;">
-                <input id="workout-date" name="date" type="date" required value="${escapeHtml(state.draftDate || todayISO())}" style="flex: 1;">
-                ${state.draftDate && state.draftDate !== todayISO() ? `<button class="ghost-button" type="button" data-action="return-to-today" style="min-width: auto; white-space: nowrap;">Today</button>` : ""}
-              </div>
-            </div>
+            ${renderDateControl({ id: "workout-date", name: "date", label: "Date", value: state.draftDate || todayISO() })}
           </div>
 
           <div class="exercise-draft-list">
@@ -3424,10 +3664,7 @@ function renderLog() {
         </form>
       ` : `
         <form id="metric-form">
-          <div class="field">
-            <label for="metric-date">Date</label>
-            <input id="metric-date" name="date" type="date" required value="${escapeHtml(metricDate)}">
-          </div>
+          ${renderDateControl({ id: "metric-date", name: "date", label: "Date", value: metricDate })}
           ${nutritionTotalSummaryMarkup(metricFormEntry)}
           <div class="field-row metric-daily-row">
             <div class="field"><label for="bodyWeight">Body weight</label><input id="bodyWeight" name="bodyWeight" type="number" inputmode="decimal" min="0" step="0.1" value="${escapeHtml(metricFormEntry.bodyWeight || "")}" placeholder="lb"></div>
@@ -3543,11 +3780,7 @@ function renderHistoryDatesMode() {
         </div>
       ` : ""}
       <div class="history-date-controls">
-        <div class="field history-date-field">
-          <label for="history-date">Browse by date</label>
-          <input id="history-date" class="history-date-input" type="date" data-history-date value="${escapeHtml(selectedDate)}">
-        </div>
-        ${state.historyDate ? `<button class="ghost-button history-clear-button" type="button" data-action="clear-history-date">Clear date</button>` : ""}
+        ${renderDateControl({ id: "history-date", label: "Browse by date", value: selectedDate || todayISO(), className: "history-date-field", inputClass: "history-date-input", clearable: !!state.historyDate, required: false })}
       </div>
       ${selectedDate ? `
         <div class="history-date-results">
@@ -3759,6 +3992,11 @@ function renderTodayPlan(plan) {
                 <strong>${escapeHtml(item.exercise.name)}</strong>
                 <span>${escapeHtml(item.muscle.label)} - ${escapeHtml(item.exercise.reps)} reps - ${HYPERTROPHY.idealRirMin}-${HYPERTROPHY.idealRirMax} RIR</span>
                 ${item.planTarget ? `<span class="today-plan-target">${escapeHtml(item.planTarget.label)} - ${escapeHtml(item.planTarget.detail)}</span>` : ""}
+                <div class="mini-action-row">
+                  <button class="ghost-mini" type="button" data-action="log-exercise" data-exercise="${escapeHtml(item.exercise.name)}">Log</button>
+                  <button class="ghost-mini" type="button" data-action="open-exercise-trend" data-exercise="${escapeHtml(item.exercise.name)}">Trend</button>
+                  <button class="ghost-mini" type="button" data-action="open-exercise-history-global" data-exercise="${escapeHtml(item.exercise.name)}">History</button>
+                </div>
               </div>
               <span class="today-plan-dose">${item.sets} sets</span>
             </div>
@@ -3875,10 +4113,87 @@ function renderCoach() {
       <div class="chart-header"><h3>Muscle set audit</h3><span class="muted small">10 set floor, 12-20 growth zone</span></div>
       ${muscleProgressMarkup(coachMuscleSetStats())}
     </section>
-    <section class="section grid">
-      <div class="chart-header coach-notes-header"><h3>Coach notes</h3><span class="muted small">secondary checks</span></div>
+    <details class="section chart-panel collapsible-panel coach-notes-panel">
+      <summary><span>Coach notes</span><small>secondary checks</small></summary>
       ${recs.map((rec) => `<div class="coach-card ${rec.tone}"><strong>${escapeHtml(rec.title)}</strong><p>${escapeHtml(rec.body)}</p></div>`).join("")}
+    </details>
+  `;
+}
+
+function renderAppBanner() {
+  if (!state.appBanner) return "";
+  const banner = state.appBanner;
+  return `
+    <section class="app-banner ${escapeHtml(banner.tone)}" role="status" aria-live="polite">
+      <div>
+        <strong>${escapeHtml(banner.message)}</strong>
+        ${banner.detail ? `<p>${escapeHtml(banner.detail)}</p>` : ""}
+      </div>
+      <div class="app-banner-actions">
+        ${banner.action && banner.actionLabel ? `<button class="ghost-mini" type="button" data-action="${escapeHtml(banner.action)}">${escapeHtml(banner.actionLabel)}</button>` : ""}
+        <button class="icon-button" type="button" data-action="dismiss-banner" aria-label="Dismiss message">x</button>
+      </div>
     </section>
+  `;
+}
+
+function renderMobileQuickActions() {
+  const plan = buildTodayPlan(selectedCoachTimeframeMinutes());
+  const canCopyPlan = !!plan.sessionPlan.items.length;
+  return `
+    <div class="mobile-quick-actions ${state.quickActionsOpen ? "is-open" : ""}">
+      ${state.quickActionsOpen ? `
+        <div class="mobile-quick-sheet" role="menu" aria-label="Quick actions">
+          <button type="button" data-action="quick-log-strength" role="menuitem">Log strength</button>
+          <button type="button" data-action="quick-log-nutrition" role="menuitem">Log nutrition</button>
+          <button type="button" data-action="copy-coach-plan" role="menuitem" ${canCopyPlan ? "" : "disabled"}>Copy Coach plan</button>
+          <button type="button" data-action="quick-add-exercise" role="menuitem">Add exercise</button>
+          <button type="button" data-action="quick-backup" role="menuitem">Backup</button>
+        </div>
+      ` : ""}
+      <button class="mobile-quick-toggle" type="button" data-action="toggle-quick-actions" aria-expanded="${state.quickActionsOpen}" aria-label="${state.quickActionsOpen ? "Close quick actions" : "Open quick actions"}">
+        ${state.quickActionsOpen ? "x" : "+"}
+      </button>
+    </div>
+  `;
+}
+
+function renderImportPreview() {
+  const pending = state.pendingImport;
+  if (!pending) return "";
+  const summary = pending.summary || {};
+  return `
+    <section class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="import-preview-title">
+      <div class="modal-panel import-preview-panel">
+        <h2 id="import-preview-title">Review backup import</h2>
+        <p class="muted small">${escapeHtml(pending.source || pending.fileName || "Backup file")} will replace local workout and nutrition data.</p>
+        <div class="action-grid import-preview-grid">
+          <span><strong>${fmt(summary.workouts || 0)}</strong> workouts</span>
+          <span><strong>${fmt(summary.metrics || 0)}</strong> nutrition logs</span>
+          <span><strong>${fmt(summary.customExercises || 0)}</strong> exercises</span>
+          <span><strong>${escapeHtml(summary.newestDate || "--")}</strong> newest date</span>
+        </div>
+        <div class="grid two">
+          <button class="primary-button" type="button" data-action="confirm-import">Replace local data</button>
+          <button class="ghost-button" type="button" data-action="cancel-import">Cancel</button>
+        </div>
+      </div>
+    </section>
+  `;
+}
+
+function renderAppChrome() {
+  return `${renderAppBanner()}${renderImportPreview()}${renderMobileQuickActions()}`;
+}
+
+function dataSafetySummaryMarkup() {
+  return `
+    <div class="data-safety-grid">
+      <span><strong>${escapeHtml(formatDateTime(state.settings.lastBackupAt))}</strong><small>last local backup</small></span>
+      <span><strong>${escapeHtml(formatDateTime(state.settings.lastCloudPushAt))}</strong><small>last cloud push</small></span>
+      <span><strong>${escapeHtml(formatDateTime(state.settings.lastCloudPullAt))}</strong><small>last cloud pull</small></span>
+      <span><strong>v${escapeHtml(APP_VERSION)}</strong><small>installed shell</small></span>
+    </div>
   `;
 }
 
@@ -3932,6 +4247,32 @@ function renderNutritionGoalSelector() {
   `;
 }
 
+function renderDashboardWidgetSelector() {
+  const enabled = selectedDashboardWidgets();
+  const order = dashboardWidgetOrder();
+  return `
+    <div class="widget-preference-list">
+      ${order.map((id, index) => {
+        const option = TODAY_WIDGET_OPTIONS.find((item) => item.id === id);
+        if (!option) return "";
+        const active = enabled.includes(id);
+        return `
+          <div class="widget-preference-row ${active ? "is-active" : ""}">
+            <button class="pill widget-toggle ${active ? "is-active" : ""}" type="button" data-action="toggle-dashboard-widget" data-widget-id="${escapeHtml(id)}" aria-pressed="${active}">
+              ${active ? "Shown" : "Hidden"}
+            </button>
+            <strong>${escapeHtml(option.label)}</strong>
+            <div class="reorder-arrows compact-reorder">
+              <button type="button" aria-label="Move ${escapeHtml(option.label)} up" data-action="move-dashboard-widget" data-widget-id="${escapeHtml(id)}" data-widget-direction="-1" ${index === 0 ? "disabled" : ""}>&#9650;</button>
+              <button type="button" aria-label="Move ${escapeHtml(option.label)} down" data-action="move-dashboard-widget" data-widget-id="${escapeHtml(id)}" data-widget-direction="1" ${index === order.length - 1 ? "disabled" : ""}>&#9660;</button>
+            </div>
+          </div>
+        `;
+      }).join("")}
+    </div>
+  `;
+}
+
 async function renderSettings() {
   const estimate = await storageEstimateMarkup();
   const sampleWorkouts = state.workouts.filter(isSampleEntry).length;
@@ -3955,12 +4296,15 @@ async function renderSettings() {
     </section>
 
     <section class="section settings-panel">
-      <h2>Sample chart data</h2>
-      <p class="muted small">${sampleWorkouts + sampleMetrics ? `${sampleWorkouts} sample lifts and ${sampleMetrics} sample metrics are loaded.` : "Load demo logs to test every chart and recommendation without touching your real backups."}</p>
-      <div class="grid two">
-        <button class="primary-button" type="button" data-action="load-sample-data">Load sample data</button>
-        <button class="ghost-button" type="button" data-action="remove-sample-data">Remove sample data</button>
-      </div>
+      <h2>Today widgets</h2>
+      <p class="muted small">Choose what appears below the Today summary and put the most useful cards first.</p>
+      ${renderDashboardWidgetSelector()}
+    </section>
+
+    <section class="section settings-panel">
+      <h2>Data safety</h2>
+      <p class="muted small">A quick confidence check before imports, cloud sync, or app updates.</p>
+      ${dataSafetySummaryMarkup()}
     </section>
 
     <section class="section settings-panel">
@@ -3973,17 +4317,26 @@ async function renderSettings() {
       <input class="hidden" id="import-file" type="file" accept="application/json">
     </section>
 
-    <section class="section settings-panel">
-      <h2>App update</h2>
+    <details class="section settings-panel collapsible-panel">
+      <summary><span>Sample chart data</span><small>${sampleWorkouts + sampleMetrics ? `${sampleWorkouts} lifts/metrics loaded` : "optional"}</small></summary>
+      <p class="muted small">${sampleWorkouts + sampleMetrics ? `${sampleWorkouts} sample lifts and ${sampleMetrics} sample metrics are loaded.` : "Load demo logs to test every chart and recommendation without touching your real backups."}</p>
+      <div class="grid two">
+        <button class="primary-button" type="button" data-action="load-sample-data">Load sample data</button>
+        <button class="ghost-button" type="button" data-action="remove-sample-data">Remove sample data</button>
+      </div>
+    </details>
+
+    <details class="section settings-panel collapsible-panel">
+      <summary><span>App update</span><small>v${APP_VERSION}</small></summary>
       <div class="settings-list">
         <span>Installed shell <strong>v${APP_VERSION}</strong></span>
       </div>
       <p class="muted small">Refresh the app shell if iPhone Safari keeps showing an older screen. This clears cached app files only; workouts and metrics stay in browser storage.</p>
       <button class="ghost-button full-button" type="button" data-action="refresh-app-shell">Refresh app shell</button>
-    </section>
+    </details>
 
-    <section class="section settings-panel">
-      <h2>Supabase sync</h2>
+    <details class="section settings-panel collapsible-panel">
+      <summary><span>Supabase sync</span><small>${escapeHtml(supabaseStatus())}</small></summary>
       <p class="muted small">Status: ${escapeHtml(supabaseStatus())}</p>
       <div class="field">
         <label for="supabaseUrl">Project URL</label>
@@ -4013,13 +4366,13 @@ async function renderSettings() {
         <button class="ghost-button" type="button" data-action="push-supabase">Push backup</button>
         <button class="ghost-button" type="button" data-action="pull-supabase">Pull latest</button>
       </div>
-    </section>
+    </details>
 
-    <section class="section settings-panel">
-      <h2>Danger zone</h2>
+    <details class="section settings-panel collapsible-panel">
+      <summary><span>Danger zone</span><small>destructive</small></summary>
       <p class="muted small">Export a backup before clearing data.</p>
       <button class="danger-button" type="button" data-action="clear-all">Clear local data</button>
-    </section>
+    </details>
   `;
 }
 
@@ -4043,13 +4396,15 @@ async function render({ animate = false } = {}) {
     tab.classList.toggle("is-active", tab.dataset.tab === state.activeTab);
   });
 
-  if (state.activeTab === "dashboard") els.app.innerHTML = renderDashboard();
-  if (state.activeTab === "log") els.app.innerHTML = renderLog();
-  if (state.activeTab === "trends") els.app.innerHTML = renderTrends();
-  if (state.activeTab === "coach") els.app.innerHTML = renderCoach();
-  if (state.activeTab === "exercises") els.app.innerHTML = renderExercises();
-  if (state.activeTab === "history") els.app.innerHTML = renderHistory();
-  if (state.activeTab === "settings") els.app.innerHTML = await renderSettings();
+  let screen = "";
+  if (state.activeTab === "dashboard") screen = renderDashboard();
+  if (state.activeTab === "log") screen = renderLog();
+  if (state.activeTab === "trends") screen = renderTrends();
+  if (state.activeTab === "coach") screen = renderCoach();
+  if (state.activeTab === "exercises") screen = renderExercises();
+  if (state.activeTab === "history") screen = renderHistory();
+  if (state.activeTab === "settings") screen = await renderSettings();
+  els.app.innerHTML = `${renderAppChrome()}${screen}`;
   if (token !== renderToken) return;
   els.app.classList.remove("content-exit", "content-enter");
   if (animate) els.app.classList.add("content-enter");
@@ -4085,8 +4440,9 @@ async function saveExercise(form) {
   state.exerciseFormErrors = {};
   state.selectedExercise = exercise.name;
   state.draftTargetMuscle = exercise.primaryMuscles[0] || "chest";
+  clearDraftRecovery();
+  announce(existing ? "Exercise updated." : "Exercise saved.", { tone: "good" });
   await render();
-  toast(existing ? "Exercise updated." : "Exercise saved.");
 }
 
 async function saveWorkout(form) {
@@ -4143,8 +4499,9 @@ async function saveWorkout(form) {
   }));
   state.loadedWorkoutDateIds = entries.map((entry) => entry.id).filter(Boolean);
   await loadState();
+  clearDraftRecovery();
+  announce(hadExisting ? "Workout updated." : "Workout locked in.", { tone: "good" });
   await render();
-  toast(hadExisting ? "Workout updated." : "Workout locked in.");
 }
 
 async function saveMetric(form) {
@@ -4157,8 +4514,10 @@ async function saveMetric(form) {
   await Promise.all(duplicateIds.map((id) => dbDelete("metrics", id)));
   await loadState();
   state.metricDate = date;
+  state.metricFormDraft = null;
+  clearDraftRecovery();
+  announce(existing ? "Metrics updated." : "Metrics saved.", { tone: "good" });
   await render();
-  toast(existing ? "Metrics updated." : "Metrics saved.");
 }
 
 function isSampleEntry(entry) {
@@ -4284,16 +4643,16 @@ async function loadSampleData() {
   state.selectedExercise = "Dumbbell Bench Press";
   state.activeTab = "trends";
   await loadState();
+  announce("Sample data loaded.", { tone: "good", detail: "Sample entries can be removed from Settings." });
   await render();
-  toast("Sample data loaded.");
 }
 
 async function removeSampleData() {
   await deleteSampleEntries();
   await saveSetting("sampleDataLoadedAt", null);
   await loadState();
+  announce("Sample data removed.", { tone: "good" });
   await render();
-  toast("Sample data removed.");
 }
 
 function exportSafeSettings() {
@@ -4302,7 +4661,11 @@ function exportSafeSettings() {
     nutritionGoal: selectedNutritionGoal(),
     dayTemplates: getDayTemplates(),
     customExercises: getCustomExercises({ includeArchived: true }),
-    lastBackupAt: new Date().toISOString()
+    dashboardWidgets: selectedDashboardWidgets(),
+    dashboardWidgetOrder: dashboardWidgetOrder(),
+    lastBackupAt: new Date().toISOString(),
+    lastCloudPushAt: String(state.settings.lastCloudPushAt || ""),
+    lastCloudPullAt: String(state.settings.lastCloudPullAt || "")
   };
 }
 
@@ -4317,7 +4680,22 @@ function exportPayload() {
   };
 }
 
-function downloadBackup() {
+function backupImportSummary(payload) {
+  const normalized = normalizeBackupPayload(payload);
+  const dates = [
+    ...normalized.workouts.map((entry) => entry.date),
+    ...normalized.metrics.map((entry) => entry.date)
+  ].filter(Boolean).sort();
+  return {
+    workouts: normalized.workouts.length,
+    metrics: normalized.metrics.length,
+    customExercises: normalized.settings.customExercises.length,
+    newestDate: dates[dates.length - 1] || "",
+    normalized
+  };
+}
+
+async function downloadBackup() {
   const payload = exportPayload();
   const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
   const url = URL.createObjectURL(blob);
@@ -4326,8 +4704,9 @@ function downloadBackup() {
   a.download = `trainwise-backup-${todayISO()}.json`;
   a.click();
   URL.revokeObjectURL(url);
-  saveSetting("lastBackupAt", payload.exportedAt);
-  toast("Backup exported.");
+  await saveSetting("lastBackupAt", payload.exportedAt);
+  announce("Backup exported.", { tone: "good", detail: "Local browser data is still unchanged." });
+  await render();
 }
 
 function isValidISODate(value) {
@@ -4390,7 +4769,11 @@ function normalizeBackupSettings(settings = {}) {
       : "bulk",
     dayTemplates: Array.isArray(settings.dayTemplates) ? settings.dayTemplates : [],
     customExercises,
-    lastBackupAt: String(settings.lastBackupAt || "")
+    dashboardWidgets: Array.isArray(settings.dashboardWidgets) ? settings.dashboardWidgets : [...DEFAULT_TODAY_WIDGETS],
+    dashboardWidgetOrder: Array.isArray(settings.dashboardWidgetOrder) ? settings.dashboardWidgetOrder : [...DEFAULT_TODAY_WIDGETS],
+    lastBackupAt: String(settings.lastBackupAt || ""),
+    lastCloudPushAt: String(settings.lastCloudPushAt || ""),
+    lastCloudPullAt: String(settings.lastCloudPullAt || "")
   };
 }
 
@@ -4407,7 +4790,7 @@ function normalizeBackupPayload(payload) {
 }
 
 async function importPayload(payload) {
-  const normalized = normalizeBackupPayload(payload);
+  const normalized = payload?.normalized ? payload.normalized : normalizeBackupPayload(payload);
   await Promise.all(STORES.filter((store) => store !== "settings").map((store) => dbClear(store)));
   for (const entry of normalized.workouts) await dbPut("workouts", entry);
   for (const entry of normalized.metrics) await dbPut("metrics", entry);
@@ -4415,7 +4798,11 @@ async function importPayload(payload) {
   await saveSetting("nutritionGoal", normalized.settings.nutritionGoal);
   await saveSetting("dayTemplates", normalized.settings.dayTemplates);
   await saveSetting("customExercises", normalized.settings.customExercises);
+  await saveSetting("dashboardWidgets", normalized.settings.dashboardWidgets);
+  await saveSetting("dashboardWidgetOrder", normalized.settings.dashboardWidgetOrder);
   await saveSetting("lastBackupAt", normalized.settings.lastBackupAt);
+  await saveSetting("lastCloudPushAt", normalized.settings.lastCloudPushAt);
+  await saveSetting("lastCloudPullAt", normalized.settings.lastCloudPullAt);
   await loadState();
   await render();
 }
@@ -4423,9 +4810,63 @@ async function importPayload(payload) {
 async function importFile(file) {
   const text = await file.text();
   const payload = JSON.parse(text);
-  if (!confirm("Replace local TrainWise data with this backup?")) return;
-  await importPayload(payload);
-  toast("Backup restored.");
+  const summary = backupImportSummary(payload);
+  state.pendingImport = {
+    sourceType: "file",
+    fileName: file.name || "Backup file",
+    source: file.name || "Backup file",
+    payload,
+    summary
+  };
+  showBanner("Backup ready to review.", {
+    tone: "warn",
+    detail: "Import preview is open. Local data has not changed yet."
+  });
+  await render();
+}
+
+async function confirmPendingImport() {
+  const pending = state.pendingImport;
+  if (!pending) return;
+  const previous = exportPayload();
+  setUndoAction("Undo import", { type: "import", previous });
+  await importPayload({ normalized: pending.summary.normalized });
+  if (pending.sourceType === "cloud") await saveSetting("lastCloudPullAt", new Date().toISOString());
+  state.pendingImport = null;
+  announce("Backup restored.", {
+    tone: "good",
+    detail: "Previous local data can be restored with Undo.",
+    action: "undo-last-action",
+    actionLabel: "Undo"
+  });
+  await render();
+}
+
+async function undoLastAction() {
+  const undo = state.undoAction;
+  if (!undo?.payload) throw new Error("Nothing to undo.");
+  const { payload } = undo;
+  if (payload.type === "delete-workout" && payload.entry) {
+    await dbPut("workouts", payload.entry);
+  } else if (payload.type === "delete-metrics" && Array.isArray(payload.entries)) {
+    for (const entry of payload.entries) await dbPut("metrics", entry);
+  } else if (payload.type === "custom-exercises" && Array.isArray(payload.previous)) {
+    await saveSetting("customExercises", payload.previous);
+  } else if (payload.type === "clear-all") {
+    await Promise.all(["workouts", "metrics"].map((store) => dbClear(store)));
+    for (const entry of payload.workouts || []) await dbPut("workouts", entry);
+    for (const entry of payload.metrics || []) await dbPut("metrics", entry);
+  } else if (payload.type === "clear-draft" && payload.recovery) {
+    restoreDraftRecovery(payload.recovery);
+  } else if (payload.type === "import" && payload.previous) {
+    await importPayload(payload.previous);
+  } else {
+    throw new Error("Undo is no longer available.");
+  }
+  clearUndoAction();
+  await loadState();
+  showBanner("Undo complete.", { tone: "good" });
+  await render();
 }
 
 function readSupabaseFields() {
@@ -4444,8 +4885,8 @@ async function saveSupabaseSettings({ renderAfter = true, notify = true } = {}) 
   await saveSetting("supabaseEmail", email);
   await saveSetting("supabaseRememberPassword", rememberPassword);
   await saveSetting("supabasePassword", rememberPassword ? password : "");
+  if (notify) announce("Supabase settings saved.", { tone: "good" });
   if (renderAfter) await render();
-  if (notify) toast("Supabase settings saved.");
 }
 
 function supabaseConfig() {
@@ -4500,7 +4941,8 @@ async function supabaseAuth(mode) {
   const json = await response.json();
   if (!response.ok) throw new Error(json.msg || json.message || "Supabase auth failed.");
   if (!json.access_token) {
-    toast("Account created. Confirm your email if Supabase asks for it, then sign in.");
+    announce("Account created.", { tone: "good", detail: "Confirm your email if Supabase asks for it, then sign in." });
+    await render();
     return;
   }
   await saveSetting("supabaseSession", {
@@ -4508,8 +4950,8 @@ async function supabaseAuth(mode) {
     refresh_token: json.refresh_token,
     expires_at: json.expires_at
   });
+  announce("Signed in to Supabase.", { tone: "good" });
   await render();
-  toast("Signed in to Supabase.");
 }
 
 async function pushSupabaseBackup() {
@@ -4525,7 +4967,9 @@ async function pushSupabaseBackup() {
     body: JSON.stringify({ payload: exportPayload(), app_version: APP_VERSION })
   });
   if (!response.ok) throw new Error(await response.text());
-  toast("Cloud backup pushed.");
+  await saveSetting("lastCloudPushAt", new Date().toISOString());
+  announce("Cloud backup pushed.", { tone: "good", detail: "Supabase now has the latest local backup." });
+  await render();
 }
 
 async function pullSupabaseBackup() {
@@ -4539,12 +4983,21 @@ async function pullSupabaseBackup() {
   const json = await response.json();
   if (!response.ok) throw new Error(json.message || "Could not fetch latest backup.");
   if (!json.length) {
-    toast("No cloud backups found.");
+    announce("No cloud backups found.", { tone: "warn" });
     return;
   }
-  if (!confirm(`Replace local data with cloud backup from ${json[0].created_at}?`)) return;
-  await importPayload(json[0].payload);
-  toast("Cloud backup restored.");
+  const summary = backupImportSummary(json[0].payload);
+  state.pendingImport = {
+    sourceType: "cloud",
+    source: `Cloud backup from ${formatDateTime(json[0].created_at)}`,
+    payload: json[0].payload,
+    summary
+  };
+  showBanner("Cloud backup ready to review.", {
+    tone: "warn",
+    detail: "Local data has not changed yet."
+  });
+  await render();
 }
 
 async function refreshAppShell() {
@@ -4574,10 +5027,15 @@ async function refreshAppShell() {
 
 async function clearAll() {
   if (!confirm("Clear all local workout and nutrition data? Export a backup first if you need it.")) return;
+  setUndoAction("Restore local data", {
+    type: "clear-all",
+    workouts: state.workouts.filter((entry) => !isSampleEntry(entry)),
+    metrics: state.metrics.filter((entry) => !isSampleEntry(entry))
+  });
   await Promise.all(["workouts", "metrics"].map((store) => dbClear(store)));
   await loadState();
+  announce("Local data cleared.", { tone: "warn", action: "undo-last-action", actionLabel: "Undo" });
   await render();
-  toast("Local data cleared.");
 }
 
 function editWorkout(id) {
@@ -4658,6 +5116,29 @@ function loadWorkoutDateDraft(date) {
   clearWorkoutDraft(date);
 }
 
+async function applySharedDateInput(input) {
+  if (!input) return;
+  const value = input.value || todayISO();
+  if (input.id === "workout-date") {
+    preserveVisibleDraft("date-change");
+    loadWorkoutDateDraft(value);
+    await render();
+    return;
+  }
+  if (input.id === "metric-date") {
+    state.metricFormDraft = metricDraftFromForm();
+    saveDraftRecovery("date-change");
+    state.metricDate = value;
+    await render();
+    return;
+  }
+  if (input.id === "history-date") {
+    state.historyMode = "dates";
+    state.historyDate = value;
+    await render();
+  }
+}
+
 async function moveExerciseDraft(draftId, direction) {
   readDraftFromForm();
   const drafts = [...state.workoutDraft];
@@ -4674,7 +5155,97 @@ async function moveExerciseDraft(draftId, direction) {
 async function handleAction(action, target) {
   const actions = {
     async "app-retry"() { await init(); },
+    async "dismiss-banner"() {
+      clearBanner();
+      await render();
+    },
+    async "undo-last-action"() { await undoLastAction(); },
+    async "restore-draft"() {
+      if (!restoreDraftRecovery()) throw new Error("No saved draft found.");
+      showBanner("Draft restored.", { tone: "good" });
+      await render();
+    },
+    async "toggle-quick-actions"() {
+      state.quickActionsOpen = !state.quickActionsOpen;
+      await render();
+    },
+    async "quick-log-strength"() {
+      preserveVisibleDraft("quick-action");
+      state.quickActionsOpen = false;
+      state.activeTab = "log";
+      state.logMode = "strength";
+      await render({ animate: true });
+    },
+    async "quick-log-nutrition"() {
+      preserveVisibleDraft("quick-action");
+      state.quickActionsOpen = false;
+      state.activeTab = "log";
+      state.logMode = "metrics";
+      state.metricDate = todayISO();
+      await render({ animate: true });
+    },
+    async "quick-add-exercise"() {
+      preserveVisibleDraft("quick-action");
+      state.quickActionsOpen = false;
+      state.activeTab = "exercises";
+      state.editingExerciseId = null;
+      state.exerciseFormDraft = null;
+      state.exerciseFormErrors = {};
+      await render({ animate: true });
+    },
     async "refresh-app-shell"() { await refreshAppShell(); },
+    async "confirm-import"() { await confirmPendingImport(); },
+    async "cancel-import"() {
+      state.pendingImport = null;
+      showBanner("Import canceled.", { tone: "info" });
+      await render();
+    },
+    async "date-step"() {
+      const input = document.getElementById(target.dataset.dateInput);
+      const delta = Number(target.dataset.dateDelta || 0);
+      if (!input) return;
+      input.value = shiftISODate(input.value || todayISO(), delta);
+      await applySharedDateInput(input);
+    },
+    async "date-today"() {
+      const input = document.getElementById(target.dataset.dateInput);
+      if (!input) return;
+      input.value = todayISO();
+      await applySharedDateInput(input);
+    },
+    async "date-clear"() {
+      const input = document.getElementById(target.dataset.dateInput);
+      if (!input) return;
+      if (input.id === "history-date") {
+        state.historyDate = "";
+        await render();
+        return;
+      }
+      input.value = "";
+      await applySharedDateInput(input);
+    },
+    async "toggle-dashboard-widget"() {
+      const widgetId = target.dataset.widgetId;
+      const enabled = selectedDashboardWidgets();
+      const next = enabled.includes(widgetId)
+        ? enabled.filter((id) => id !== widgetId)
+        : [...enabled, widgetId];
+      await saveDashboardWidgets(next.length ? next : enabled, dashboardWidgetOrder());
+      showBanner("Today widgets updated.", { tone: "good" });
+      await render();
+    },
+    async "move-dashboard-widget"() {
+      const widgetId = target.dataset.widgetId;
+      const direction = Number(target.dataset.widgetDirection || 0);
+      const order = dashboardWidgetOrder();
+      const index = order.indexOf(widgetId);
+      const swap = index + direction;
+      if (index < 0 || swap < 0 || swap >= order.length) return;
+      [order[index], order[swap]] = [order[swap], order[index]];
+      await saveDashboardWidgets(selectedDashboardWidgets(), order);
+      showBanner("Today widgets reordered.", { tone: "good" });
+      await render();
+    },
     async "toggle-template-panel"() {
       readDraftFromForm();
       state.showTemplatePanel = !state.showTemplatePanel;
@@ -4727,8 +5298,9 @@ async function handleAction(action, target) {
     },
     async "copy-coach-plan"() {
       copyCoachPlanToLog(buildTodayPlan(selectedCoachTimeframeMinutes()));
+      state.quickActionsOpen = false;
+      announce("Coach plan copied to Log.", { tone: "good", detail: "Exercises and planned sets are ready as an unsaved draft." });
       await render({ animate: true });
-      toast("Coach plan copied to Log.");
     },
     async "dismiss-record-trophy"() {
       readDraftFromForm();
@@ -4821,13 +5393,15 @@ async function handleAction(action, target) {
       const mode = exerciseRemovalMode(exercise);
       if (mode === "delete") {
         if (!confirm(`Delete "${exercise.name}" from your exercise database?`)) return;
+        setUndoAction("Undo exercise change", { type: "custom-exercises", previous: exercises });
         await saveSetting("customExercises", exercises.filter((item) => item.id !== exercise.id));
-        toast("Exercise deleted.");
+        announce("Exercise deleted.", { tone: "warn", action: "undo-last-action", actionLabel: "Undo" });
       } else {
         if (!confirm(`Archive "${exercise.name}"? Existing logs stay intact.`)) return;
+        setUndoAction("Undo exercise change", { type: "custom-exercises", previous: exercises });
         const archived = { ...exercise, archivedAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
         await saveSetting("customExercises", exercises.map((item) => item.id === exercise.id ? archived : item));
-        toast("Exercise archived.");
+        announce("Exercise archived.", { tone: "warn", action: "undo-last-action", actionLabel: "Undo" });
       }
       if (state.editingExerciseId === exercise.id) state.editingExerciseId = null;
       state.openExerciseActionMenu = null;
@@ -4837,12 +5411,13 @@ async function handleAction(action, target) {
       const exercises = getCustomExercises({ includeArchived: true });
       const exercise = exercises.find((item) => item.id === target.dataset.id);
       if (!exercise) throw new Error("Exercise not found.");
+      setUndoAction("Undo exercise restore", { type: "custom-exercises", previous: exercises });
       const restored = { ...exercise, updatedAt: new Date().toISOString() };
       delete restored.archivedAt;
       await saveSetting("customExercises", exercises.map((item) => item.id === exercise.id ? restored : item));
       state.openExerciseActionMenu = null;
+      announce("Exercise restored.", { tone: "good", action: "undo-last-action", actionLabel: "Undo" });
       await render();
-      toast("Exercise restored.");
     },
     async "delete-exercise"() {
       const exercises = getCustomExercises({ includeArchived: true });
@@ -4850,24 +5425,49 @@ async function handleAction(action, target) {
       if (!exercise) throw new Error("Exercise not found.");
       if (exerciseRemovalMode(exercise) !== "delete") throw new Error("Archived exercises with logs can be restored, not permanently deleted.");
       if (!confirm(`Permanently delete "${exercise.name}" from your exercise database?`)) return;
+      setUndoAction("Undo exercise delete", { type: "custom-exercises", previous: exercises });
       await saveSetting("customExercises", exercises.filter((item) => item.id !== exercise.id));
       if (state.editingExerciseId === exercise.id) state.editingExerciseId = null;
       state.openExerciseActionMenu = null;
+      announce("Exercise deleted.", { tone: "warn", action: "undo-last-action", actionLabel: "Undo" });
       await render();
-      toast("Exercise deleted.");
     },
     async "log-exercise"() {
+      preserveVisibleDraft("log-exercise");
       state.activeTab = "log";
       state.logMode = "strength";
       state.editingWorkoutId = null;
+      state.quickActionsOpen = false;
       state.selectedExercise = target.dataset.exercise;
       state.draftTargetMuscle = resolveExerciseMeta(state.selectedExercise).primaryMuscles[0] || "chest";
       state.setRows = defaultSetRows();
       state.workoutDraft = [defaultDraftExercise(state.selectedExercise)];
       await render();
     },
-    "quick-backup"() { downloadBackup(); },
-    "export-data"() { downloadBackup(); },
+    async "open-exercise-trend"() {
+      const exercise = target.dataset.exercise;
+      if (!exercise) return;
+      preserveVisibleDraft("cross-tab");
+      state.selectedExercise = exercise;
+      state.activeTab = "trends";
+      state.quickActionsOpen = false;
+      await render({ animate: true });
+    },
+    async "open-exercise-history-global"() {
+      const exercise = target.dataset.exercise;
+      if (!exercise) return;
+      preserveVisibleDraft("cross-tab");
+      state.historyExercise = exercise;
+      state.historyMode = "exercises";
+      state.activeTab = "history";
+      state.quickActionsOpen = false;
+      await render({ animate: true });
+    },
+    async "quick-backup"() {
+      state.quickActionsOpen = false;
+      await downloadBackup();
+    },
+    async "export-data"() { await downloadBackup(); },
     "import-click"() { document.getElementById("import-file")?.click(); },
     async "add-set"() {
       readDraftFromForm();
@@ -4904,7 +5504,9 @@ async function handleAction(action, target) {
     async "new-log"() {
       if (!confirm("Clear all logged info? This will discard your current draft.")) return;
       readDraftFromForm();
+      setUndoAction("Restore draft", { type: "clear-draft", recovery: draftRecoveryPayload("clear-draft") });
       clearWorkoutDraft();
+      announce("Draft cleared.", { tone: "warn", action: "undo-last-action", actionLabel: "Undo" });
       await render();
     },
     async "edit-workout"() {
@@ -4932,21 +5534,25 @@ async function handleAction(action, target) {
     },
     async "delete-workout"() {
       if (!confirm("Delete this workout? This cannot be undone.")) return;
+      const entry = state.workouts.find((workout) => workout.id === target.dataset.id);
+      if (entry) setUndoAction("Restore lift", { type: "delete-workout", entry });
       await dbDelete("workouts", target.dataset.id);
       if (state.editingWorkoutId === target.dataset.id) clearWorkoutDraft();
       await loadState();
+      announce("Lift deleted.", { tone: "warn", action: "undo-last-action", actionLabel: "Undo" });
       await render();
-      toast("Lift deleted.");
     },
     async "delete-metric"() {
       if (!confirm(`Delete nutrition entry${target.dataset.date ? ` for ${target.dataset.date}` : ""}? This cannot be undone.`)) return;
       const ids = target.dataset.date
         ? metricEntriesForDate(target.dataset.date).map((entry) => entry.id).filter(Boolean)
         : [target.dataset.id].filter(Boolean);
+      const entries = state.metrics.filter((entry) => ids.includes(entry.id));
+      if (entries.length) setUndoAction("Restore nutrition", { type: "delete-metrics", entries });
       await Promise.all(ids.map((id) => dbDelete("metrics", id)));
       await loadState();
+      announce("Metric deleted.", { tone: "warn", action: "undo-last-action", actionLabel: "Undo" });
       await render();
-      toast("Metric deleted.");
     },
     async "choose-exercise"() {
       readDraftFromForm();
@@ -4963,8 +5569,8 @@ async function handleAction(action, target) {
       const goal = target.dataset.nutritionGoal;
       if (!NUTRITION_GOAL_OPTIONS.some((option) => option.id === goal)) return;
       await saveSetting("nutritionGoal", goal);
+      announce(`Nutrition goal set to ${nutritionGoalLabel(goal)}.`, { tone: "good" });
       await render();
-      toast(`Nutrition goal set to ${nutritionGoalLabel(goal)}.`);
     },
     async "load-sample-data"() { await loadSampleData(); },
     async "remove-sample-data"() { await removeSampleData(); },
@@ -5105,10 +5711,13 @@ document.addEventListener("click", async (event) => {
 
   try {
     if (tab) {
+      if (tab.dataset.tab !== state.activeTab) preserveVisibleDraft("tab-change");
       state.activeTab = tab.dataset.tab;
+      state.quickActionsOpen = false;
       await render({ animate: true });
     }
     if (logMode) {
+      if (logMode.dataset.logMode !== state.logMode) preserveVisibleDraft("log-mode-change");
       state.logMode = logMode.dataset.logMode;
       await render();
     }
@@ -5130,18 +5739,10 @@ document.addEventListener("change", async (event) => {
         draft.targetMuscle = meta.primaryMuscles[0] || draft.targetMuscle || "chest";
       }
       syncLegacyDraftFromFirst();
+      saveDraftRecovery("strength-change");
       await render();
     }
-    if (event.target.matches("#workout-date")) {
-      readDraftFromForm();
-      const newDate = event.target.value || todayISO();
-      loadWorkoutDateDraft(newDate);
-      await render();
-    }
-    if (event.target.matches("#metric-date")) {
-      state.metricDate = event.target.value || todayISO();
-      await render();
-    }
+    if (event.target.matches("[data-shared-date-input]")) await applySharedDateInput(event.target);
     if (event.target.matches("#trend-exercise")) {
       state.selectedExercise = event.target.value;
       await render();
@@ -5149,13 +5750,12 @@ document.addEventListener("change", async (event) => {
     if (event.target.matches("#exercise-primary")) {
       syncSecondaryMuscleCheckboxes(event.target.closest("#exercise-form"));
     }
+    if (event.target.closest("#exercise-form")) {
+      state.exerciseFormDraft = exerciseFormDraftFromForm(event.target.closest("#exercise-form"));
+      saveDraftRecovery("exercise-change");
+    }
     if (event.target.matches("[data-exercise-sort]")) {
       state.exerciseSort = ["recent", "az", "muscle", "most"].includes(event.target.value) ? event.target.value : "recent";
-      await render();
-    }
-    if (event.target.matches("#history-date")) {
-      state.historyMode = "dates";
-      state.historyDate = event.target.value || "";
       await render();
     }
     if (event.target.matches("#trend-muscle")) {
@@ -5176,10 +5776,19 @@ document.addEventListener("input", async (event) => {
     if (event.target.matches("[data-meal-field], [data-quick-field]")) {
       refreshNutritionFormTotals(event.target.closest("#metric-form"));
     }
+    if (event.target.closest("#metric-form") && !event.target.matches("[data-shared-date-input]")) {
+      state.metricFormDraft = metricDraftFromForm(event.target.closest("#metric-form"));
+      saveDraftRecovery("nutrition-input");
+    }
     if (event.target.matches("[data-set-field]")) {
       const section = event.target.closest(".exercise-draft");
       readDraftFromForm();
+      saveDraftRecovery("strength-input");
       if (section?.dataset.draftId) refreshDraftRecordTrophies(section.dataset.draftId);
+    }
+    if (event.target.matches("[data-draft-field='notes']")) {
+      readDraftFromForm();
+      saveDraftRecovery("strength-input");
     }
     if (event.target.matches("[data-history-search]")) {
       const caret = event.target.selectionStart || 0;
@@ -5196,6 +5805,10 @@ document.addEventListener("input", async (event) => {
       const input = document.getElementById("exercise-search");
       input?.focus();
       input?.setSelectionRange?.(caret, caret);
+    }
+    if (event.target.closest("#exercise-form") && !event.target.matches("[data-exercise-search]")) {
+      state.exerciseFormDraft = exerciseFormDraftFromForm(event.target.closest("#exercise-form"));
+      saveDraftRecovery("exercise-input");
     }
   } catch (error) {
     toast(error.message || "Something went wrong.");
@@ -5357,6 +5970,13 @@ async function init() {
     state.db = null;
     state.db = await openDB();
     await loadState();
+  }
+
+  if (restoreDraftRecovery()) {
+    showBanner("Unsaved draft restored.", {
+      tone: "good",
+      detail: "Review it before locking in or saving."
+    });
   }
 
   if (navigator.storage?.persist) {
