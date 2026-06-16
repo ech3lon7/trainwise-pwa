@@ -77,6 +77,9 @@ const resetAndHelpers = `
   state.settings = {};
   state.selectedExercise = "Push-up";
   state.coachTargetMuscles = [];
+  state.workoutDraft = [];
+  state.draftDate = todayISO();
+  state.templateQueue = [];
   state.settings.customExercises = [
     ...muscleGroups.map((muscle) => ({
       id: "custom-" + muscle.id,
@@ -222,6 +225,165 @@ const priorWeekStillRotatesExercises = runScenario(`
 
 assert.strictEqual(priorWeekStillRotatesExercises.weeklySets, 0, `Expected prior Sunday sets to reset on Monday, got ${priorWeekStillRotatesExercises.weeklySets}`);
 assert.strictEqual(priorWeekStillRotatesExercises.chosen, "Hammer Curl", `Expected prior-week exercise history to still influence rotation, got ${priorWeekStillRotatesExercises.chosen}`);
+
+const directMuscleDateGapBlocksYesterday = runScenario(`
+  ${resetAndHelpers}
+  var chest = muscleGroups.find((muscle) => muscle.id === "chest");
+  state.workouts = [
+    makeWorkout(chest, 1, 2),
+    ...muscleGroups
+      .filter((muscle) => muscle.id !== "chest")
+      .map((muscle) => makeWorkout(muscle, 3, 2))
+  ];
+  var plan = buildTodayPlan(60);
+  ({
+    plannedMuscles: plan.sessionPlan.items.map((item) => item.muscle.id),
+    skipped: plan.sessionPlan.deprioritized.map((item) => item.reason).join(" ")
+  });
+`);
+
+assert(!directMuscleDateGapBlocksYesterday.plannedMuscles.includes("chest"), `Expected direct chest work yesterday to be blocked by date gap, got ${directMuscleDateGapBlocksYesterday.plannedMuscles.join(", ")}`);
+assert(directMuscleDateGapBlocksYesterday.skipped.includes("2-day gap"), `Expected skipped reason to mention the 2-day gap, got ${directMuscleDateGapBlocksYesterday.skipped}`);
+
+const directMuscleDateGapAllowsTwoDays = runScenario(`
+  ${resetAndHelpers}
+  var chest = muscleGroups.find((muscle) => muscle.id === "chest");
+  state.workouts = [
+    makeWorkout(chest, 2, 2),
+    ...muscleGroups
+      .filter((muscle) => muscle.id !== "chest")
+      .map((muscle) => makeWorkout(muscle, 2, 22))
+  ];
+  var plan = buildTodayPlan(60);
+  ({ plannedMuscles: plan.sessionPlan.items.map((item) => item.muscle.id) });
+`);
+
+assert(directMuscleDateGapAllowsTwoDays.plannedMuscles.includes("chest"), `Expected direct chest work 2 dates ago to be available again, got ${directMuscleDateGapAllowsTwoDays.plannedMuscles.join(", ")}`);
+
+const dailyMuscleCap = runScenario(`
+  ${resetAndHelpers}
+  state.workouts = muscleGroups.map((muscle) => makeWorkout(muscle, 3, 2));
+  var plan = buildTodayPlan(60).sessionPlan;
+  ({
+    itemCount: plan.items.length,
+    muscles: [...new Set(plan.items.map((item) => item.muscle.id))]
+  });
+`);
+
+assert(dailyMuscleCap.muscles.length <= 5, `Expected Coach to cap new daily muscles at 5, got ${dailyMuscleCap.muscles.length}: ${dailyMuscleCap.muscles.join(", ")}`);
+
+const weeklyExerciseFairnessCap = runScenario(`
+  ${resetAndHelpers}
+  state.settings.customExercises = [
+    { id: "curl", name: "Bicep Curl", primaryMuscles: ["biceps"], secondaryMuscles: [], equipment: "dumbbells", reps: "8-15", rest: "60-120 sec", cue: "Curl.", userCreated: true },
+    { id: "hammer", name: "Hammer Curl", primaryMuscles: ["biceps"], secondaryMuscles: [], equipment: "dumbbells", reps: "8-15", rest: "60-120 sec", cue: "Hammer.", userCreated: true }
+  ];
+  var biceps = muscleGroups.find((muscle) => muscle.id === "biceps");
+  state.workouts = [
+    makeWorkout(biceps, 2, 3, { id: "curl-week-1", exercise: "Bicep Curl", exerciseId: "curl", primaryMuscles: ["biceps"], restSeconds: 90 }),
+    makeWorkout(biceps, 2, 3, { id: "curl-week-2", exercise: "Bicep Curl", exerciseId: "curl", primaryMuscles: ["biceps"], restSeconds: 90 }),
+    makeWorkout(biceps, 9, 3, { id: "curl-old-1", exercise: "Bicep Curl", exerciseId: "curl", primaryMuscles: ["biceps"], restSeconds: 90 }),
+    makeWorkout(biceps, 14, 3, { id: "curl-old-2", exercise: "Bicep Curl", exerciseId: "curl", primaryMuscles: ["biceps"], restSeconds: 90 }),
+    makeWorkout(biceps, 21, 3, { id: "curl-old-3", exercise: "Bicep Curl", exerciseId: "curl", primaryMuscles: ["biceps"], restSeconds: 90 })
+  ];
+  var chosen = chooseExerciseForMuscle("biceps");
+  ({ chosen: chosen?.name, curlMemory: coachExerciseMemory(resolveExerciseMeta("Bicep Curl")).weeklyUses });
+`);
+
+assert.strictEqual(weeklyExerciseFairnessCap.chosen, "Hammer Curl", `Expected weekly use cap to rotate away from repeated Bicep Curl, got ${weeklyExerciseFairnessCap.chosen}`);
+assert.strictEqual(weeklyExerciseFairnessCap.curlMemory, 2, `Expected Curl weekly use count to be 2, got ${weeklyExerciseFairnessCap.curlMemory}`);
+
+const activeDraftUpdatesCoachPlan = runScenario(`
+  ${resetAndHelpers}
+  var biceps = muscleGroups.find((muscle) => muscle.id === "biceps");
+  state.workouts = [makeWorkout(biceps, 2, 8)];
+  state.draftDate = todayISO();
+  state.workoutDraft = [{
+    draftId: "draft-biceps",
+    editingWorkoutId: null,
+    exercise: "Biceps Exercise",
+    targetMuscle: "biceps",
+    notes: "",
+    setRows: [
+      { weight: 20, reps: 10, rir: 1, restSeconds: 90 },
+      { weight: 20, reps: 10, rir: 1, restSeconds: 90 }
+    ]
+  }];
+  var bicepsStat = rankedCoachMuscles().find((muscle) => muscle.id === "biceps");
+  ({ sets: bicepsStat.sets, sessions: bicepsStat.sessions });
+`);
+
+assert.strictEqual(activeDraftUpdatesCoachPlan.sets, 10, `Expected Coach to count active log draft as pending biceps work, got ${activeDraftUpdatesCoachPlan.sets}`);
+assert.strictEqual(activeDraftUpdatesCoachPlan.sessions, 2, `Expected pending draft date to count as a Coach touch, got ${activeDraftUpdatesCoachPlan.sessions}`);
+
+const repeatedFailureRotatesExercise = runScenario(`
+  ${resetAndHelpers}
+  state.settings.customExercises = [
+    { id: "bench", name: "Flat Bench Press", primaryMuscles: ["chest"], secondaryMuscles: ["triceps", "shoulders"], equipment: "barbell", reps: "8-12", rest: "120-180 sec", cue: "Bench.", userCreated: true },
+    { id: "incline", name: "Incline Dumbbell Press", primaryMuscles: ["chest"], secondaryMuscles: ["shoulders", "triceps"], equipment: "dumbbells", reps: "8-15", rest: "90-150 sec", cue: "Incline.", userCreated: true },
+    ...muscleGroups.filter((muscle) => muscle.id !== "chest").map((muscle) => ({
+      id: "custom-" + muscle.id,
+      name: muscle.label + " Exercise",
+      primaryMuscles: [muscle.id],
+      secondaryMuscles: [],
+      equipment: "custom",
+      reps: "8-15",
+      rest: "90-180 sec",
+      cue: "Test.",
+      userCreated: true
+    }))
+  ];
+  var chest = muscleGroups.find((muscle) => muscle.id === "chest");
+  var benchWorkout = (daysAgo, reps, rir) => makeWorkout(chest, daysAgo, 3, {
+    exercise: "Flat Bench Press",
+    exerciseId: "bench",
+    primaryMuscles: ["chest"],
+    secondaryMuscles: ["triceps", "shoulders"],
+    restSeconds: 150
+  });
+  state.workouts = [
+    { ...benchWorkout(2, 8, 0), reps: 8, setRows: [{ weight: 145, reps: 8, rir: 0, restSeconds: 150 }, { weight: 135, reps: 8, rir: 0, restSeconds: 150 }, { weight: 125, reps: 8, rir: 1, restSeconds: 150 }] },
+    { ...benchWorkout(5, 10, 0), reps: 10, setRows: [{ weight: 145, reps: 10, rir: 0, restSeconds: 150 }, { weight: 135, reps: 10, rir: 1, restSeconds: 150 }, { weight: 125, reps: 10, rir: 1, restSeconds: 150 }] },
+    { ...benchWorkout(8, 11, 1), reps: 11, setRows: [{ weight: 145, reps: 11, rir: 1, restSeconds: 150 }, { weight: 135, reps: 11, rir: 1, restSeconds: 150 }, { weight: 125, reps: 11, rir: 1, restSeconds: 150 }] },
+    ...muscleGroups.filter((muscle) => muscle.id !== "chest").map((muscle) => makeWorkout(muscle, 2, 10))
+  ];
+  var plan = buildTodayPlan(60);
+  var chestItem = plan.sessionPlan.items.find((item) => item.muscle.id === "chest");
+  ({ exercise: chestItem?.exercise.name, note: plan.notes.join(" "), why: plan.why.join(" ") });
+`);
+
+assert.strictEqual(repeatedFailureRotatesExercise.exercise, "Incline Dumbbell Press", `Expected repeated bench failure to rotate to incline, got ${repeatedFailureRotatesExercise.exercise}`);
+assert((repeatedFailureRotatesExercise.note + repeatedFailureRotatesExercise.why).includes("deload") || (repeatedFailureRotatesExercise.note + repeatedFailureRotatesExercise.why).includes("stalled"), `Expected repeated failure explanation, got ${repeatedFailureRotatesExercise.note} ${repeatedFailureRotatesExercise.why}`);
+
+const planIncludesProgressionTarget = runScenario(`
+  ${resetAndHelpers}
+  state.settings.customExercises = [
+    { id: "curl", name: "Bicep Curl", primaryMuscles: ["biceps"], secondaryMuscles: [], equipment: "dumbbells", reps: "8-15", rest: "60-120 sec", cue: "Curl.", userCreated: true },
+    ...muscleGroups.filter((muscle) => muscle.id !== "biceps").map((muscle) => ({
+      id: "custom-" + muscle.id,
+      name: muscle.label + " Exercise",
+      primaryMuscles: [muscle.id],
+      secondaryMuscles: [],
+      equipment: "custom",
+      reps: "8-15",
+      rest: "90-180 sec",
+      cue: "Test.",
+      userCreated: true
+    }))
+  ];
+  var biceps = muscleGroups.find((muscle) => muscle.id === "biceps");
+  state.workouts = [
+    makeWorkout(biceps, 2, 3, { exercise: "Bicep Curl", exerciseId: "curl", primaryMuscles: ["biceps"], restSeconds: 90 }),
+    makeWorkout(biceps, 8, 3, { exercise: "Bicep Curl", exerciseId: "curl", primaryMuscles: ["biceps"], restSeconds: 90 }),
+    ...muscleGroups.filter((muscle) => muscle.id !== "biceps").map((muscle) => makeWorkout(muscle, 2, 10))
+  ];
+  var plan = buildTodayPlan(40);
+  var bicepsItem = plan.sessionPlan.items.find((item) => item.muscle.id === "biceps");
+  ({ label: bicepsItem?.planTarget?.label || "", detail: bicepsItem?.planTarget?.detail || "" });
+`);
+
+assert(planIncludesProgressionTarget.label.includes("Target"), `Expected plan item to expose an actionable progression target, got ${planIncludesProgressionTarget.label}`);
+assert(planIncludesProgressionTarget.detail.includes("RIR"), `Expected progression detail to include RIR, got ${planIncludesProgressionTarget.detail}`);
 
 const nutritionGoalDefault = runScenario(`
   ${resetAndHelpers}
@@ -470,7 +632,7 @@ const nearOptimumTimeframe = runScenario(`
 `);
 
 assert(withinCoachTimeWindow(nearOptimumTimeframe.total, 60), `Expected 18/20 muscles to still fill 1 hour with more muscle slots, got ${nearOptimumTimeframe.total}: ${nearOptimumTimeframe.detail}`);
-assert(nearOptimumTimeframe.itemCount > 6, `Expected 18/20 1 hour plan to relax the old 6-exercise cap, got ${nearOptimumTimeframe.itemCount}`);
+assert(nearOptimumTimeframe.itemCount <= 5, `Expected 18/20 1 hour plan to honor the 5-muscle cap, got ${nearOptimumTimeframe.itemCount}`);
 
 const highVolumeTimeframe = runScenario(`
   ${resetAndHelpers}
@@ -480,14 +642,16 @@ const highVolumeTimeframe = runScenario(`
     mode: plan.mode,
     total: plan.sessionPlan.totalMinutes,
     hasHighVolumeReason: plan.why.join(" ").includes("High-volume filler"),
-    maxProjectedSets: Math.max(...plan.sessionPlan.items.map((item) => item.muscle.sets + item.sets))
+    maxProjectedSets: Math.max(...plan.sessionPlan.items.map((item) => item.muscle.sets + item.sets)),
+    shortfallReason: plan.sessionPlan.shortfallReason
   });
 `);
 
 assert.strictEqual(highVolumeTimeframe.mode, "session", `Expected all-optimum muscles to build a time-fill session, got ${highVolumeTimeframe.mode}`);
-assert(withinCoachTimeWindow(highVolumeTimeframe.total, 60), `Expected all-optimum 1 hour plan to land near target with labeled high-volume filler, got ${highVolumeTimeframe.total}`);
+assert(highVolumeTimeframe.total < 57, `Expected all-optimum plan to stop short instead of exceeding high-volume limits, got ${highVolumeTimeframe.total}`);
 assert(highVolumeTimeframe.hasHighVolumeReason, "Expected all-optimum time-fill plan to label high-volume filler in Why this?");
 assert(highVolumeTimeframe.maxProjectedSets <= 22, `Expected high-volume filler to cap projected sets at 22, got ${highVolumeTimeframe.maxProjectedSets}`);
+assert(highVolumeTimeframe.shortfallReason.includes("volume limits"), `Expected all-optimum shortfall to explain volume limits, got ${highVolumeTimeframe.shortfallReason}`);
 
 const restartTimeframe = runScenario(`
   ${resetAndHelpers}
@@ -503,7 +667,7 @@ const restartTimeframe = runScenario(`
 
 assert.strictEqual(restartTimeframe.mode, "restart", `Expected no-workout case to remain restart mode, got ${restartTimeframe.mode}`);
 assert(withinCoachTimeWindow(restartTimeframe.total, 60), `Expected restart 1 hour plan to fill time with more muscles, got ${restartTimeframe.total}`);
-assert(restartTimeframe.itemCount > 5, `Expected restart 1 hour plan to relax the old 5-exercise cap, got ${restartTimeframe.itemCount}`);
+assert(restartTimeframe.itemCount <= 5, `Expected restart 1 hour plan to honor the 5-muscle cap, got ${restartTimeframe.itemCount}`);
 assert(restartTimeframe.maxSets <= 3, `Expected restart plan to keep per-muscle volume controlled, got max ${restartTimeframe.maxSets}`);
 
 const insufficientLibraryShortfall = runScenario(`

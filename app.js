@@ -3,7 +3,7 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 2;
 const STORES = ["workouts", "metrics", "settings"];
-const APP_VERSION = "1.5.13";
+const APP_VERSION = "1.5.16";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 let dbOpenPromise = null;
 let chartId = 0;
@@ -22,6 +22,12 @@ const NUTRITION_GOAL_OPTIONS = [
   { id: "bulk", label: "Bulk", hint: "Lean gain" },
   { id: "maintain", label: "Maintain", hint: "Hold steady" },
   { id: "cut", label: "Cut", hint: "Slow loss" }
+];
+const NUTRITION_MEALS = [
+  { id: "breakfast", label: "Breakfast" },
+  { id: "lunch", label: "Lunch" },
+  { id: "dinner", label: "Dinner" },
+  { id: "snacks", label: "Snacks" }
 ];
 
 const HYPERTROPHY = {
@@ -62,6 +68,12 @@ const COACH_MUSCLE_REGIONS = {
   abs: "core"
 };
 const COACH_REGION_ORDER = ["push", "pull", "legs", "core"];
+const COACH_DAILY_MUSCLE_CAP = 5;
+const COACH_MUSCLE_RECOVERY_DAYS = 2;
+const COACH_WEEKLY_EXERCISE_USE_CAP = 2;
+const COACH_SAME_EXERCISE_COOLDOWN_DAYS = 4;
+const COACH_FAILURE_ROTATION_DAYS = 7;
+const COACH_PERFORMANCE_DROP_THRESHOLD = 0.025;
 
 const muscleIconPaths = {
   chest: "./assets/muscles/chest.png",
@@ -108,6 +120,7 @@ const state = {
   dismissedRecordTrophies: new Set(),
   templateQueue: [],
   draftDate: todayISO(),
+  metricDate: todayISO(),
   draftNotes: "",
   setRows: [
     { weight: "", reps: 10, rir: 2, restSeconds: null },
@@ -681,18 +694,213 @@ function progressionTargetForExercise(exerciseName) {
   };
 }
 
-function weeklyWorkouts() {
+function weeklyWorkouts(workouts = state.workouts) {
   const start = currentTrainingWeekStart();
-  return state.workouts.filter((entry) => parseLocalDate(entry.date) >= start);
+  return workouts.filter((entry) => parseLocalDate(entry.date) >= start);
 }
 
 function getWeeklyVolume() {
   return weeklyWorkouts().reduce((sum, entry) => sum + workoutVolume(entry), 0);
 }
 
+function emptyNutritionMeals() {
+  return Object.fromEntries(NUTRITION_MEALS.map((meal) => [meal.id, { calories: 0, protein: 0 }]));
+}
+
+function nutritionMealsHaveData(meals = {}) {
+  return NUTRITION_MEALS.some((meal) => {
+    const source = meals?.[meal.id];
+    return parseNum(source?.calories) > 0 || parseNum(source?.protein) > 0;
+  });
+}
+
+function metricHasMealData(entry = {}) {
+  return nutritionMealsHaveData(entry.meals);
+}
+
+function nutritionMealsFromData(data = {}) {
+  const meals = emptyNutritionMeals();
+  for (const meal of NUTRITION_MEALS) {
+    meals[meal.id] = {
+      calories: parseNum(data[`meal-${meal.id}-calories`]),
+      protein: parseNum(data[`meal-${meal.id}-protein`])
+    };
+  }
+  return meals;
+}
+
+function normalizeMetricMeals(entry = {}) {
+  const meals = emptyNutritionMeals();
+  for (const meal of NUTRITION_MEALS) {
+    meals[meal.id] = {
+      calories: parseNum(entry.meals?.[meal.id]?.calories),
+      protein: parseNum(entry.meals?.[meal.id]?.protein)
+    };
+  }
+  return meals;
+}
+
+function nutritionMealTotals(meals = emptyNutritionMeals()) {
+  return NUTRITION_MEALS.reduce((totals, meal) => {
+    totals.calories += parseNum(meals[meal.id]?.calories);
+    totals.protein += parseNum(meals[meal.id]?.protein);
+    return totals;
+  }, { calories: 0, protein: 0 });
+}
+
+function nutritionQuickTotalsFromData(data = {}) {
+  return {
+    calories: parseNum(data.calories),
+    protein: parseNum(data.protein)
+  };
+}
+
+function nutritionFormTotalsFromData(data = {}) {
+  const meals = nutritionMealsFromData(data);
+  if (nutritionMealsHaveData(meals)) return nutritionMealTotals(meals);
+  return nutritionQuickTotalsFromData(data);
+}
+
+function metricTimestamp(entry = {}) {
+  return String(entry.updatedAt || entry.createdAt || "");
+}
+
+function sortMetricsAsc(entries = []) {
+  return [...entries].sort((a, b) => {
+    const dateCompare = String(a.date || "").localeCompare(String(b.date || ""));
+    if (dateCompare) return dateCompare;
+    return metricTimestamp(a).localeCompare(metricTimestamp(b));
+  });
+}
+
+function normalizeMetricEntry(entry = {}) {
+  const meals = normalizeMetricMeals(entry);
+  const mealDetail = nutritionMealsHaveData(meals);
+  const quickTotals = mealDetail
+    ? { calories: 0, protein: 0 }
+    : {
+        calories: parseNum(entry.quickCalories ?? entry.calories),
+        protein: parseNum(entry.quickProtein ?? entry.protein)
+      };
+  const mealTotals = nutritionMealTotals(meals);
+  const totals = mealDetail ? mealTotals : quickTotals;
+  return {
+    ...entry,
+    id: entry.id || uid(),
+    date: entry.date || todayISO(),
+    bodyWeight: parseNum(entry.bodyWeight),
+    calories: totals.calories,
+    protein: totals.protein,
+    meals,
+    mealDetail,
+    quickCalories: quickTotals.calories,
+    quickProtein: quickTotals.protein,
+    notes: String(entry.notes || "").trim(),
+    createdAt: entry.createdAt || new Date().toISOString(),
+    updatedAt: entry.updatedAt || entry.createdAt || new Date().toISOString()
+  };
+}
+
+function metricEntriesForDate(date, entries = state.metrics) {
+  return entries.filter((entry) => entry.date === date);
+}
+
+function mergeMetricEntries(entries = [], date = entries[0]?.date || todayISO()) {
+  const dated = sortMetricsAsc(entries.filter((entry) => (entry.date || date) === date));
+  if (!dated.length) return null;
+  const mergedMeals = emptyNutritionMeals();
+  const normalized = dated.map(normalizeMetricEntry);
+  let quickCalories = 0;
+  let quickProtein = 0;
+  let mealDetail = false;
+  for (const entry of normalized) {
+    if (entry.mealDetail) {
+      mealDetail = true;
+      for (const meal of NUTRITION_MEALS) {
+        mergedMeals[meal.id].calories += parseNum(entry.meals[meal.id]?.calories);
+        mergedMeals[meal.id].protein += parseNum(entry.meals[meal.id]?.protein);
+      }
+    } else {
+      quickCalories += parseNum(entry.quickCalories);
+      quickProtein += parseNum(entry.quickProtein);
+    }
+  }
+  const mealTotals = nutritionMealTotals(mergedMeals);
+  const totals = {
+    calories: quickCalories + mealTotals.calories,
+    protein: quickProtein + mealTotals.protein
+  };
+  const latest = normalized[normalized.length - 1];
+  const first = normalized[0];
+  const latestWeight = [...normalized].reverse().find((entry) => entry.bodyWeight > 0)?.bodyWeight || 0;
+  const latestNotes = [...normalized].reverse().find((entry) => entry.notes)?.notes || "";
+  return {
+    ...latest,
+    date,
+    bodyWeight: latestWeight,
+    calories: totals.calories,
+    protein: totals.protein,
+    meals: mergedMeals,
+    mealDetail,
+    quickCalories,
+    quickProtein,
+    notes: latestNotes,
+    createdAt: first.createdAt,
+    updatedAt: latest.updatedAt || latest.createdAt
+  };
+}
+
+function canonicalMetricEntries(entries = state.metrics) {
+  const byDate = new Map();
+  for (const entry of entries) {
+    if (!entry?.date) continue;
+    if (!byDate.has(entry.date)) byDate.set(entry.date, []);
+    byDate.get(entry.date).push(entry);
+  }
+  return [...byDate.entries()]
+    .map(([date, items]) => mergeMetricEntries(items, date))
+    .filter(Boolean)
+    .sort((a, b) => {
+      const dateCompare = String(b.date || "").localeCompare(String(a.date || ""));
+      if (dateCompare) return dateCompare;
+      return metricTimestamp(b).localeCompare(metricTimestamp(a));
+    });
+}
+
+function metricForDate(date) {
+  return mergeMetricEntries(metricEntriesForDate(date), date);
+}
+
+function metricDuplicateIdsForDate(date, keepId) {
+  return metricEntriesForDate(date)
+    .filter((entry) => entry.id && entry.id !== keepId)
+    .map((entry) => entry.id);
+}
+
+function metricEntryFromFormData(data = {}, existing = null) {
+  const meals = nutritionMealsFromData(data);
+  const mealDetail = nutritionMealsHaveData(meals);
+  const quickTotals = nutritionQuickTotalsFromData(data);
+  const totals = mealDetail ? nutritionMealTotals(meals) : quickTotals;
+  return {
+    id: existing?.id || uid(),
+    date: data.date || existing?.date || todayISO(),
+    bodyWeight: parseNum(data.bodyWeight),
+    calories: totals.calories,
+    protein: totals.protein,
+    meals: mealDetail ? meals : emptyNutritionMeals(),
+    mealDetail,
+    quickCalories: mealDetail ? 0 : quickTotals.calories,
+    quickProtein: mealDetail ? 0 : quickTotals.protein,
+    notes: String(data.notes || "").trim(),
+    createdAt: existing?.createdAt || new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+}
+
 function getAverage(field, days) {
   const start = recentDays(days);
-  const values = state.metrics
+  const values = canonicalMetricEntries()
     .filter((entry) => parseLocalDate(entry.date) >= start && entry[field] > 0)
     .map((entry) => entry[field]);
   if (!values.length) return 0;
@@ -700,12 +908,12 @@ function getAverage(field, days) {
 }
 
 function lastMetric(field) {
-  return state.metrics.find((entry) => Number.isFinite(entry[field]) && entry[field] > 0);
+  return canonicalMetricEntries().find((entry) => Number.isFinite(entry[field]) && entry[field] > 0);
 }
 
 function weightTrend(days = 14) {
   const start = recentDays(days);
-  const entries = state.metrics
+  const entries = canonicalMetricEntries()
     .filter((entry) => parseLocalDate(entry.date) >= start && entry.bodyWeight > 0)
     .sort((a, b) => a.date.localeCompare(b.date));
   if (entries.length < 2) return null;
@@ -734,7 +942,7 @@ function nutritionGoalLabel(goal = selectedNutritionGoal()) {
 
 function metricEntriesForField(field, days) {
   const start = recentDays(days);
-  return state.metrics
+  return canonicalMetricEntries()
     .filter((entry) => parseLocalDate(entry.date) >= start && Number.isFinite(entry[field]) && entry[field] > 0)
     .sort((a, b) => a.date.localeCompare(b.date));
 }
@@ -823,13 +1031,13 @@ function healthCoachStatMarkup(summary) {
   `;
 }
 
-function muscleSetStats() {
+function muscleSetStats(workouts = weeklyWorkouts()) {
   const totals = Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, 0]));
   const sessions = Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, new Set()]));
   const highRir = [];
   const unknown = [];
 
-  for (const workout of weeklyWorkouts()) {
+  for (const workout of workouts) {
     const meta = workoutMeta(workout);
     const credits = creditedSetsForWorkout(workout);
     const hasTrackedMuscle = Object.keys(credits).some((muscle) => totals[muscle] !== undefined);
@@ -875,29 +1083,253 @@ function workoutsNewestFirst(workouts = state.workouts) {
   });
 }
 
-function latestWorkout() {
-  return workoutsNewestFirst()[0] || null;
+function latestWorkout(workouts = state.workouts) {
+  return workoutsNewestFirst(workouts)[0] || null;
 }
 
-function exerciseHistoryForDefinition(exercise) {
+function coachPendingWorkoutEntries() {
+  const date = state.draftDate || todayISO();
+  const draftDate = parseLocalDate(date);
+  const today = parseLocalDate(todayISO());
+  if (Number.isNaN(draftDate.getTime()) || draftDate < currentTrainingWeekStart() || draftDate > today) return [];
+  const drafts = Array.isArray(state.workoutDraft) ? state.workoutDraft : [];
+  return drafts.map((draft, index) => {
+    const setRows = normalizeSetRows(draft.setRows).filter((row) => row.weight > 0 && row.reps > 0);
+    if (!draft.exercise || !setRows.length) return null;
+    const meta = resolveExerciseMeta(draft.exercise, draft.targetMuscle);
+    const best = setRows.reduce((winner, row) => {
+      const score = row.weight * (1 + row.reps / 30);
+      return !winner || score > winner.score ? { ...row, score } : winner;
+    }, null);
+    return {
+      id: `pending-${draft.draftId || index}`,
+      pendingDraft: true,
+      editingWorkoutId: draft.editingWorkoutId || null,
+      date,
+      exercise: draft.exercise,
+      exerciseId: meta.id,
+      primaryMuscles: [...meta.primaryMuscles],
+      secondaryMuscles: [...meta.secondaryMuscles],
+      equipment: meta.equipment,
+      setRows,
+      sets: setRows.length,
+      reps: best?.reps || 1,
+      weight: best?.weight || 0,
+      rir: averageRir({ setRows }),
+      notes: draft.notes || "",
+      order: Number.isFinite(Number(draft.order)) ? Number(draft.order) : index,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    };
+  }).filter(Boolean);
+}
+
+function coachWorkoutEntries() {
+  const pending = coachPendingWorkoutEntries();
+  if (!pending.length) return state.workouts;
+  const editedIds = new Set(pending.map((entry) => entry.editingWorkoutId).filter(Boolean));
+  return [
+    ...state.workouts.filter((entry) => !editedIds.has(entry.id)),
+    ...pending
+  ];
+}
+
+function coachWeeklyWorkouts(workouts = coachWorkoutEntries()) {
+  return weeklyWorkouts(workouts);
+}
+
+function exerciseHistoryForDefinition(exercise, workouts = state.workouts) {
   const normalizedName = normalizeName(exercise.name);
-  return workoutsNewestFirst().filter((workout) => (
+  return workoutsNewestFirst(workouts).filter((workout) => (
     workout.exerciseId === exercise.id || normalizeName(workout.exercise) === normalizedName
   ));
 }
 
-function scoreExerciseForMuscle(exercise, muscleId) {
-  const history = exerciseHistoryForDefinition(exercise);
+function coachExerciseMemory(exercise, workouts = coachWorkoutEntries()) {
+  const history = exerciseHistoryForDefinition(exercise, workouts);
   const last = history[0] || null;
   const daysSince = last ? daysBetween(last.date, todayISO()) : null;
+  const weeklyUses = weeklyWorkouts(history).length;
+  return {
+    exercise,
+    history,
+    last,
+    daysSince,
+    weeklyUses,
+    usedThisWeekTooOften: weeklyUses >= COACH_WEEKLY_EXERCISE_USE_CAP,
+    recentlyUsed: daysSince !== null && daysSince < COACH_SAME_EXERCISE_COOLDOWN_DAYS
+  };
+}
+
+function comparableRepDrop(current, previous) {
+  const currentRows = setRowsFromWorkout(current);
+  const previousRows = setRowsFromWorkout(previous);
+  return currentRows.reduce((drops, row, index) => {
+    const prior = previousRows[index];
+    if (!prior || row.weight <= 0 || prior.weight <= 0) return drops;
+    const similarOrHeavier = row.weight >= prior.weight * 0.98;
+    return similarOrHeavier && row.reps < prior.reps ? drops + 1 : drops;
+  }, 0);
+}
+
+function exerciseUnderperformed(current, previous) {
+  if (!current || !previous) return false;
+  const currentE1rm = e1rm(current);
+  const previousE1rm = e1rm(previous);
+  const e1rmDrop = previousE1rm > 0 && currentE1rm < previousE1rm * (1 - COACH_PERFORMANCE_DROP_THRESHOLD);
+  const repDrops = comparableRepDrop(current, previous);
+  const failureRir = (averageRir(current) ?? HYPERTROPHY.idealRirMin) <= 0;
+  return e1rmDrop || repDrops >= 2 || (failureRir && (e1rmDrop || repDrops > 0 || currentE1rm <= previousE1rm));
+}
+
+function coachExercisePerformanceSignal(exercise, workouts = coachWorkoutEntries()) {
+  const history = exerciseHistoryForDefinition(exercise, workouts);
+  if (history.length < 2) {
+    return {
+      status: "neutral",
+      tone: "",
+      history,
+      latest: history[0] || null,
+      previous: null,
+      message: ""
+    };
+  }
+  const latest = history[0];
+  const previous = history[1];
+  const latestUnder = exerciseUnderperformed(latest, previous);
+  const previousUnder = history.length >= 3 && exerciseUnderperformed(previous, history[2]);
+  if (latestUnder && previousUnder) {
+    return {
+      status: "repeated-failure",
+      tone: "warn",
+      history,
+      latest,
+      previous,
+      message: `${exercise.name} has stalled across recent sessions; rotate or deload before adding more volume.`
+    };
+  }
+  if (latestUnder) {
+    return {
+      status: "isolated-failure",
+      tone: "warn",
+      history,
+      latest,
+      previous,
+      message: `${exercise.name} dipped last session; use a small load reduction and keep 1-2 RIR.`
+    };
+  }
+  const latestE1rm = e1rm(latest);
+  const previousE1rm = e1rm(previous);
+  if (latestE1rm > previousE1rm * 1.01) {
+    return {
+      status: "progressing",
+      tone: "good",
+      history,
+      latest,
+      previous,
+      message: `${exercise.name} is progressing; use the next small overload target.`
+    };
+  }
+  return {
+    status: "steady",
+    tone: "",
+    history,
+    latest,
+    previous,
+    message: `${exercise.name} is steady; progress with a small rep or load target.`
+  };
+}
+
+function roundLoadTarget(weight) {
+  if (!Number.isFinite(weight) || weight <= 0) return 0;
+  const step = weight >= 50 ? 5 : 2.5;
+  return Math.max(step, Math.round(weight / step) * step);
+}
+
+function coachPlanTargetForExercise(exercise, signal = coachExercisePerformanceSignal(exercise)) {
+  const latest = signal.latest || exerciseHistoryForDefinition(exercise)[0];
+  const top = latest ? bestSet(latest) : null;
+  const range = parseRepRange(exercise.reps);
+  if (!top) {
+    return {
+      kind: "baseline",
+      label: `Target ${exercise.reps} reps`,
+      detail: `${HYPERTROPHY.idealRirMin}-${HYPERTROPHY.idealRirMax} RIR`,
+      tone: "",
+      message: ""
+    };
+  }
+  if (signal.status === "repeated-failure") {
+    const targetWeight = roundLoadTarget(top.weight * 0.9);
+    return {
+      kind: "deload",
+      label: `Deload target ${fmt(targetWeight, 1)} lb`,
+      detail: `Rebuild at ${HYPERTROPHY.idealRirMin}-${HYPERTROPHY.idealRirMax} RIR before pushing load again.`,
+      tone: "warn",
+      loadMultiplier: 0.9,
+      repOffset: 0,
+      message: signal.message
+    };
+  }
+  if (signal.status === "isolated-failure") {
+    const targetWeight = roundLoadTarget(top.weight * 0.95);
+    return {
+      kind: "reset",
+      label: `Reset target ${fmt(targetWeight, 1)} lb`,
+      detail: `Keep reps controlled and stop around 1-2 RIR.`,
+      tone: "warn",
+      loadMultiplier: 0.95,
+      repOffset: 0,
+      message: signal.message
+    };
+  }
+  const progression = progressionTargetForExercise(exercise.name);
+  if (progression) {
+    return {
+      kind: "progression",
+      label: `Target ${progression.target}`,
+      detail: `${HYPERTROPHY.idealRirMin}-${HYPERTROPHY.idealRirMax} RIR`,
+      tone: progression.indicator.tone,
+      loadMultiplier: 1,
+      repOffset: top.reps < range.high ? 1 : 0,
+      message: signal.message
+    };
+  }
+  return {
+    kind: "baseline",
+    label: `Target ${exercise.reps} reps`,
+    detail: `${HYPERTROPHY.idealRirMin}-${HYPERTROPHY.idealRirMax} RIR`,
+    tone: "",
+    message: signal.message
+  };
+}
+
+function isMuscleAvailableForPlanning(target) {
+  return target.primaryDaysSince === null || target.primaryDaysSince >= COACH_MUSCLE_RECOVERY_DAYS;
+}
+
+function muscleDateGapReason(target) {
+  const when = target.primaryDaysSince === 0 ? "today" : "yesterday";
+  return `${target.label} was directly trained ${when}; Coach uses a 2-day gap by date before direct work returns.`;
+}
+
+function scoreExerciseForMuscle(exercise, muscleId, options = {}) {
+  const workouts = options.workouts || coachWorkoutEntries();
+  const memory = coachExerciseMemory(exercise, workouts);
+  const history = memory.history;
+  const last = history[0] || null;
+  const daysSince = memory.daysSince;
   const usageScore = Math.min(12, history.length * 2);
   const recencyPenalty = daysSince === null ? 0 : Math.max(0, 12 - daysSince);
+  const weeklyUsePenalty = Math.max(0, memory.weeklyUses - 1) * 9;
   const customScore = exercise.userCreated ? 3 : 0;
   const selectedScore = exercise.name === state.selectedExercise ? 1 : 0;
   const specificityScore = (exercise.primaryMuscles || []).length === 1 ? 1 : 0;
   const targetIndex = (exercise.primaryMuscles || []).indexOf(muscleId);
   const targetScore = targetIndex === 0 ? 1 : 0;
   const effortScore = last ? Math.max(0, 4 - (averageRir(last) ?? 2)) : 0;
+  const signal = coachExercisePerformanceSignal(exercise, workouts);
+  const performancePenalty = signal.status === "repeated-failure" ? 12 : signal.status === "isolated-failure" ? 5 : 0;
   let progressionScore = 0;
   if (history.length >= 2) {
     const recent3 = history.slice(0, 3);
@@ -907,14 +1339,33 @@ function scoreExerciseForMuscle(exercise, muscleId) {
     if (recentE1rm > priorE1rm) progressionScore = 3;
     else if (recentE1rm === priorE1rm && prior3.length) progressionScore = 1;
   }
-  return usageScore + customScore + selectedScore + specificityScore + targetScore + effortScore + progressionScore - recencyPenalty;
+  return usageScore + customScore + selectedScore + specificityScore + targetScore + effortScore + progressionScore - recencyPenalty - weeklyUsePenalty - performancePenalty;
 }
 
-function chooseExerciseForMuscle(muscleId, usedExerciseIds = new Set()) {
-  return exerciseDatabase()
-    .filter((exercise) => exercise.primaryMuscles.includes(muscleId) && !usedExerciseIds.has(exercise.id))
-    .sort((a, b) => scoreExerciseForMuscle(b, muscleId) - scoreExerciseForMuscle(a, muscleId))
-    [0] || null;
+function chooseExerciseForMuscle(muscleId, usedExerciseIds = new Set(), options = {}) {
+  const workouts = options.workouts || coachWorkoutEntries();
+  const candidates = exerciseDatabase()
+    .filter((exercise) => exercise.primaryMuscles.includes(muscleId) && !usedExerciseIds.has(exercise.id));
+  if (!candidates.length) return null;
+  const scored = candidates
+    .map((exercise) => {
+      const memory = coachExerciseMemory(exercise, workouts);
+      const signal = coachExercisePerformanceSignal(exercise, workouts);
+      return {
+        exercise,
+        memory,
+        signal,
+        score: scoreExerciseForMuscle(exercise, muscleId, { workouts })
+      };
+    })
+    .sort((a, b) => b.score - a.score);
+  const alternatives = scored.filter((item) => {
+    const repeatedFailure = item.signal.status === "repeated-failure" && item.memory.daysSince !== null && item.memory.daysSince < COACH_FAILURE_ROTATION_DAYS;
+    const tooRecent = item.memory.recentlyUsed;
+    const overWeeklyCap = item.memory.usedThisWeekTooOften;
+    return !repeatedFailure && !tooRecent && !overWeeklyCap;
+  });
+  return (alternatives[0] || scored[0]).exercise;
 }
 
 function hasPrimaryExerciseForMuscle(muscleId) {
@@ -940,8 +1391,9 @@ function averageRestSecondsForExercise(exercise) {
   return values.reduce((sum, value) => sum + value, 0) / values.length;
 }
 
-function latestWorkoutForMuscle(muscleId, mode = "any") {
-  return workoutsNewestFirst().find((workout) => {
+function latestWorkoutForMuscle(muscleId, mode = "any", workouts = state.workouts) {
+  if (!Array.isArray(workouts)) workouts = state.workouts;
+  return workoutsNewestFirst(workouts).find((workout) => {
     const meta = workoutMeta(workout);
     const primary = (meta.primaryMuscles || []).includes(muscleId);
     const secondary = (meta.secondaryMuscles || []).includes(muscleId);
@@ -951,9 +1403,10 @@ function latestWorkoutForMuscle(muscleId, mode = "any") {
   }) || null;
 }
 
-function muscleReadiness(stat) {
-  const lastPrimaryWorkout = latestWorkoutForMuscle(stat.id, "primary");
-  const lastSecondaryWorkout = latestWorkoutForMuscle(stat.id, "secondary");
+function muscleReadiness(stat, workouts = state.workouts) {
+  if (!Array.isArray(workouts)) workouts = state.workouts;
+  const lastPrimaryWorkout = latestWorkoutForMuscle(stat.id, "primary", workouts);
+  const lastSecondaryWorkout = latestWorkoutForMuscle(stat.id, "secondary", workouts);
   const lastWorkout = lastPrimaryWorkout || lastSecondaryWorkout;
   const primaryDaysSince = lastPrimaryWorkout ? daysBetween(lastPrimaryWorkout.date, todayISO()) : null;
   const secondaryDaysSince = lastSecondaryWorkout ? daysBetween(lastSecondaryWorkout.date, todayISO()) : null;
@@ -969,9 +1422,9 @@ function muscleReadiness(stat) {
   } else {
     reason = `Secondary work ${secondaryDaysSince} day${secondaryDaysSince === 1 ? "" : "s"} ago.`;
   }
-  if (primaryDaysSince !== null && primaryDaysSince <= 1) {
+  if (primaryDaysSince !== null && primaryDaysSince < COACH_MUSCLE_RECOVERY_DAYS) {
     readiness = "recent";
-    reason = `Directly trained ${primaryDaysSince === 0 ? "today" : "yesterday"}, so it can wait if another gap is useful.`;
+    reason = `Directly trained ${primaryDaysSince === 0 ? "today" : "yesterday"}; direct work returns after a 2-day date gap.`;
   } else if (secondaryDaysSince !== null && secondaryDaysSince <= 1) {
     readiness = "secondary-recent";
     reason = `Only secondary work ${secondaryDaysSince === 0 ? "today" : "yesterday"}; direct work can still be useful if the gap is large.`;
@@ -986,8 +1439,8 @@ function muscleReadiness(stat) {
 }
 
 function coachMusclePrioritySort(a, b) {
-  const aPrimaryRecent = a.primaryDaysSince !== null && a.primaryDaysSince <= 1;
-  const bPrimaryRecent = b.primaryDaysSince !== null && b.primaryDaysSince <= 1;
+  const aPrimaryRecent = a.primaryDaysSince !== null && a.primaryDaysSince < COACH_MUSCLE_RECOVERY_DAYS;
+  const bPrimaryRecent = b.primaryDaysSince !== null && b.primaryDaysSince < COACH_MUSCLE_RECOVERY_DAYS;
   const aSecondaryRecent = a.secondaryDaysSince !== null && a.secondaryDaysSince <= 1;
   const bSecondaryRecent = b.secondaryDaysSince !== null && b.secondaryDaysSince <= 1;
   return (aPrimaryRecent - bPrimaryRecent)
@@ -1023,7 +1476,13 @@ function balancedCoverageTargets(targets) {
 }
 
 function rankedCoachMuscles() {
-  return muscleSetStats().map(muscleReadiness).sort(coachMusclePrioritySort);
+  const workouts = coachWorkoutEntries();
+  return muscleSetStats(coachWeeklyWorkouts(workouts)).map((stat) => muscleReadiness(stat, workouts)).sort(coachMusclePrioritySort);
+}
+
+function coachMuscleSetStats() {
+  const workouts = coachWorkoutEntries();
+  return muscleSetStats(coachWeeklyWorkouts(workouts));
 }
 
 function optimumSetGap(stat) {
@@ -1123,22 +1582,38 @@ function buildSessionPlan(limitMinutes = SESSION_LIMIT_MINUTES, options = {}) {
   const targetFloor = Math.max(0, cappedLimit - COACH_TIME_TOLERANCE_MINUTES);
   const hardLimit = cappedLimit + COACH_TIME_TOLERANCE_MINUTES;
   const caps = sessionPlanCaps(cappedLimit, restart);
-  const allStats = muscleSetStats()
-    .map(muscleReadiness)
+  const coachWorkouts = coachWorkoutEntries();
+  const allStats = muscleSetStats(coachWeeklyWorkouts(coachWorkouts))
+    .map((stat) => muscleReadiness(stat, coachWorkouts))
     .sort(coachMusclePrioritySort);
   const stats = allStats.filter((stat) => stat.sets < HYPERTROPHY.minimumSets);
   const optimumCandidates = allStats.filter((stat) => stat.sets < HYPERTROPHY.growthHigh);
   const items = [];
   const missing = [];
   const missingIds = new Set();
+  const performanceNotes = [];
+  const performanceNoteKeys = new Set();
   let totalMinutes = 0;
   const usedExercises = new Set();
+
+  const addPerformanceNote = (signal) => {
+    if (!signal?.message || !["isolated-failure", "repeated-failure"].includes(signal.status)) return;
+    if (performanceNoteKeys.has(signal.message)) return;
+    performanceNoteKeys.add(signal.message);
+    performanceNotes.push(signal.message);
+  };
 
   const addTargetToPlan = (target, addOptions = {}) => {
     const trackMissing = addOptions.trackMissing !== false;
     const allowHighVolume = addOptions.allowHighVolume === true;
     const phase = addOptions.phase || (target.sets < HYPERTROPHY.minimumSets ? "floor" : "optimum");
-    const exercise = chooseExerciseForMuscle(target.id, usedExercises);
+    if (!items.some((item) => item.muscle.id === target.id) && new Set(items.map((item) => item.muscle.id)).size >= COACH_DAILY_MUSCLE_CAP) {
+      return false;
+    }
+    const candidateSignals = exerciseDatabase()
+      .filter((exercise) => exercise.primaryMuscles.includes(target.id) && !usedExercises.has(exercise.id))
+      .map((exercise) => ({ exercise, signal: coachExercisePerformanceSignal(exercise, coachWorkouts) }));
+    const exercise = chooseExerciseForMuscle(target.id, usedExercises, { workouts: coachWorkouts });
     if (!exercise) {
       if (trackMissing && !missingIds.has(target.id)) {
         missing.push(target);
@@ -1146,7 +1621,14 @@ function buildSessionPlan(limitMinutes = SESSION_LIMIT_MINUTES, options = {}) {
       }
       return false;
     }
+    candidateSignals
+      .filter((candidate) => candidate.exercise.id !== exercise.id)
+      .forEach((candidate) => addPerformanceNote(candidate.signal));
+    const performanceSignal = coachExercisePerformanceSignal(exercise, coachWorkouts);
+    const planTarget = coachPlanTargetForExercise(exercise, performanceSignal);
+    addPerformanceNote(performanceSignal);
     let sets = initialSetsForPlanTarget(target, caps, allowHighVolume);
+    if (planTarget.kind === "deload") sets = Math.max(1, sets - 1);
     if (!sets) return false;
     let minutes = estimateExerciseMinutes(exercise, sets);
     while (sets > 1 && totalMinutes + minutes > hardLimit) {
@@ -1154,21 +1636,17 @@ function buildSessionPlan(limitMinutes = SESSION_LIMIT_MINUTES, options = {}) {
       minutes = estimateExerciseMinutes(exercise, sets);
     }
     if (totalMinutes + minutes > hardLimit) return false;
-    items.push({ muscle: target, exercise, sets, minutes, reason: "", phase });
+    items.push({ muscle: target, exercise, sets, minutes, reason: "", phase, planTarget, performanceSignal });
     usedExercises.add(exercise.id);
     totalMinutes += minutes;
     return true;
   };
 
-  const freshTargets = balancedCoverageTargets(stats.filter((target) => !(target.primaryDaysSince !== null && target.primaryDaysSince <= 1)));
-  const recentPrimaryTargets = balancedCoverageTargets(stats.filter((target) => target.primaryDaysSince !== null && target.primaryDaysSince <= 1));
+  const freshTargets = balancedCoverageTargets(stats.filter(isMuscleAvailableForPlanning));
 
-  for (const group of [freshTargets, recentPrimaryTargets]) {
-    for (const target of group) {
-      if (items.some((item) => item.muscle.id === target.id)) continue;
-      addTargetToPlan(target);
-      if (items.length >= caps.maxItems) break;
-    }
+  for (const target of freshTargets) {
+    if (items.some((item) => item.muscle.id === target.id)) continue;
+    addTargetToPlan(target);
     if (items.length >= caps.maxItems) break;
   }
 
@@ -1176,18 +1654,15 @@ function buildSessionPlan(limitMinutes = SESSION_LIMIT_MINUTES, options = {}) {
     const supplementalTargets = allStats.filter((target) => (
       target.sets < HYPERTROPHY.growthHigh
       && !items.some((item) => item.muscle.id === target.id)
+      && isMuscleAvailableForPlanning(target)
     )).sort((a, b) => (
       Number(isCoachTargetMuscle(b.id, targetMuscles)) - Number(isCoachTargetMuscle(a.id, targetMuscles))
     ) || (optimumSetGap(b) - optimumSetGap(a)) || coachMusclePrioritySort(a, b));
-    const freshSupplemental = balancedCoverageTargets(supplementalTargets.filter((target) => !(target.primaryDaysSince !== null && target.primaryDaysSince <= 1)));
-    const recentSupplemental = balancedCoverageTargets(supplementalTargets.filter((target) => target.primaryDaysSince !== null && target.primaryDaysSince <= 1));
+    const freshSupplemental = balancedCoverageTargets(supplementalTargets);
 
-    for (const group of [freshSupplemental, recentSupplemental]) {
-      for (const target of group) {
-        if (totalMinutes >= targetFloor || items.length >= caps.maxItems) break;
-        addTargetToPlan(target, { phase: "optimum", trackMissing: stats.length === 0 });
-      }
+    for (const target of freshSupplemental) {
       if (totalMinutes >= targetFloor || items.length >= caps.maxItems) break;
+      addTargetToPlan(target, { phase: "optimum", trackMissing: stats.length === 0 });
     }
   }
 
@@ -1240,6 +1715,7 @@ function buildSessionPlan(limitMinutes = SESSION_LIMIT_MINUTES, options = {}) {
     const highVolumeTargets = balancedCoverageTargets(allStats.filter((target) => (
       target.sets < HYPERTROPHY.highVolumeFillMax
       && !items.some((item) => item.muscle.id === target.id)
+      && isMuscleAvailableForPlanning(target)
     )).sort((a, b) => (
       Number(isCoachTargetMuscle(b.id, targetMuscles)) - Number(isCoachTargetMuscle(a.id, targetMuscles))
     ) || (a.sets - b.sets) || coachMusclePrioritySort(a, b)));
@@ -1260,13 +1736,14 @@ function buildSessionPlan(limitMinutes = SESSION_LIMIT_MINUTES, options = {}) {
 
   const plannedIds = new Set(items.map((item) => item.muscle.id));
   const deprioritized = stats
-    .filter((target) => target.primaryDaysSince !== null && target.primaryDaysSince <= 1 && !plannedIds.has(target.id))
-    .map((target) => ({ muscle: target, reason: `${target.label} was directly trained ${target.primaryDaysSince === 0 ? "today" : "yesterday"}.` }));
+    .filter((target) => !isMuscleAvailableForPlanning(target) && !plannedIds.has(target.id))
+    .map((target) => ({ muscle: target, reason: muscleDateGapReason(target) }));
 
   return {
     items: items.map((item) => ({ ...item, reason: planPriorityReason(item) })),
     missing,
     deprioritized,
+    performanceNotes,
     totalMinutes,
     limitMinutes: cappedLimit,
     targetFloorMinutes: targetFloor,
@@ -1277,7 +1754,8 @@ function buildSessionPlan(limitMinutes = SESSION_LIMIT_MINUTES, options = {}) {
 }
 
 function buildTodayPlan(limitMinutes = selectedCoachTimeframeMinutes()) {
-  const lastWorkout = latestWorkout();
+  const coachWorkouts = coachWorkoutEntries();
+  const lastWorkout = latestWorkout(coachWorkouts);
   const daysSinceWorkout = lastWorkout ? daysBetween(lastWorkout.date, todayISO()) : null;
   const restart = daysSinceWorkout === null || daysSinceWorkout >= 4;
   const targetMuscles = selectedCoachTargetMuscles();
@@ -1319,6 +1797,10 @@ function buildTodayPlan(limitMinutes = selectedCoachTimeframeMinutes()) {
   if (sessionPlan.shortfallReason) {
     notes.push(sessionPlan.shortfallReason);
     why.push(sessionPlan.shortfallReason);
+  }
+  if (sessionPlan.performanceNotes?.length) {
+    notes.push(...sessionPlan.performanceNotes);
+    why.push(...sessionPlan.performanceNotes.slice(0, 2));
   }
   if (protein.bodyWeightLb && proteinAvg && proteinAvg < protein.floor) {
     notes.push(`Protein is under target: ${fmt(proteinAvg)}g avg vs ${fmt(protein.floor)}g floor.`);
@@ -1421,7 +1903,7 @@ function seriesFromWorkouts(exercise, mapper) {
 }
 
 function seriesFromMetrics(field) {
-  return state.metrics
+  return canonicalMetricEntries()
     .filter((entry) => entry[field] > 0)
     .sort((a, b) => a.date.localeCompare(b.date))
     .map((entry) => ({
@@ -1544,7 +2026,7 @@ function topUnderTargetMuscles(limit = 4) {
 
 function recommendations(todayPlan = null) {
   const recs = [];
-  const stats = muscleSetStats();
+  const stats = todayPlan ? coachMuscleSetStats() : muscleSetStats();
   const action = actionFromSessionPlan(todayPlan);
   const proteinAvg = getAverage("protein", 7);
   const protein = proteinTargets();
@@ -1730,19 +2212,95 @@ function listWorkout(entry) {
 }
 
 function listMetric(entry) {
+  const metric = normalizeMetricEntry(entry);
   const parts = [];
-  if (entry.bodyWeight) parts.push(`${fmt(entry.bodyWeight, 1)} lb`);
-  if (entry.calories) parts.push(`${fmt(entry.calories)} cal`);
-  if (entry.protein) parts.push(`${fmt(entry.protein)}g protein`);
+  if (metric.bodyWeight) parts.push(`${fmt(metric.bodyWeight, 1)} lb`);
+  if (metric.calories) parts.push(`${fmt(metric.calories)} cal`);
+  if (metric.protein) parts.push(`${fmt(metric.protein)}g protein`);
   return `
     <div class="list-item">
       <div>
-        <strong>${escapeHtml(entry.date)}</strong>
+        <strong>${escapeHtml(metric.date)}</strong>
         <span class="muted small">${escapeHtml(parts.join(" - ") || "Metric entry")}</span>
       </div>
-      <button class="delete-small" type="button" aria-label="Delete metric" data-action="delete-metric" data-id="${escapeHtml(entry.id)}">x</button>
+      <button class="delete-small" type="button" aria-label="Delete metric" data-action="delete-metric" data-id="${escapeHtml(metric.id)}" data-date="${escapeHtml(metric.date)}">x</button>
     </div>
   `;
+}
+
+function renderNutritionQuickTotals(metric = {}) {
+  const showQuickValues = !metric.mealDetail;
+  const readOnly = metric.mealDetail ? " readonly aria-disabled=\"true\"" : "";
+  return `
+    <section class="nutrition-quick-card ${metric.mealDetail ? "is-overridden" : ""}">
+      <h3>Daily total</h3>
+      <div class="field-row compact-metric-row">
+        <div class="field">
+          <label for="calories">Calories</label>
+          <input id="calories" name="calories" data-quick-field="calories" type="number" inputmode="decimal" min="0" step="1" value="${escapeHtml(showQuickValues && metric.calories ? metric.calories : "")}"${readOnly}>
+        </div>
+        <div class="field">
+          <label for="protein">Protein</label>
+          <input id="protein" name="protein" data-quick-field="protein" type="number" inputmode="decimal" min="0" step="1" value="${escapeHtml(showQuickValues && metric.protein ? metric.protein : "")}" placeholder="g"${readOnly}>
+        </div>
+      </div>
+      <p class="nutrition-override-message ${metric.mealDetail ? "is-visible" : ""}" data-nutrition-override-message aria-live="polite">
+        Using meal details for today's total. Clear meal entries to edit daily total.
+      </p>
+    </section>
+  `;
+}
+
+function renderNutritionMealFields(meals = emptyNutritionMeals()) {
+  return `
+    <div class="nutrition-meal-grid">
+      ${NUTRITION_MEALS.map((meal) => `
+        <section class="nutrition-meal-card">
+          <h3>${escapeHtml(meal.label)}</h3>
+          <div class="field-row compact-metric-row">
+            <div class="field">
+              <label for="meal-${meal.id}-calories">Calories</label>
+              <input id="meal-${meal.id}-calories" name="meal-${meal.id}-calories" data-meal-field="calories" type="number" inputmode="decimal" min="0" step="1" value="${escapeHtml(meals[meal.id]?.calories || "")}">
+            </div>
+            <div class="field">
+              <label for="meal-${meal.id}-protein">Protein</label>
+              <input id="meal-${meal.id}-protein" name="meal-${meal.id}-protein" data-meal-field="protein" type="number" inputmode="decimal" min="0" step="1" value="${escapeHtml(meals[meal.id]?.protein || "")}" placeholder="g">
+            </div>
+          </div>
+        </section>
+      `).join("")}
+    </div>
+  `;
+}
+
+function nutritionTotalSummaryMarkup(metric) {
+  return `
+    <div class="nutrition-total-strip" aria-live="polite">
+      <span><strong data-nutrition-total="calories">${fmt(metric?.calories || 0)}</strong><small>calories</small></span>
+      <span><strong data-nutrition-total="protein">${fmt(metric?.protein || 0)}</strong><small>g protein</small></span>
+      <span><strong>${metric?.bodyWeight ? fmt(metric.bodyWeight, 1) : "--"}</strong><small>lb body weight</small></span>
+    </div>
+  `;
+}
+
+function refreshNutritionFormTotals(form = document.getElementById("metric-form")) {
+  if (!form) return;
+  const data = Object.fromEntries(new FormData(form));
+  const hasMealDetail = nutritionMealsHaveData(nutritionMealsFromData(data));
+  const totals = nutritionFormTotalsFromData(data);
+  const calories = form.querySelector('[data-nutrition-total="calories"]');
+  const protein = form.querySelector('[data-nutrition-total="protein"]');
+  if (calories) calories.textContent = fmt(totals.calories);
+  if (protein) protein.textContent = fmt(totals.protein);
+  const quickCard = form.querySelector(".nutrition-quick-card");
+  const message = form.querySelector("[data-nutrition-override-message]");
+  quickCard?.classList.toggle("is-overridden", hasMealDetail);
+  message?.classList.toggle("is-visible", hasMealDetail);
+  form.querySelectorAll("[data-quick-field]").forEach((input) => {
+    input.readOnly = hasMealDetail;
+    input.setAttribute("aria-disabled", String(hasMealDetail));
+    if (!hasMealDetail) input.removeAttribute("aria-disabled");
+  });
 }
 
 function defaultSetRows(count = 3) {
@@ -1843,19 +2401,41 @@ function previousSetLabel(exercise, index, excludeId = state.editingWorkoutId) {
   return row ? `${fmt(row.weight)} x ${fmt(row.reps)}` : "--";
 }
 
-function plannedSetRowsFromPreviousSession(exercise, setCount) {
+function adjustedCoachPlanRow(row, exercise, planTarget = null) {
+  const next = { ...row };
+  if (!planTarget) return next;
+  const meta = resolveExerciseMeta(exercise);
+  const range = parseRepRange(meta.reps);
+  if (["deload", "reset"].includes(planTarget.kind) && next.weight > 0) {
+    next.weight = roundLoadTarget(next.weight * (planTarget.loadMultiplier || 1));
+    next.rir = 2;
+    return next;
+  }
+  if (planTarget.kind === "progression") {
+    if (next.reps < range.high) {
+      next.reps += 1;
+    } else if (next.weight > 0) {
+      next.weight = roundLoadTarget(next.weight + (next.weight >= 50 ? 5 : 2.5));
+      next.reps = range.low;
+    }
+    next.rir = next.rir ?? 2;
+  }
+  return next;
+}
+
+function plannedSetRowsFromPreviousSession(exercise, setCount, planTarget = null) {
   const count = Math.max(1, Math.round(parseNum(setCount)));
   const last = lastSessionForExercise(exercise);
   const previousRows = last ? setRowsFromWorkout(last) : [];
   if (!previousRows.length) return defaultSetRows(count);
   return Array.from({ length: count }, (_, index) => {
     const source = previousRows[index] || previousRows[previousRows.length - 1];
-    return {
+    return adjustedCoachPlanRow({
       weight: source.weight,
       reps: source.reps,
       rir: source.rir ?? 2,
       restSeconds: source.restSeconds ?? null
-    };
+    }, exercise, planTarget);
   });
 }
 
@@ -1867,8 +2447,8 @@ function copyCoachPlanToLog(plan = buildTodayPlan(selectedCoachTimeframeMinutes(
     editingWorkoutId: null,
     exercise: item.exercise.name,
     targetMuscle: item.muscle.id,
-    notes: `Coach plan: ${item.reason}`,
-    setRows: plannedSetRowsFromPreviousSession(item.exercise.name, item.sets)
+    notes: `Coach plan: ${item.reason}${item.planTarget ? ` ${item.planTarget.label}.` : ""}`,
+    setRows: plannedSetRowsFromPreviousSession(item.exercise.name, item.sets, item.planTarget)
   }));
   state.templateQueue = state.workoutDraft.map((draft) => ({
     exercise: draft.exercise,
@@ -2427,6 +3007,10 @@ function renderLog() {
   const draft = ensureWorkoutDraft();
   const lockLabel = draft.some((item) => item.editingWorkoutId) ? "Update workout" : "Lock in workout";
   if (state.logHistoryExercise) return exerciseHistoryScreen(state.logHistoryExercise);
+  const metricDate = state.metricDate || todayISO();
+  const metric = metricForDate(metricDate);
+  const metricFormEntry = metric || { date: metricDate, bodyWeight: 0, calories: 0, protein: 0, meals: emptyNutritionMeals(), notes: "" };
+  const metricButtonLabel = metric ? "Update metrics" : "Save metrics";
 
   return `
     <section class="form-panel">
@@ -2482,18 +3066,19 @@ function renderLog() {
         <form id="metric-form">
           <div class="field">
             <label for="metric-date">Date</label>
-            <input id="metric-date" name="date" type="date" required value="${todayISO()}">
+            <input id="metric-date" name="date" type="date" required value="${escapeHtml(metricDate)}">
           </div>
-          <div class="field-row">
-            <div class="field"><label for="bodyWeight">Body weight</label><input id="bodyWeight" name="bodyWeight" type="number" inputmode="decimal" min="0" step="0.1" placeholder="lb"></div>
-            <div class="field"><label for="calories">Calories</label><input id="calories" name="calories" type="number" inputmode="decimal" min="0" step="1"></div>
-            <div class="field"><label for="protein">Protein</label><input id="protein" name="protein" type="number" inputmode="decimal" min="0" step="1" placeholder="g"></div>
+          ${nutritionTotalSummaryMarkup(metricFormEntry)}
+          <div class="field-row metric-daily-row">
+            <div class="field"><label for="bodyWeight">Body weight</label><input id="bodyWeight" name="bodyWeight" type="number" inputmode="decimal" min="0" step="0.1" value="${escapeHtml(metricFormEntry.bodyWeight || "")}" placeholder="lb"></div>
           </div>
+          ${renderNutritionQuickTotals(metricFormEntry)}
+          ${renderNutritionMealFields(metricFormEntry.meals)}
           <div class="field">
             <label for="metric-notes">Notes</label>
-            <textarea id="metric-notes" name="notes" placeholder="Sleep, hunger, stress, digestion, or anything that explains the trend."></textarea>
+            <textarea id="metric-notes" name="notes" placeholder="Sleep, hunger, stress, digestion, or anything that explains the trend.">${escapeHtml(metricFormEntry.notes || "")}</textarea>
           </div>
-          <button class="primary-button" type="submit">Save metrics</button>
+          <button class="primary-button" type="submit">${metricButtonLabel}</button>
         </form>
       `}
     </section>
@@ -2813,6 +3398,7 @@ function renderTodayPlan(plan) {
               <div>
                 <strong>${escapeHtml(item.exercise.name)}</strong>
                 <span>${escapeHtml(item.muscle.label)} - ${escapeHtml(item.exercise.reps)} reps - ${HYPERTROPHY.idealRirMin}-${HYPERTROPHY.idealRirMax} RIR</span>
+                ${item.planTarget ? `<span class="today-plan-target">${escapeHtml(item.planTarget.label)} - ${escapeHtml(item.planTarget.detail)}</span>` : ""}
               </div>
               <span class="today-plan-dose">${item.sets} sets</span>
             </div>
@@ -2927,7 +3513,7 @@ function renderCoach() {
     ${renderCoachWhy(todayPlan)}
     <section class="section chart-panel">
       <div class="chart-header"><h3>Muscle set audit</h3><span class="muted small">10 set floor, 12-20 growth zone</span></div>
-      ${muscleProgressMarkup(muscleSetStats())}
+      ${muscleProgressMarkup(coachMuscleSetStats())}
     </section>
     <section class="section grid">
       <div class="chart-header coach-notes-header"><h3>Coach notes</h3><span class="muted small">secondary checks</span></div>
@@ -3205,19 +3791,16 @@ async function saveWorkout(form) {
 
 async function saveMetric(form) {
   const data = Object.fromEntries(new FormData(form));
-  const entry = {
-    id: uid(),
-    date: data.date,
-    bodyWeight: parseNum(data.bodyWeight),
-    calories: parseNum(data.calories),
-    protein: parseNum(data.protein),
-    notes: data.notes.trim(),
-    createdAt: new Date().toISOString()
-  };
+  const date = data.date || todayISO();
+  const existing = metricForDate(date);
+  const entry = metricEntryFromFormData(data, existing);
+  const duplicateIds = metricDuplicateIdsForDate(date, entry.id);
   await dbPut("metrics", entry);
+  await Promise.all(duplicateIds.map((id) => dbDelete("metrics", id)));
   await loadState();
+  state.metricDate = date;
   await render();
-  toast("Metrics saved.");
+  toast(existing ? "Metrics updated." : "Metrics saved.");
 }
 
 function isSampleEntry(entry) {
@@ -3257,14 +3840,25 @@ function sampleMetric(daysAgo) {
   const date = dateDaysAgo(daysAgo);
   const progress = 41 - daysAgo;
   const wave = Math.sin(progress / 3);
+  const calories = Math.round(2380 + progress * 7 + wave * 70);
+  const protein = Math.round(126 + progress * 0.95 + wave * 6);
+  const meals = {
+    breakfast: { calories: Math.round(calories * 0.24), protein: Math.round(protein * 0.24) },
+    lunch: { calories: Math.round(calories * 0.32), protein: Math.round(protein * 0.32) },
+    dinner: { calories: Math.round(calories * 0.34), protein: Math.round(protein * 0.34) },
+    snacks: { calories: 0, protein: 0 }
+  };
+  meals.snacks.calories = calories - meals.breakfast.calories - meals.lunch.calories - meals.dinner.calories;
+  meals.snacks.protein = protein - meals.breakfast.protein - meals.lunch.protein - meals.dinner.protein;
   return {
     id: `${SAMPLE_BATCH}-metric-${date}`,
     sample: true,
     sampleBatch: SAMPLE_BATCH,
     date,
     bodyWeight: 181 + progress * 0.08 + wave * 0.25,
-    calories: Math.round(2380 + progress * 7 + wave * 70),
-    protein: Math.round(126 + progress * 0.95 + wave * 6),
+    calories,
+    protein,
+    meals,
     notes: "Sample nutrition data for chart testing.",
     createdAt: `${date}T08:00:00.000Z`
   };
@@ -3361,7 +3955,7 @@ function exportPayload() {
     exportedAt: new Date().toISOString(),
     settings: exportSafeSettings(),
     workouts: state.workouts.filter((entry) => !isSampleEntry(entry)),
-    metrics: state.metrics.filter((entry) => !isSampleEntry(entry))
+    metrics: canonicalMetricEntries(state.metrics.filter((entry) => !isSampleEntry(entry)))
   };
 }
 
@@ -3808,7 +4402,10 @@ async function handleAction(action, target) {
       toast("Lift deleted.");
     },
     async "delete-metric"() {
-      await dbDelete("metrics", target.dataset.id);
+      const ids = target.dataset.date
+        ? metricEntriesForDate(target.dataset.date).map((entry) => entry.id).filter(Boolean)
+        : [target.dataset.id].filter(Boolean);
+      await Promise.all(ids.map((id) => dbDelete("metrics", id)));
       await loadState();
       await render();
       toast("Metric deleted.");
@@ -4003,6 +4600,10 @@ document.addEventListener("change", async (event) => {
       loadWorkoutDateDraft(newDate);
       await render();
     }
+    if (event.target.matches("#metric-date")) {
+      state.metricDate = event.target.value || todayISO();
+      await render();
+    }
     if (event.target.matches("#trend-exercise")) {
       state.selectedExercise = event.target.value;
       await render();
@@ -4027,6 +4628,9 @@ document.addEventListener("change", async (event) => {
 
 document.addEventListener("input", async (event) => {
   try {
+    if (event.target.matches("[data-meal-field], [data-quick-field]")) {
+      refreshNutritionFormTotals(event.target.closest("#metric-form"));
+    }
     if (event.target.matches("[data-set-field]")) {
       const section = event.target.closest(".exercise-draft");
       readDraftFromForm();
