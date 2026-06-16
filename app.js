@@ -3,7 +3,7 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 2;
 const STORES = ["workouts", "metrics", "settings"];
-const APP_VERSION = "1.5.16";
+const APP_VERSION = "1.5.17";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 let dbOpenPromise = null;
 let chartId = 0;
@@ -110,6 +110,7 @@ const state = {
   openExerciseMenu: null,
   logHistoryExercise: "",
   workoutDraft: [],
+  loadedWorkoutDateIds: [],
   historyMode: "exercises",
   historyExercise: "",
   historySearch: "",
@@ -517,6 +518,43 @@ function resolveExerciseMeta(name, fallbackMuscle = "chest") {
   };
 }
 
+function exerciseIdentity(exerciseOrName, fallbackMuscle = "chest") {
+  if (exerciseOrName && typeof exerciseOrName === "object") {
+    return {
+      id: String(exerciseOrName.id || "").trim(),
+      name: String(exerciseOrName.name || "").trim(),
+      primaryMuscles: exerciseOrName.primaryMuscles || [],
+      secondaryMuscles: exerciseOrName.secondaryMuscles || [],
+      reps: exerciseOrName.reps || "8-15",
+      rest: exerciseOrName.rest || "60-120 sec"
+    };
+  }
+  const meta = resolveExerciseMeta(exerciseOrName, fallbackMuscle);
+  return {
+    id: String(meta.id || "").trim(),
+    name: String(meta.name || exerciseOrName || "").trim(),
+    primaryMuscles: meta.primaryMuscles || [],
+    secondaryMuscles: meta.secondaryMuscles || [],
+    reps: meta.reps || "8-15",
+    rest: meta.rest || "60-120 sec"
+  };
+}
+
+function sameExerciseIdentity(entry, exerciseOrName) {
+  const identity = exerciseIdentity(exerciseOrName);
+  const entryId = String(entry?.exerciseId || "").trim();
+  if (identity.id && entryId && identity.id === entryId) return true;
+  const targetName = normalizeName(identity.name || exerciseOrName);
+  return !!targetName && normalizeName(entry?.exercise) === targetName;
+}
+
+function exerciseHistoryForIdentity(exerciseOrName, workouts = state.workouts, newestFirst = true) {
+  const entries = workouts
+    .filter((entry) => sameExerciseIdentity(entry, exerciseOrName))
+    .sort((a, b) => a.date.localeCompare(b.date) || String(a.createdAt || "").localeCompare(String(b.createdAt || "")));
+  return newestFirst ? entries.reverse() : entries;
+}
+
 function workoutMeta(entry) {
   if (Array.isArray(entry.primaryMuscles) && entry.primaryMuscles.length) {
     return {
@@ -632,10 +670,7 @@ function parseRepRange(value) {
 }
 
 function exerciseHistoryEntries(exerciseName, newestFirst = true) {
-  const entries = state.workouts
-    .filter((entry) => entry.exercise === exerciseName)
-    .sort((a, b) => a.date.localeCompare(b.date) || String(a.createdAt || "").localeCompare(String(b.createdAt || "")));
-  return newestFirst ? entries.reverse() : entries;
+  return exerciseHistoryForIdentity(exerciseName, state.workouts, newestFirst);
 }
 
 function exerciseStats(exerciseName) {
@@ -1087,6 +1122,19 @@ function latestWorkout(workouts = state.workouts) {
   return workoutsNewestFirst(workouts)[0] || null;
 }
 
+function draftHasMeaningfulWorkoutInput(draft) {
+  if (!draft) return false;
+  if (draft.editingWorkoutId) return true;
+  if (String(draft.notes || "").trim()) return true;
+  if (String(draft.exercise || "") !== defaultLogExerciseName()) return true;
+  return normalizeSetRows(draft.setRows).some((row) => (
+    row.weight > 0
+    || row.reps !== 10
+    || (row.rir !== null && row.rir !== 2)
+    || (row.restSeconds !== null && row.restSeconds > 0)
+  ));
+}
+
 function coachPendingWorkoutEntries() {
   const date = state.draftDate || todayISO();
   const draftDate = parseLocalDate(date);
@@ -1094,7 +1142,8 @@ function coachPendingWorkoutEntries() {
   if (Number.isNaN(draftDate.getTime()) || draftDate < currentTrainingWeekStart() || draftDate > today) return [];
   const drafts = Array.isArray(state.workoutDraft) ? state.workoutDraft : [];
   return drafts.map((draft, index) => {
-    const setRows = normalizeSetRows(draft.setRows).filter((row) => row.weight > 0 && row.reps > 0);
+    const touched = draftHasMeaningfulWorkoutInput(draft);
+    const setRows = normalizeSetRows(draft.setRows).filter((row) => row.reps > 0 && (row.weight > 0 || touched));
     if (!draft.exercise || !setRows.length) return null;
     const meta = resolveExerciseMeta(draft.exercise, draft.targetMuscle);
     const best = setRows.reduce((winner, row) => {
@@ -1139,10 +1188,7 @@ function coachWeeklyWorkouts(workouts = coachWorkoutEntries()) {
 }
 
 function exerciseHistoryForDefinition(exercise, workouts = state.workouts) {
-  const normalizedName = normalizeName(exercise.name);
-  return workoutsNewestFirst(workouts).filter((workout) => (
-    workout.exerciseId === exercise.id || normalizeName(workout.exercise) === normalizedName
-  ));
+  return exerciseHistoryForIdentity(exercise, workouts, true);
 }
 
 function coachExerciseMemory(exercise, workouts = coachWorkoutEntries()) {
@@ -1475,9 +1521,16 @@ function balancedCoverageTargets(targets) {
   return ordered;
 }
 
-function rankedCoachMuscles() {
-  const workouts = coachWorkoutEntries();
-  return muscleSetStats(coachWeeklyWorkouts(workouts)).map((stat) => muscleReadiness(stat, workouts)).sort(coachMusclePrioritySort);
+function coachPlanningContext(workouts = coachWorkoutEntries()) {
+  const weekly = coachWeeklyWorkouts(workouts);
+  const rankedStats = muscleSetStats(weekly)
+    .map((stat) => muscleReadiness(stat, workouts))
+    .sort(coachMusclePrioritySort);
+  return { workouts, weekly, rankedStats };
+}
+
+function rankedCoachMuscles(context = coachPlanningContext()) {
+  return context.rankedStats;
 }
 
 function coachMuscleSetStats() {
@@ -1575,6 +1628,30 @@ function maxSetsForPlanTarget(target, caps, fillToTime = false, allowHighVolume 
   return Math.max(1, Math.min(caps.maxSets, Math.max(1, Math.ceil(target.deficit))));
 }
 
+function sessionShortfallReason({ totalMinutes, cappedLimit, targetFloor, allStats, items, missing }) {
+  if (totalMinutes >= targetFloor) return "";
+  const base = `Estimated ${totalMinutes}/${cappedLimit} min`;
+  const plannedIds = new Set(items.map((item) => item.muscle.id));
+  const libraryBlocked = allStats.some((target) => (
+    target.sets < HYPERTROPHY.highVolumeFillMax
+    && !plannedIds.has(target.id)
+    && !hasPrimaryExerciseForMuscle(target.id)
+  ));
+  if (missing?.length || libraryBlocked) {
+    return `${base} because library-safe coverage is missing or no library-safe remaining work fits.`;
+  }
+  const recoveryBlocked = allStats.some((target) => (
+    target.sets < HYPERTROPHY.growthHigh
+    && !plannedIds.has(target.id)
+    && hasPrimaryExerciseForMuscle(target.id)
+    && !isMuscleAvailableForPlanning(target)
+  ));
+  if (recoveryBlocked) {
+    return `${base} because remaining useful muscles are inside the 2-day recovery gap.`;
+  }
+  return `${base} because remaining muscles are at the volume limits.`;
+}
+
 function buildSessionPlan(limitMinutes = SESSION_LIMIT_MINUTES, options = {}) {
   const restart = options.restart || false;
   const targetMuscles = Array.isArray(options.targetMuscles) ? options.targetMuscles : selectedCoachTargetMuscles();
@@ -1582,10 +1659,9 @@ function buildSessionPlan(limitMinutes = SESSION_LIMIT_MINUTES, options = {}) {
   const targetFloor = Math.max(0, cappedLimit - COACH_TIME_TOLERANCE_MINUTES);
   const hardLimit = cappedLimit + COACH_TIME_TOLERANCE_MINUTES;
   const caps = sessionPlanCaps(cappedLimit, restart);
-  const coachWorkouts = coachWorkoutEntries();
-  const allStats = muscleSetStats(coachWeeklyWorkouts(coachWorkouts))
-    .map((stat) => muscleReadiness(stat, coachWorkouts))
-    .sort(coachMusclePrioritySort);
+  const planningContext = options.context || coachPlanningContext();
+  const coachWorkouts = planningContext.workouts;
+  const allStats = planningContext.rankedStats;
   const stats = allStats.filter((stat) => stat.sets < HYPERTROPHY.minimumSets);
   const optimumCandidates = allStats.filter((stat) => stat.sets < HYPERTROPHY.growthHigh);
   const items = [];
@@ -1730,9 +1806,7 @@ function buildSessionPlan(limitMinutes = SESSION_LIMIT_MINUTES, options = {}) {
     addSetsToExisting({ allowHighVolume: !restart });
   }
 
-  const shortfallReason = totalMinutes < targetFloor
-    ? `Estimated ${totalMinutes}/${cappedLimit} min because no library-safe remaining work fits without exceeding time or volume limits.`
-    : "";
+  const shortfallReason = sessionShortfallReason({ totalMinutes, cappedLimit, targetFloor, allStats, items, missing });
 
   const plannedIds = new Set(items.map((item) => item.muscle.id));
   const deprioritized = stats
@@ -1754,13 +1828,14 @@ function buildSessionPlan(limitMinutes = SESSION_LIMIT_MINUTES, options = {}) {
 }
 
 function buildTodayPlan(limitMinutes = selectedCoachTimeframeMinutes()) {
-  const coachWorkouts = coachWorkoutEntries();
+  const planningContext = coachPlanningContext();
+  const coachWorkouts = planningContext.workouts;
   const lastWorkout = latestWorkout(coachWorkouts);
   const daysSinceWorkout = lastWorkout ? daysBetween(lastWorkout.date, todayISO()) : null;
   const restart = daysSinceWorkout === null || daysSinceWorkout >= 4;
   const targetMuscles = selectedCoachTargetMuscles();
-  const ranked = rankedCoachMuscles();
-  const sessionPlan = buildSessionPlan(limitMinutes, { restart, targetMuscles });
+  const ranked = rankedCoachMuscles(planningContext);
+  const sessionPlan = buildSessionPlan(limitMinutes, { restart, targetMuscles, context: planningContext });
   const proteinAvg = getAverage("protein", 7);
   const protein = proteinTargets();
   const highVolume = ranked.filter((stat) => stat.sets > HYPERTROPHY.growthHigh);
@@ -1893,8 +1968,7 @@ function previewSeries(kind) {
 }
 
 function seriesFromWorkouts(exercise, mapper) {
-  return state.workouts
-    .filter((entry) => entry.exercise === exercise)
+  return exerciseHistoryForIdentity(exercise, state.workouts, false)
     .sort((a, b) => a.date.localeCompare(b.date))
     .map((entry) => ({
       label: entry.date.slice(5, 10),
@@ -2389,9 +2463,8 @@ function readDraftFromForm() {
 }
 
 function lastSessionForExercise(exercise, excludeId = null) {
-  return state.workouts
-    .filter((entry) => entry.exercise === exercise && entry.id !== excludeId)
-    .sort((a, b) => b.date.localeCompare(a.date) || String(b.createdAt || "").localeCompare(String(a.createdAt || "")))[0] || null;
+  return exerciseHistoryForIdentity(exercise, state.workouts, true)
+    .filter((entry) => entry.id !== excludeId)[0] || null;
 }
 
 function previousSetLabel(exercise, index, excludeId = state.editingWorkoutId) {
@@ -2404,7 +2477,7 @@ function previousSetLabel(exercise, index, excludeId = state.editingWorkoutId) {
 function adjustedCoachPlanRow(row, exercise, planTarget = null) {
   const next = { ...row };
   if (!planTarget) return next;
-  const meta = resolveExerciseMeta(exercise);
+  const meta = exerciseIdentity(exercise);
   const range = parseRepRange(meta.reps);
   if (["deload", "reset"].includes(planTarget.kind) && next.weight > 0) {
     next.weight = roundLoadTarget(next.weight * (planTarget.loadMultiplier || 1));
@@ -2448,7 +2521,7 @@ function copyCoachPlanToLog(plan = buildTodayPlan(selectedCoachTimeframeMinutes(
     exercise: item.exercise.name,
     targetMuscle: item.muscle.id,
     notes: `Coach plan: ${item.reason}${item.planTarget ? ` ${item.planTarget.label}.` : ""}`,
-    setRows: plannedSetRowsFromPreviousSession(item.exercise.name, item.sets, item.planTarget)
+    setRows: plannedSetRowsFromPreviousSession(item.exercise, item.sets, item.planTarget)
   }));
   state.templateQueue = state.workoutDraft.map((draft) => ({
     exercise: draft.exercise,
@@ -2469,7 +2542,7 @@ function recordWeightKey(weight) {
 }
 
 function exerciseRecordStats(exercise, excludeId = null) {
-  const entries = state.workouts.filter((entry) => entry.exercise === exercise && entry.id !== excludeId);
+  const entries = exerciseHistoryForIdentity(exercise, state.workouts, true).filter((entry) => entry.id !== excludeId);
   const bestRepsByWeight = new Map();
   let maxWeight = 0;
   let bestVolume = 0;
@@ -2616,9 +2689,7 @@ function exerciseInitial(name) {
 
 function exerciseHistoryMarkup() {
   if (state.historyExercise !== state.selectedExercise) return "";
-  const sessions = state.workouts
-    .filter((entry) => entry.exercise === state.selectedExercise)
-    .slice(0, 6);
+  const sessions = exerciseHistoryForIdentity(state.selectedExercise).slice(0, 6);
   return `
     <section class="section card exercise-history">
       <div class="chart-header"><h3>${escapeHtml(state.selectedExercise)} history</h3><span class="muted small">last ${sessions.length} sessions</span></div>
@@ -2635,9 +2706,7 @@ function exerciseHistoryMarkup() {
 }
 
 function exerciseHistoryScreen(exerciseName) {
-  const sessions = state.workouts
-    .filter((entry) => entry.exercise === exerciseName)
-    .sort((a, b) => b.date.localeCompare(a.date) || String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
+  const sessions = exerciseHistoryForIdentity(exerciseName);
   return `
     <section class="hero">
       <div>
@@ -3644,6 +3713,7 @@ async function renderSettings() {
             <input id="supabaseRememberPassword" type="checkbox" ${state.settings.supabaseRememberPassword ? "checked" : ""}>
             <span>Remember password on this device</span>
           </label>
+          <p class="muted micro">Stored only in this browser on this device. Backups and exports never include it.</p>
         </div>
       <div class="grid two">
         <button class="ghost-button" type="button" data-action="save-supabase">Save settings</button>
@@ -3767,7 +3837,9 @@ async function saveWorkout(form) {
     };
   });
 
+  const staleWorkoutIds = staleWorkoutIdsForSavedDraft(data.date, entries);
   await dbPutBatch("workouts", entries);
+  await Promise.all(staleWorkoutIds.map((id) => dbDelete("workouts", id)));
   const first = entries[0];
   state.selectedExercise = first.exercise;
   state.draftDate = first.date;
@@ -3784,6 +3856,7 @@ async function saveWorkout(form) {
     setRows: setRowsFromWorkout(entry),
     order: entry.order
   }));
+  state.loadedWorkoutDateIds = entries.map((entry) => entry.id).filter(Boolean);
   await loadState();
   await render();
   toast(hadExisting ? "Workout updated." : "Workout locked in.");
@@ -3972,23 +4045,92 @@ function downloadBackup() {
   toast("Backup exported.");
 }
 
+function isValidISODate(value) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(value || ""))) return false;
+  const parsed = parseLocalDate(value);
+  return !Number.isNaN(parsed.getTime()) && isoFromLocalDate(parsed) === value;
+}
+
+function normalizeBackupWorkout(entry) {
+  if (!entry || typeof entry !== "object") throw new Error("Backup contains an invalid workout entry.");
+  if (!isValidISODate(entry.date)) throw new Error("Backup contains a workout with an invalid date.");
+  const exerciseName = String(entry.exercise || "").trim();
+  if (!exerciseName) throw new Error("Backup contains a workout without an exercise name.");
+  const meta = resolveExerciseMeta(exerciseName, entry.primaryMuscles?.[0] || entry.targetMuscle || "chest");
+  const setRows = normalizeSetRows(setRowsFromWorkout(entry));
+  const best = setRows.reduce((winner, row) => {
+    const score = row.weight * (1 + row.reps / 30);
+    return !winner || score > winner.score ? { ...row, score } : winner;
+  }, null);
+  const primaryMuscles = uniqueMuscles(entry.primaryMuscles || meta.primaryMuscles);
+  const secondaryMuscles = uniqueMuscles(entry.secondaryMuscles || meta.secondaryMuscles)
+    .filter((muscle) => !primaryMuscles.includes(muscle));
+  return {
+    ...entry,
+    id: String(entry.id || uid()),
+    date: entry.date,
+    exercise: exerciseName,
+    exerciseId: String(entry.exerciseId || meta.id),
+    primaryMuscles: primaryMuscles.length ? primaryMuscles : [...meta.primaryMuscles],
+    secondaryMuscles,
+    equipment: String(entry.equipment || meta.equipment || "custom"),
+    setRows,
+    sets: setRows.length,
+    reps: best?.reps || 1,
+    weight: best?.weight || 0,
+    rir: averageRir({ setRows }),
+    notes: String(entry.notes || "").trim(),
+    order: Number.isFinite(Number(entry.order)) ? Number(entry.order) : undefined,
+    createdAt: entry.createdAt || new Date().toISOString(),
+    updatedAt: entry.updatedAt || entry.createdAt || new Date().toISOString()
+  };
+}
+
+function normalizeBackupMetric(entry) {
+  if (!entry || typeof entry !== "object") throw new Error("Backup contains an invalid metric entry.");
+  if (!isValidISODate(entry.date)) throw new Error("Backup contains a metric with an invalid date.");
+  return normalizeMetricEntry(entry);
+}
+
+function normalizeBackupSettings(settings = {}) {
+  const customExercises = Array.isArray(settings.customExercises)
+    ? settings.customExercises.map(normalizeExerciseDefinition).filter(Boolean)
+    : [];
+  return {
+    hypertrophyProfile: settings.hypertrophyProfile && typeof settings.hypertrophyProfile === "object"
+      ? settings.hypertrophyProfile
+      : hypertrophySettings(),
+    nutritionGoal: NUTRITION_GOAL_OPTIONS.some((option) => option.id === settings.nutritionGoal)
+      ? settings.nutritionGoal
+      : "bulk",
+    dayTemplates: Array.isArray(settings.dayTemplates) ? settings.dayTemplates : [],
+    customExercises,
+    lastBackupAt: String(settings.lastBackupAt || "")
+  };
+}
+
+function normalizeBackupPayload(payload) {
+  if (!payload || typeof payload !== "object") throw new Error("Backup file is invalid.");
+  if (!Array.isArray(payload.workouts) || !Array.isArray(payload.metrics)) {
+    throw new Error("Backup file is missing workouts or metrics.");
+  }
+  return {
+    settings: normalizeBackupSettings(payload.settings || {}),
+    workouts: payload.workouts.map(normalizeBackupWorkout),
+    metrics: payload.metrics.map(normalizeBackupMetric)
+  };
+}
+
 async function importPayload(payload) {
-  if (!payload?.workouts || !payload?.metrics) throw new Error("Backup file is missing workouts or metrics.");
+  const normalized = normalizeBackupPayload(payload);
   await Promise.all(STORES.filter((store) => store !== "settings").map((store) => dbClear(store)));
-  for (const entry of payload.workouts) await dbPut("workouts", entry);
-  for (const entry of payload.metrics) await dbPut("metrics", entry);
-  if (payload.settings?.hypertrophyProfile) {
-    await saveSetting("hypertrophyProfile", payload.settings.hypertrophyProfile);
-  }
-  if (NUTRITION_GOAL_OPTIONS.some((option) => option.id === payload.settings?.nutritionGoal)) {
-    await saveSetting("nutritionGoal", payload.settings.nutritionGoal);
-  }
-  if (Array.isArray(payload.settings?.dayTemplates)) {
-    await saveSetting("dayTemplates", payload.settings.dayTemplates);
-  }
-  if (Array.isArray(payload.settings?.customExercises)) {
-    await saveSetting("customExercises", payload.settings.customExercises.map(normalizeExerciseDefinition).filter(Boolean));
-  }
+  for (const entry of normalized.workouts) await dbPut("workouts", entry);
+  for (const entry of normalized.metrics) await dbPut("metrics", entry);
+  await saveSetting("hypertrophyProfile", normalized.settings.hypertrophyProfile);
+  await saveSetting("nutritionGoal", normalized.settings.nutritionGoal);
+  await saveSetting("dayTemplates", normalized.settings.dayTemplates);
+  await saveSetting("customExercises", normalized.settings.customExercises);
+  await saveSetting("lastBackupAt", normalized.settings.lastBackupAt);
   await loadState();
   await render();
 }
@@ -4027,6 +4169,36 @@ function supabaseConfig() {
   return { url: supabaseUrl.replace(/\/$/, ""), key: supabaseAnonKey, session: supabaseSession };
 }
 
+function supabaseSessionNeedsRefresh(session, now = Date.now()) {
+  const expiresAt = Number(session?.expires_at);
+  if (!Number.isFinite(expiresAt) || expiresAt <= 0) return false;
+  return expiresAt * 1000 <= now + 60000;
+}
+
+async function supabaseConfigWithFreshSession() {
+  const config = supabaseConfig();
+  if (!config.session?.access_token) throw new Error("Sign in to Supabase first.");
+  if (!supabaseSessionNeedsRefresh(config.session)) return config;
+  if (!config.session.refresh_token) throw new Error("Supabase session expired. Sign in again.");
+  const response = await fetch(`${config.url}/auth/v1/token?grant_type=refresh_token`, {
+    method: "POST",
+    headers: {
+      apikey: config.key,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({ refresh_token: config.session.refresh_token })
+  });
+  const json = await response.json();
+  if (!response.ok) throw new Error(json.msg || json.message || "Supabase session refresh failed.");
+  const session = {
+    access_token: json.access_token,
+    refresh_token: json.refresh_token || config.session.refresh_token,
+    expires_at: json.expires_at || Math.floor(Date.now() / 1000) + Number(json.expires_in || 3600)
+  };
+  await saveSetting("supabaseSession", session);
+  return { ...config, session };
+}
+
 async function supabaseAuth(mode) {
   const fields = readSupabaseFields();
   await saveSupabaseSettings({ renderAfter: false, notify: false });
@@ -4056,8 +4228,7 @@ async function supabaseAuth(mode) {
 }
 
 async function pushSupabaseBackup() {
-  const { url, key, session } = supabaseConfig();
-  if (!session?.access_token) throw new Error("Sign in to Supabase first.");
+  const { url, key, session } = await supabaseConfigWithFreshSession();
   const response = await fetch(`${url}/rest/v1/fitness_snapshots`, {
     method: "POST",
     headers: {
@@ -4073,8 +4244,7 @@ async function pushSupabaseBackup() {
 }
 
 async function pullSupabaseBackup() {
-  const { url, key, session } = supabaseConfig();
-  if (!session?.access_token) throw new Error("Sign in to Supabase first.");
+  const { url, key, session } = await supabaseConfigWithFreshSession();
   const response = await fetch(`${url}/rest/v1/fitness_snapshots?select=payload,created_at&order=created_at.desc&limit=1`, {
     headers: {
       apikey: key,
@@ -4165,10 +4335,20 @@ function workoutEntryToDraft(entry) {
   };
 }
 
+function staleWorkoutIdsForSavedDraft(date, savedEntries = []) {
+  const savedIds = new Set(savedEntries.map((entry) => entry.id).filter(Boolean));
+  return (state.loadedWorkoutDateIds || []).filter((id) => {
+    if (savedIds.has(id)) return false;
+    const existing = state.workouts.find((entry) => entry.id === id);
+    return existing?.date === date;
+  });
+}
+
 function clearWorkoutDraft(date = todayISO()) {
   const exercise = defaultLogExerciseName();
   const meta = resolveExerciseMeta(exercise);
   state.editingWorkoutId = null;
+  state.loadedWorkoutDateIds = [];
   state.draftDate = date;
   state.draftNotes = "";
   state.selectedExercise = exercise;
@@ -4185,6 +4365,7 @@ function loadWorkoutDateDraft(date) {
   if (entries.length) {
     const first = entries[0];
     state.editingWorkoutId = first.id;
+    state.loadedWorkoutDateIds = entries.map((entry) => entry.id).filter(Boolean);
     state.workoutDraft = entries.map(workoutEntryToDraft);
     syncLegacyDraftFromFirst();
     return;
@@ -4395,6 +4576,7 @@ async function handleAction(action, target) {
       await render();
     },
     async "delete-workout"() {
+      if (!confirm("Delete this workout? This cannot be undone.")) return;
       await dbDelete("workouts", target.dataset.id);
       if (state.editingWorkoutId === target.dataset.id) clearWorkoutDraft();
       await loadState();
@@ -4402,6 +4584,7 @@ async function handleAction(action, target) {
       toast("Lift deleted.");
     },
     async "delete-metric"() {
+      if (!confirm(`Delete nutrition entry${target.dataset.date ? ` for ${target.dataset.date}` : ""}? This cannot be undone.`)) return;
       const ids = target.dataset.date
         ? metricEntriesForDate(target.dataset.date).map((entry) => entry.id).filter(Boolean)
         : [target.dataset.id].filter(Boolean);

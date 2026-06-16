@@ -5,6 +5,7 @@ const vm = require("vm");
 let appCode = fs.readFileSync("app.js", "utf8");
 appCode = appCode.replace(/init\(\)\.catch\([\s\S]*?\n\}\);\s*$/, "");
 const stylesCode = fs.readFileSync("styles.css", "utf8");
+const serviceWorkerCode = fs.readFileSync("service-worker.js", "utf8");
 
 const context = {
   console,
@@ -126,6 +127,13 @@ assert(stylesCode.includes(".nutrition-total-strip"), "Expected nutrition form t
 assert(stylesCode.includes(".nutrition-quick-card"), "Expected quick daily totals to have dedicated layout styling.");
 assert(stylesCode.includes(".nutrition-quick-card.is-overridden"), "Expected quick daily totals to show an overridden state.");
 assert(stylesCode.includes(".nutrition-override-message"), "Expected meal override message to have dedicated styling.");
+assert(serviceWorkerCode.includes("shouldHandleRequest"), "Expected service worker request guard helper.");
+assert(serviceWorkerCode.includes('request.headers.has("Authorization")'), "Expected service worker to bypass authorized requests.");
+assert(serviceWorkerCode.includes("url.origin === self.location.origin"), "Expected service worker to bypass cross-origin requests.");
+assert(serviceWorkerCode.includes("shouldCacheResponse"), "Expected service worker to guard cache writes.");
+assert(appCode.includes("Delete this workout?"), "Expected workout deletes to ask for confirmation.");
+assert(appCode.includes("Delete nutrition entry"), "Expected metric deletes to ask for confirmation.");
+assert(appCode.includes("Stored only in this browser on this device"), "Expected Supabase password helper text.");
 
 const nutritionQuickTotals = runScenario(`
   ${reset}
@@ -558,6 +566,53 @@ assert.deepEqual(coachPlanCopy.firstWeights, [100, 120], `Expected copied previo
 assert.strictEqual(coachPlanCopy.repeatedPrevious, 95, `Expected missing planned sets to repeat last previous row, got ${coachPlanCopy.repeatedPrevious}`);
 assert(coachPlanCopy.editingIds.every((id) => id === null), "Expected Coach copied drafts to be unsaved templates.");
 
+const renamedExerciseIdentity = runScenario(`
+  ${reset}
+  state.settings.customExercises = [{
+    id: "custom-bench",
+    name: "Flat Barbell Bench Press",
+    primaryMuscles: ["chest"],
+    secondaryMuscles: ["triceps"],
+    equipment: "barbell",
+    reps: "6-12",
+    rest: "90-180 sec",
+    cue: "Renamed bench."
+  }];
+  state.workouts = [
+    makeWorkout({
+      exercise: "Bench Press",
+      exerciseId: "custom-bench",
+      setRows: [
+        { weight: 115, reps: 10, rir: 2, restSeconds: 120 },
+        { weight: 105, reps: 9, rir: 2, restSeconds: 120 }
+      ]
+    })
+  ];
+  var renamed = resolveExerciseMeta("Flat Barbell Bench Press");
+  copyCoachPlanToLog({
+    sessionPlan: {
+      items: [
+        { exercise: renamed, muscle: { id: "chest" }, sets: 2, reason: "Renamed plan" }
+      ]
+    }
+  });
+  ({
+    previous: previousSetLabel("Flat Barbell Bench Press", 0),
+    historyCount: exerciseHistoryEntries("Flat Barbell Bench Press").length,
+    seriesCount: seriesFromWorkouts("Flat Barbell Bench Press", workoutVolume).length,
+    progression: progressionTargetForExercise("Flat Barbell Bench Press")?.target || "",
+    prReasons: setRecordReasons({ weight: 115, reps: 11 }, exerciseRecordStats("Flat Barbell Bench Press")),
+    copiedWeight: state.workoutDraft[0].setRows[0].weight
+  });
+`);
+
+assert.strictEqual(renamedExerciseIdentity.previous, "115 x 10", `Expected renamed exercise to keep previous-set label, got ${renamedExerciseIdentity.previous}`);
+assert.strictEqual(renamedExerciseIdentity.historyCount, 1, `Expected renamed exercise history to match by id, got ${renamedExerciseIdentity.historyCount}`);
+assert.strictEqual(renamedExerciseIdentity.seriesCount, 1, `Expected renamed exercise chart series to match by id, got ${renamedExerciseIdentity.seriesCount}`);
+assert(renamedExerciseIdentity.progression, "Expected renamed exercise progression target.");
+assert(renamedExerciseIdentity.prReasons.some((reason) => reason.includes("Rep record")), `Expected renamed exercise PR check, got ${renamedExerciseIdentity.prReasons.join(", ")}`);
+assert.strictEqual(renamedExerciseIdentity.copiedWeight, 115, `Expected Coach copy to use renamed exercise previous rows, got ${renamedExerciseIdentity.copiedWeight}`);
+
 const coachPlanCopyUsesPlanTarget = runScenario(`
   ${reset}
   state.workouts = [
@@ -644,6 +699,55 @@ const populatedDateLoad = runScenario(`
 `);
 
 assert.deepEqual(populatedDateLoad, ["Bench Press", "Cable Row"], `Expected populated date to load in saved order, got ${populatedDateLoad.join(", ")}`);
+
+const removedExerciseDeletion = runScenario(`
+  ${reset}
+  state.workouts = [
+    makeWorkout({ id: "bench", exercise: "Bench Press", exerciseId: "custom-bench", order: 0 }),
+    makeWorkout({ id: "row", exercise: "Cable Row", exerciseId: "custom-row", primaryMuscles: ["back"], secondaryMuscles: ["biceps"], order: 1 })
+  ];
+  loadWorkoutDateDraft("2026-06-10");
+  state.workoutDraft = state.workoutDraft.filter((draft) => draft.editingWorkoutId !== "row");
+  staleWorkoutIdsForSavedDraft("2026-06-10", [{ id: "bench", date: "2026-06-10" }]);
+`);
+
+assert.deepEqual(removedExerciseDeletion, ["row"], `Expected removed same-date exercise to be deleted on save, got ${removedExerciseDeletion.join(", ")}`);
+
+const backupValidation = runScenario(`
+  ${reset}
+  var invalidMessage = "";
+  try {
+    normalizeBackupPayload({ workouts: "bad", metrics: [] });
+  } catch (error) {
+    invalidMessage = error.message;
+  }
+  var normalized = normalizeBackupPayload({
+    workouts: [],
+    metrics: [],
+    settings: {}
+  });
+  ({
+    invalidMessage,
+    nutritionGoal: normalized.settings.nutritionGoal,
+    customExerciseCount: normalized.settings.customExercises.length,
+    templateCount: normalized.settings.dayTemplates.length
+  });
+`);
+
+assert(backupValidation.invalidMessage.includes("missing workouts or metrics"), `Expected malformed backup rejection, got ${backupValidation.invalidMessage}`);
+assert.strictEqual(backupValidation.nutritionGoal, "bulk", `Expected missing backup nutrition goal to reset to bulk, got ${backupValidation.nutritionGoal}`);
+assert.strictEqual(backupValidation.customExerciseCount, 0, `Expected missing custom exercises to reset, got ${backupValidation.customExerciseCount}`);
+assert.strictEqual(backupValidation.templateCount, 0, `Expected missing templates to reset, got ${backupValidation.templateCount}`);
+
+const supabaseSessionRefresh = runScenario(`
+  ({
+    expired: supabaseSessionNeedsRefresh({ expires_at: Math.floor(Date.now() / 1000) - 5 }, Date.now()),
+    fresh: supabaseSessionNeedsRefresh({ expires_at: Math.floor(Date.now() / 1000) + 3600 }, Date.now())
+  });
+`);
+
+assert.strictEqual(supabaseSessionRefresh.expired, true, "Expected expired Supabase session to require refresh.");
+assert.strictEqual(supabaseSessionRefresh.fresh, false, "Expected fresh Supabase session not to require refresh.");
 
 const supabasePasswordExport = runScenario(`
   ${reset}

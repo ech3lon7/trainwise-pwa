@@ -1,28 +1,40 @@
 "use strict";
 
-const CACHE_NAME = "trainwise-cache-v38";
+const CACHE_NAME = "trainwise-cache-v39";
 const ASSETS = [
   "./",
   "./index.html",
-  "./styles.css?v=1.5.16",
-  "./app.js?v=1.5.16",
-  "./manifest.webmanifest?v=1.5.16",
-  "./icon.svg?v=1.5.16",
-  "./icon-512.png?v=1.5.16",
-  "./apple-touch-icon.png?v=1.5.16",
-  "./assets/muscles/abs.png?v=1.5.16",
-  "./assets/muscles/back.png?v=1.5.16",
-  "./assets/muscles/bicep.png?v=1.5.16",
-  "./assets/muscles/calves.png?v=1.5.16",
-  "./assets/muscles/chest.png?v=1.5.16",
-  "./assets/muscles/glutes.png?v=1.5.16",
-  "./assets/muscles/hamstrings.png?v=1.5.16",
-  "./assets/muscles/quads.png?v=1.5.16",
-  "./assets/muscles/shoulders.png?v=1.5.16",
-  "./assets/muscles/triceps.png?v=1.5.16",
-  "./assets/dumbbell.png?v=1.5.16",
-  "./assets/dumbbell.svg?v=1.5.16"
+  "./styles.css?v=1.5.17",
+  "./app.js?v=1.5.17",
+  "./manifest.webmanifest?v=1.5.17",
+  "./icon.svg?v=1.5.17",
+  "./icon-512.png?v=1.5.17",
+  "./apple-touch-icon.png?v=1.5.17",
+  "./assets/muscles/abs.png?v=1.5.17",
+  "./assets/muscles/back.png?v=1.5.17",
+  "./assets/muscles/bicep.png?v=1.5.17",
+  "./assets/muscles/calves.png?v=1.5.17",
+  "./assets/muscles/chest.png?v=1.5.17",
+  "./assets/muscles/glutes.png?v=1.5.17",
+  "./assets/muscles/hamstrings.png?v=1.5.17",
+  "./assets/muscles/quads.png?v=1.5.17",
+  "./assets/muscles/shoulders.png?v=1.5.17",
+  "./assets/muscles/triceps.png?v=1.5.17",
+  "./assets/dumbbell.png?v=1.5.17",
+  "./assets/dumbbell.svg?v=1.5.17"
 ];
+
+function shouldHandleRequest(request) {
+  if (request.method !== "GET") return false;
+  if (request.headers.has("Authorization")) return false;
+  const url = new URL(request.url);
+  return url.origin === self.location.origin;
+}
+
+function shouldCacheResponse(request, response) {
+  if (!shouldHandleRequest(request)) return false;
+  return !!response?.ok && response.type !== "opaque";
+}
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
@@ -42,7 +54,7 @@ self.addEventListener("activate", (event) => {
 
 self.addEventListener("fetch", (event) => {
   const request = event.request;
-  if (request.method !== "GET") return;
+  if (!shouldHandleRequest(request)) return;
 
   event.respondWith(networkFirst(request));
 });
@@ -63,7 +75,7 @@ self.addEventListener("message", (event) => {
 async function networkFirst(request) {
   try {
     const response = await fetch(request, { cache: "default" });
-    if (response?.ok) {
+    if (shouldCacheResponse(request, response)) {
       const cache = await caches.open(CACHE_NAME);
       await cache.put(request, response.clone());
     }

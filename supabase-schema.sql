@@ -1,7 +1,7 @@
 create table if not exists public.fitness_snapshots (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null default auth.uid(),
-  app_version text not null default '1.5.15',
+  app_version text not null default '1.5.17',
   payload jsonb not null,
   created_at timestamptz not null default now()
 );
