@@ -1577,6 +1577,13 @@ textarea {
   grid-template-columns: minmax(0, 2fr) minmax(150px, 1fr);
 }
 
+.exercise-form-error {
+  margin: 6px 0 0;
+  color: #ffbbb6;
+  font-size: 12px;
+  font-weight: 700;
+}
+
 .checkbox-grid {
   display: grid;
   grid-template-columns: repeat(5, minmax(0, 1fr));
@@ -1600,9 +1607,89 @@ textarea {
   min-height: auto;
 }
 
+.check-card input:disabled + span {
+  color: var(--green);
+}
+
 .check-card span {
   font-size: 12px;
   font-weight: 700;
+}
+
+.exercise-coverage-panel {
+  margin-top: 14px;
+}
+
+.exercise-coverage-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.coverage-chip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid rgba(53, 213, 140, 0.16);
+  border-radius: 8px;
+  background: rgba(53, 213, 140, 0.07);
+}
+
+.coverage-chip.is-missing {
+  border-color: rgba(255, 209, 102, 0.22);
+  background: rgba(255, 209, 102, 0.07);
+}
+
+.coverage-chip span {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.coverage-chip strong,
+.coverage-chip small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.coverage-chip small {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.exercise-library-controls {
+  display: grid;
+  gap: 12px;
+}
+
+.exercise-search-field {
+  margin-bottom: 0;
+}
+
+.exercise-control-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(150px, 190px);
+  gap: 12px;
+  align-items: end;
+}
+
+.exercise-filter-row {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding-bottom: 4px;
+}
+
+.exercise-filter-row .pill {
+  flex: 0 0 auto;
+}
+
+.exercise-sort-field {
+  min-width: 0;
 }
 
 .exercise-list {
@@ -1644,6 +1731,83 @@ textarea {
   color: var(--muted);
   font-size: 11px;
   font-weight: 800;
+}
+
+.exercise-card-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0 0 8px;
+}
+
+.exercise-card-meta span {
+  display: grid;
+  gap: 2px;
+  min-width: 76px;
+  padding: 7px 8px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.045);
+}
+
+.exercise-card-meta strong {
+  color: var(--text);
+  font-size: 13px;
+}
+
+.exercise-card-meta small {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.exercise-status-pill {
+  align-content: center;
+  min-width: auto !important;
+  color: var(--green);
+  font-size: 11px;
+  font-weight: 900;
+}
+
+.exercise-status-pill.archived {
+  color: #ffdd88;
+}
+
+.exercise-card-actions {
+  position: relative;
+  justify-content: flex-end;
+}
+
+.exercise-secondary-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.exercise-action-menu-wrap {
+  position: relative;
+  display: none;
+}
+
+.exercise-action-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 15;
+  display: grid;
+  gap: 6px;
+  min-width: 150px;
+  padding: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  background: rgba(18, 22, 18, 0.98);
+  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.28);
+}
+
+.text-delete {
+  width: auto;
+  padding: 0 10px;
 }
 
 .badge-row {
@@ -2150,6 +2314,22 @@ textarea {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
+  .exercise-coverage-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .exercise-control-row {
+    grid-template-columns: 1fr;
+  }
+
+  .exercise-secondary-actions {
+    display: none;
+  }
+
+  .exercise-action-menu-wrap {
+    display: block;
+  }
+
   .hero-title {
     font-size: 25px;
   }
@@ -2236,6 +2416,19 @@ textarea {
 
   .checkbox-grid {
     grid-template-columns: 1fr;
+  }
+
+  .exercise-coverage-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .coverage-chip {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .coverage-chip .ghost-mini {
+    width: 100%;
   }
 
   .muscle-grid,

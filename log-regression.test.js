@@ -134,6 +134,9 @@ assert(serviceWorkerCode.includes("shouldCacheResponse"), "Expected service work
 assert(appCode.includes("Delete this workout?"), "Expected workout deletes to ask for confirmation.");
 assert(appCode.includes("Delete nutrition entry"), "Expected metric deletes to ask for confirmation.");
 assert(appCode.includes("Stored only in this browser on this device"), "Expected Supabase password helper text.");
+assert(stylesCode.includes(".exercise-library-controls"), "Expected Exercises library controls to have dedicated styling.");
+assert(stylesCode.includes(".exercise-coverage-grid"), "Expected Exercises coverage panel to have dedicated styling.");
+assert(stylesCode.includes(".exercise-action-menu"), "Expected Exercises card action menu styling.");
 
 const nutritionQuickTotals = runScenario(`
   ${reset}
@@ -748,6 +751,196 @@ const supabaseSessionRefresh = runScenario(`
 
 assert.strictEqual(supabaseSessionRefresh.expired, true, "Expected expired Supabase session to require refresh.");
 assert.strictEqual(supabaseSessionRefresh.fresh, false, "Expected fresh Supabase session not to require refresh.");
+
+const archivedExerciseBehavior = runScenario(`
+  ${reset}
+  state.settings.customExercises = [
+    {
+      id: "custom-bench",
+      name: "Bench Press",
+      primaryMuscles: ["chest"],
+      secondaryMuscles: ["triceps"],
+      equipment: "barbell",
+      reps: "6-12",
+      rest: "90-180 sec",
+      cue: "Test bench."
+    },
+    {
+      id: "custom-row",
+      name: "Cable Row",
+      primaryMuscles: ["back"],
+      secondaryMuscles: ["biceps"],
+      equipment: "cable",
+      reps: "8-15",
+      rest: "90-180 sec",
+      cue: "Test row.",
+      archivedAt: "2026-06-12T12:00:00.000Z"
+    },
+    {
+      id: "custom-unused",
+      name: "Unused Fly",
+      primaryMuscles: ["chest"],
+      secondaryMuscles: [],
+      equipment: "dumbbells",
+      reps: "10-15",
+      rest: "60 sec",
+      cue: "Unused."
+    }
+  ];
+  state.workouts = [
+    makeWorkout({ exercise: "Bench Press", exerciseId: "custom-bench" }),
+    makeWorkout({ exercise: "Cable Row", exerciseId: "custom-row", primaryMuscles: ["back"], secondaryMuscles: ["biceps"] })
+  ];
+  var all = getCustomExercises({ includeArchived: true });
+  var row = all.find((exercise) => exercise.id === "custom-row");
+  var bench = all.find((exercise) => exercise.id === "custom-bench");
+  var unused = all.find((exercise) => exercise.id === "custom-unused");
+  ({
+    activeNames: getCustomExercises().map((exercise) => exercise.name),
+    databaseNames: exerciseDatabase().map((exercise) => exercise.name),
+    allArchived: !!row.archivedAt,
+    benchUsage: exerciseUsageStats(bench),
+    rowUsage: exerciseUsageStats(row),
+    benchRemoval: exerciseRemovalMode(bench),
+    unusedRemoval: exerciseRemovalMode(unused)
+  });
+`);
+
+assert.deepEqual(archivedExerciseBehavior.activeNames, ["Bench Press", "Unused Fly"], `Expected archived exercises excluded from active list, got ${archivedExerciseBehavior.activeNames.join(", ")}`);
+assert.deepEqual(archivedExerciseBehavior.databaseNames, ["Bench Press", "Unused Fly"], `Expected archived exercises excluded from Coach database, got ${archivedExerciseBehavior.databaseNames.join(", ")}`);
+assert.strictEqual(archivedExerciseBehavior.allArchived, true, "Expected archived exercise metadata to be preserved.");
+assert.strictEqual(archivedExerciseBehavior.benchUsage.sessionCount, 1, `Expected logged active usage count, got ${archivedExerciseBehavior.benchUsage.sessionCount}`);
+assert.strictEqual(archivedExerciseBehavior.rowUsage.lastUsedAt, "2026-06-10", `Expected archived exercise usage to resolve by id, got ${archivedExerciseBehavior.rowUsage.lastUsedAt}`);
+assert.strictEqual(archivedExerciseBehavior.benchRemoval, "archive", `Expected logged exercise to archive, got ${archivedExerciseBehavior.benchRemoval}`);
+assert.strictEqual(archivedExerciseBehavior.unusedRemoval, "delete", `Expected unused exercise to hard delete, got ${archivedExerciseBehavior.unusedRemoval}`);
+
+const exerciseDropdownSafety = runScenario(`
+  ${reset}
+  state.settings.customExercises = [{
+    id: "custom-row",
+    name: "Cable Row",
+    primaryMuscles: ["back"],
+    secondaryMuscles: ["biceps"],
+    equipment: "cable",
+    reps: "8-15",
+    rest: "90-180 sec",
+    cue: "Test row.",
+    archivedAt: "2026-06-12T12:00:00.000Z"
+  }];
+  var archived = exerciseOptions("Cable Row");
+  state.settings.customExercises = [];
+  var missing = exerciseOptions("Ghost Press");
+  ({ archived, missing });
+`);
+
+assert(exerciseDropdownSafety.archived.includes('value="Cable Row" selected'), `Expected archived exercise option to keep original value, got ${exerciseDropdownSafety.archived}`);
+assert(exerciseDropdownSafety.archived.includes("Cable Row (archived)"), `Expected archived exercise label, got ${exerciseDropdownSafety.archived}`);
+assert(exerciseDropdownSafety.missing.includes('value="Ghost Press" selected'), `Expected missing exercise option to keep original value, got ${exerciseDropdownSafety.missing}`);
+assert(exerciseDropdownSafety.missing.includes("Ghost Press (not in library)"), `Expected missing exercise label, got ${exerciseDropdownSafety.missing}`);
+
+const exerciseFormValidation = runScenario(`
+  ${reset}
+  var valid = validateExerciseFormInput({
+    name: "  Incline Curl  ",
+    primaryMuscle: "biceps",
+    secondaryMuscles: ["biceps", "forearms", "triceps"],
+    equipment: "dumbbells",
+    reps: "10",
+    rest: "1:30",
+    cue: "Strict."
+  });
+  var invalid = validateExerciseFormInput({
+    name: "",
+    primaryMuscle: "chest",
+    secondaryMuscles: ["chest"],
+    equipment: "",
+    reps: "heavy",
+    rest: "forever",
+    cue: ""
+  });
+  ({
+    valid,
+    invalid,
+    secondaryMarkup: secondaryMuscleCheckboxes(["chest", "triceps"], "chest")
+  });
+`);
+
+assert.strictEqual(exerciseFormValidation.valid.ok, true, `Expected valid exercise form, got ${JSON.stringify(exerciseFormValidation.valid.errors)}`);
+assert.strictEqual(exerciseFormValidation.valid.exercise.name, "Incline Curl", `Expected trimmed exercise name, got ${exerciseFormValidation.valid.exercise.name}`);
+assert.strictEqual(exerciseFormValidation.valid.exercise.reps, "10", `Expected normalized single rep target, got ${exerciseFormValidation.valid.exercise.reps}`);
+assert.strictEqual(exerciseFormValidation.valid.exercise.rest, "90 sec", `Expected time rest to normalize to seconds, got ${exerciseFormValidation.valid.exercise.rest}`);
+assert.deepEqual(exerciseFormValidation.valid.exercise.secondaryMuscles, ["triceps"], `Expected primary muscle removed from secondary, got ${exerciseFormValidation.valid.exercise.secondaryMuscles.join(", ")}`);
+assert.strictEqual(exerciseFormValidation.invalid.ok, false, "Expected invalid exercise form to fail validation.");
+assert(exerciseFormValidation.invalid.errors.name, "Expected name validation error.");
+assert(exerciseFormValidation.invalid.errors.reps, "Expected reps validation error.");
+assert(exerciseFormValidation.invalid.errors.rest, "Expected rest validation error.");
+assert(exerciseFormValidation.secondaryMarkup.includes('value="chest" checked disabled'), "Expected primary muscle checkbox to be checked and disabled.");
+
+const exerciseCoverageAndFilters = runScenario(`
+  ${reset}
+  state.settings.customExercises = [
+    {
+      id: "custom-bench",
+      name: "Bench Press",
+      primaryMuscles: ["chest"],
+      secondaryMuscles: ["triceps"],
+      equipment: "barbell",
+      reps: "6-12",
+      rest: "90-180 sec",
+      cue: "Test bench."
+    },
+    {
+      id: "custom-row",
+      name: "Cable Row",
+      primaryMuscles: ["back"],
+      secondaryMuscles: ["biceps"],
+      equipment: "cable",
+      reps: "8-15",
+      rest: "90-180 sec",
+      cue: "Test row."
+    },
+    {
+      id: "custom-curl",
+      name: "Curl",
+      primaryMuscles: ["biceps"],
+      secondaryMuscles: [],
+      equipment: "dumbbells",
+      reps: "8-15",
+      rest: "60 sec",
+      cue: "Test curl.",
+      archivedAt: "2026-06-12T12:00:00.000Z"
+    }
+  ];
+  state.workouts = [
+    makeWorkout({ exercise: "Cable Row", exerciseId: "custom-row", primaryMuscles: ["back"], secondaryMuscles: ["biceps"], date: "2026-06-11" }),
+    makeWorkout({ exercise: "Bench Press", exerciseId: "custom-bench", date: "2026-06-10" })
+  ];
+  var coverage = exerciseCoverageStats();
+  var markup = renderExercises();
+  ({
+    chestCount: coverage.find((item) => item.id === "chest").count,
+    backCount: coverage.find((item) => item.id === "back").count,
+    bicepsCount: coverage.find((item) => item.id === "biceps").count,
+    missingAbs: coverage.find((item) => item.id === "abs").missing,
+    searchNames: filteredExerciseList({ search: "row", muscle: "all", sort: "az" }).map((item) => item.name),
+    mostLogged: filteredExerciseList({ search: "", muscle: "all", sort: "most" }).map((item) => item.name),
+    archivedNames: filteredExerciseList({ includeArchived: true, archivedOnly: true }).map((item) => item.name),
+    hasSearch: markup.includes('data-exercise-search'),
+    hasCoverage: markup.includes('exercise-coverage-grid'),
+    hasArchiveSection: markup.includes('Archived exercises')
+  });
+`);
+
+assert.strictEqual(exerciseCoverageAndFilters.chestCount, 1, `Expected chest coverage count, got ${exerciseCoverageAndFilters.chestCount}`);
+assert.strictEqual(exerciseCoverageAndFilters.backCount, 1, `Expected back coverage count, got ${exerciseCoverageAndFilters.backCount}`);
+assert.strictEqual(exerciseCoverageAndFilters.bicepsCount, 0, `Expected archived biceps exercise excluded from active coverage, got ${exerciseCoverageAndFilters.bicepsCount}`);
+assert.strictEqual(exerciseCoverageAndFilters.missingAbs, true, "Expected missing abs coverage.");
+assert.deepEqual(exerciseCoverageAndFilters.searchNames, ["Cable Row"], `Expected exercise search/filter result, got ${exerciseCoverageAndFilters.searchNames.join(", ")}`);
+assert.strictEqual(exerciseCoverageAndFilters.mostLogged[0], "Bench Press", `Expected most logged sort to keep highest session count first, got ${exerciseCoverageAndFilters.mostLogged.join(", ")}`);
+assert.deepEqual(exerciseCoverageAndFilters.archivedNames, ["Curl"], `Expected archived list to include archived exercises, got ${exerciseCoverageAndFilters.archivedNames.join(", ")}`);
+assert.strictEqual(exerciseCoverageAndFilters.hasSearch, true, "Expected Exercises markup to include search input.");
+assert.strictEqual(exerciseCoverageAndFilters.hasCoverage, true, "Expected Exercises markup to include coverage panel.");
+assert.strictEqual(exerciseCoverageAndFilters.hasArchiveSection, true, "Expected Exercises markup to include archived section.");
 
 const supabasePasswordExport = runScenario(`
   ${reset}
