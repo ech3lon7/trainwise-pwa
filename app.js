@@ -3,7 +3,7 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 2;
 const STORES = ["workouts", "metrics", "settings"];
-const APP_VERSION = "1.5.21";
+const APP_VERSION = "1.5.22";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 const DRAFT_RECOVERY_KEY = "trainwise-draft-recovery-v1";
 let dbOpenPromise = null;
@@ -113,7 +113,7 @@ const state = {
   db: null,
   activeTab: "dashboard",
   logMode: "strength",
-  selectedExercise: "Push-up",
+  selectedExercise: "",
   selectedMuscle: "chest",
   editingExerciseId: null,
   exerciseSearch: "",
@@ -279,11 +279,11 @@ function normalizeName(value) {
   return String(value || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
 }
 
-function toast(message) {
+function toast(message, options = {}) {
   els.toast.textContent = message;
   els.toast.classList.add("show");
   window.clearTimeout(toast.timer);
-  toast.timer = window.setTimeout(() => els.toast.classList.remove("show"), 2600);
+  toast.timer = window.setTimeout(() => els.toast.classList.remove("show"), options.duration || 2600);
 }
 
 function showBanner(message, options = {}) {
@@ -300,6 +300,10 @@ function showBanner(message, options = {}) {
 function announce(message, options = {}) {
   showBanner(message, options);
   toast(message);
+}
+
+function notifyMetricSaved(existing) {
+  toast(existing ? "Metrics updated." : "Metrics saved.", { duration: 2000 });
 }
 
 function clearBanner() {
@@ -2836,11 +2840,12 @@ function draftExerciseFromState() {
 }
 
 function defaultDraftExercise(exerciseName = state.selectedExercise) {
-  const meta = resolveExerciseMeta(exerciseName, state.draftTargetMuscle);
+  const fallback = exerciseName || defaultLogExerciseName();
+  const meta = resolveExerciseMeta(fallback, state.draftTargetMuscle);
   return {
     draftId: uid(),
     editingWorkoutId: null,
-    exercise: exerciseName,
+    exercise: fallback,
     targetMuscle: meta.primaryMuscles[0] || "chest",
     notes: "",
     setRows: defaultSetRows()
@@ -2849,13 +2854,22 @@ function defaultDraftExercise(exerciseName = state.selectedExercise) {
 
 function ensureWorkoutDraft() {
   if (!Array.isArray(state.workoutDraft) || !state.workoutDraft.length) {
-    state.workoutDraft = [defaultDraftExercise(state.selectedExercise)];
+    const exercise = state.selectedExercise || defaultLogExerciseName();
+    state.workoutDraft = exercise ? [defaultDraftExercise(exercise)] : [];
   }
   return state.workoutDraft;
 }
 
 function syncLegacyDraftFromFirst() {
   const first = ensureWorkoutDraft()[0];
+  if (!first) {
+    state.selectedExercise = "";
+    state.draftTargetMuscle = "chest";
+    state.draftNotes = "";
+    state.setRows = defaultSetRows();
+    state.editingWorkoutId = null;
+    return;
+  }
   state.selectedExercise = first.exercise;
   state.draftTargetMuscle = first.targetMuscle;
   state.draftNotes = first.notes || "";
@@ -3640,9 +3654,20 @@ function exerciseDraftTable(draft, index, total) {
   `;
 }
 
+function emptyStrengthLogMarkup() {
+  return `
+    <section class="empty log-empty-state">
+      <h3>Add an exercise to start logging strength.</h3>
+      <p class="muted small">Create a library exercise, load a template, or copy Coach's plan before logging sets.</p>
+      <button class="primary-button" type="button" data-action="quick-add-exercise">Add exercise</button>
+    </section>
+  `;
+}
+
 function renderLog() {
   const templates = getDayTemplates();
   const draft = ensureWorkoutDraft();
+  const canAddExerciseTable = exerciseNames().length > 0;
   const lockLabel = draft.some((item) => item.editingWorkoutId) ? "Update workout" : "Lock in workout";
   if (state.logHistoryExercise) return exerciseHistoryScreen(state.logHistoryExercise);
   const metricDate = state.metricDate || todayISO();
@@ -3661,7 +3686,7 @@ function renderLog() {
         <form id="strength-form">
           <div class="log-top-actions">
             <button class="ghost-button" type="button" data-action="toggle-template-panel">Templates</button>
-            <button class="ghost-button" type="button" data-action="add-exercise-table">Add exercise</button>
+            <button class="ghost-button" type="button" data-action="${canAddExerciseTable ? "add-exercise-table" : "quick-add-exercise"}">Add exercise</button>
             ${draft.some((item) => item.editingWorkoutId) ? `<button class="ghost-button" type="button" data-action="new-log">Clear all logged info</button>` : ""}
           </div>
 
@@ -3687,12 +3712,14 @@ function renderLog() {
             ${renderDateControl({ id: "workout-date", name: "date", label: "Date", value: state.draftDate || todayISO() })}
           </div>
 
-          <div class="exercise-draft-list">
-            ${draft.map((item, index) => exerciseDraftTable(item, index, draft.length)).join("")}
-          </div>
+          ${draft.length ? `
+            <div class="exercise-draft-list">
+              ${draft.map((item, index) => exerciseDraftTable(item, index, draft.length)).join("")}
+            </div>
 
-          <button class="primary-button lock-button" type="submit">${lockLabel}</button>
-          <p class="muted micro form-note">Most hypertrophy work should stop 1-3 reps before failure. Keep the whole workout inside roughly ${SESSION_LIMIT_MINUTES} minutes.</p>
+            <button class="primary-button lock-button" type="submit">${lockLabel}</button>
+            <p class="muted micro form-note">Most hypertrophy work should stop 1-3 reps before failure. Keep the whole workout inside roughly ${SESSION_LIMIT_MINUTES} minutes.</p>
+          ` : emptyStrengthLogMarkup()}
         </form>
       ` : `
         <form id="metric-form">
@@ -4201,12 +4228,13 @@ function syncLogDraftNoticeDom() {
 }
 
 function renderMobileQuickActions() {
-  const quickActionTabs = new Set(["dashboard", "coach", "trends", "history"]);
+  const quickActionTabs = new Set(["dashboard"]);
   if (!quickActionTabs.has(state.activeTab)) return "";
   const plan = buildTodayPlan(selectedCoachTimeframeMinutes());
   const canCopyPlan = !!plan.sessionPlan.items.length;
+  const obscured = state.appBanner || state.logDraftNotice || state.pendingImport;
   return `
-    <div class="mobile-quick-actions ${state.quickActionsOpen ? "is-open" : ""}">
+    <div class="mobile-quick-actions ${state.quickActionsOpen ? "is-open" : ""}${obscured ? " is-obscured" : ""}">
       ${state.quickActionsOpen ? `
         <div class="mobile-quick-sheet" role="menu" aria-label="Quick actions">
           <button type="button" data-action="quick-log-strength" role="menuitem">Log strength</button>
@@ -4589,7 +4617,7 @@ async function saveMetric(form) {
   state.metricFormDraft = null;
   clearDraftRecoveryScope("metric");
   clearLogDraftNotice();
-  announce(existing ? "Metrics updated." : "Metrics saved.", { tone: "good" });
+  notifyMetricSaved(existing);
   await render();
 }
 
@@ -5141,7 +5169,7 @@ function editWorkout(id) {
 }
 
 function defaultLogExerciseName() {
-  return exerciseNames()[0] || "Custom exercise";
+  return exerciseNames()[0] || "";
 }
 
 function workoutEntryToDraft(entry) {
@@ -5201,7 +5229,7 @@ function applyWorkoutSaveUndoSnapshot(workouts = [], payload = {}) {
 
 function clearWorkoutDraft(date = todayISO()) {
   const exercise = defaultLogExerciseName();
-  const meta = resolveExerciseMeta(exercise);
+  const meta = exercise ? resolveExerciseMeta(exercise) : { primaryMuscles: ["chest"] };
   state.editingWorkoutId = null;
   state.loadedWorkoutDateIds = [];
   state.draftDate = date;
@@ -5209,7 +5237,7 @@ function clearWorkoutDraft(date = todayISO()) {
   state.selectedExercise = exercise;
   state.draftTargetMuscle = meta.primaryMuscles[0] || "chest";
   state.setRows = defaultSetRows();
-  state.workoutDraft = [defaultDraftExercise(exercise)];
+  state.workoutDraft = exercise ? [defaultDraftExercise(exercise)] : [];
   state.logHistoryExercise = "";
   syncLegacyDraftFromFirst();
 }
@@ -5446,7 +5474,17 @@ async function handleAction(action, target) {
     },
     async "add-exercise-table"() {
       readDraftFromForm();
-      state.workoutDraft.push(defaultDraftExercise(defaultLogExerciseName()));
+      const exercise = defaultLogExerciseName();
+      if (!exercise) {
+        state.activeTab = "exercises";
+        state.editingExerciseId = null;
+        state.exerciseFormDraft = null;
+        state.exerciseFormErrors = {};
+        state.quickActionsOpen = false;
+        await render({ animate: true });
+        return;
+      }
+      state.workoutDraft.push(defaultDraftExercise(exercise));
       await render();
     },
     async "remove-exercise-table"() {
@@ -6115,12 +6153,7 @@ async function init() {
     await loadState();
   }
 
-  if (restoreDraftRecovery()) {
-    showBanner("Unsaved draft restored.", {
-      tone: "good",
-      detail: "Review it before locking in or saving."
-    });
-  }
+  restoreDraftRecovery();
 
   if (navigator.storage?.persist) {
     navigator.storage.persist().catch(() => {});

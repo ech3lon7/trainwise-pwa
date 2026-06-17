@@ -148,10 +148,14 @@ assert(stylesCode.includes(".collapsible-panel"), "Expected secondary settings/n
 assert(stylesCode.includes(".settings-panel.collapsible-panel"), "Expected Settings panels to use collapsible panel styling.");
 assert(stylesCode.includes(".log-draft-notice strong"), "Expected compact Log draft notice text styling.");
 assert(appCode.includes("muscle-audit-panel"), "Expected long Coach muscle set audit to be collapsible.");
-assert(appCode.includes('new Set(["dashboard", "coach", "trends", "history"])'), "Expected floating quick actions to stay off form-heavy tabs.");
-assert(indexCode.includes("v=1.5.21"), "Expected index shell references to use bumped app version.");
+assert(appCode.includes('new Set(["dashboard"])'), "Expected floating quick actions to stay off input-heavy tabs.");
+assert(!appCode.includes('selectedExercise: "Push-up"'), "Expected Log startup not to default to Push-up.");
+assert(!appCode.includes('showBanner("Unsaved draft restored."'), "Expected startup draft recovery not to show a top banner.");
+assert(appCode.includes("notifyMetricSaved"), "Expected metrics saves to use a dedicated bottom-only notification helper.");
+assert(stylesCode.includes(".mobile-quick-actions.is-obscured"), "Expected floating quick actions to support a non-overlapping mobile position.");
+assert(indexCode.includes("v=1.5.22"), "Expected index shell references to use bumped app version.");
 assert(!indexCode.includes('id="app" class="app-content" aria-live'), "Expected broad app aria-live to be removed in favor of targeted live regions.");
-assert(serviceWorkerCode.includes("trainwise-cache-v43"), "Expected service worker cache version bump.");
+assert(serviceWorkerCode.includes("trainwise-cache-v44"), "Expected service worker cache version bump.");
 
 const nutritionQuickTotals = runScenario(`
   ${reset}
@@ -359,6 +363,20 @@ assert(nutritionMealOverrideMarkup.includes("Using meal details for today"), "Ex
 assert(nutritionMealOverrideMarkup.includes('id="calories" name="calories" data-quick-field="calories" type="number" inputmode="decimal" min="0" step="1" value="" readonly aria-disabled="true"'), "Expected quick calories input to lock when meal details exist.");
 assert(nutritionMealOverrideMarkup.includes('id="protein" name="protein" data-quick-field="protein" type="number" inputmode="decimal" min="0" step="1" value="" placeholder="g" readonly aria-disabled="true"'), "Expected quick protein input to lock when meal details exist.");
 
+const emptyLogStartup = runScenario(`
+  ${reset}
+  state.logMode = "strength";
+  state.settings.customExercises = [];
+  state.selectedExercise = "";
+  state.workoutDraft = [];
+  state.draftDate = "2026-06-16";
+  renderLog();
+`);
+
+assert(emptyLogStartup.includes("Add an exercise to start logging strength."), "Expected empty Log to ask for a real library exercise.");
+assert(!emptyLogStartup.includes("Push-up"), "Expected empty Log startup not to render Push-up.");
+assert(!emptyLogStartup.includes('class="set-table"'), "Expected empty Log startup not to create a fake set table.");
+
 const nutritionDateSwitchClearsStaleDraft = runScenario(`
   ${reset}
   state.logMode = "metrics";
@@ -396,6 +414,26 @@ const recoveryScopeClearsOnlyNutrition = runScenario(`
 assert(recoveryScopeClearsOnlyNutrition.strength, "Expected saving nutrition to preserve recoverable strength draft.");
 assert.strictEqual(recoveryScopeClearsOnlyNutrition.metric, null, "Expected nutrition draft recovery to be cleared after saving nutrition.");
 assert(recoveryScopeClearsOnlyNutrition.exercise, "Expected unrelated exercise draft recovery to remain.");
+
+const metricsBottomOnlyNotification = runScenario(`
+  ${reset}
+  state.appBanner = null;
+  var toastCalls = [];
+  var originalToast = toast;
+  toast = (message, options = {}) => { toastCalls.push({ message, options }); };
+  notifyMetricSaved(false);
+  var saved = { banner: state.appBanner, toastCalls };
+  toastCalls = [];
+  notifyMetricSaved(true);
+  var updated = { banner: state.appBanner, toastCalls };
+  toast = originalToast;
+  ({ saved, updated });
+`);
+
+assert.strictEqual(metricsBottomOnlyNotification.saved.banner, null, "Expected metric save notification not to create a top banner.");
+assert.strictEqual(metricsBottomOnlyNotification.saved.toastCalls[0].message, "Metrics saved.", "Expected metric save to use bottom toast copy.");
+assert.strictEqual(metricsBottomOnlyNotification.saved.toastCalls[0].options.duration, 2000, "Expected metric save toast to last two seconds.");
+assert.strictEqual(metricsBottomOnlyNotification.updated.toastCalls[0].message, "Metrics updated.", "Expected metric update to use bottom toast copy.");
 
 const setRecords = runScenario(`
   ${reset}
