@@ -145,9 +145,13 @@ assert(stylesCode.includes(".modal-backdrop"), "Expected import preview modal st
 assert(stylesCode.includes(".data-safety-grid"), "Expected data safety summary styling.");
 assert(stylesCode.includes(".widget-preference-list"), "Expected Today widget preference styling.");
 assert(stylesCode.includes(".collapsible-panel"), "Expected secondary settings/notes panels to be collapsible.");
-assert(indexCode.includes("v=1.5.20"), "Expected index shell references to use bumped app version.");
+assert(stylesCode.includes(".settings-panel.collapsible-panel"), "Expected Settings panels to use collapsible panel styling.");
+assert(stylesCode.includes(".log-draft-notice strong"), "Expected compact Log draft notice text styling.");
+assert(appCode.includes("muscle-audit-panel"), "Expected long Coach muscle set audit to be collapsible.");
+assert(appCode.includes('new Set(["dashboard", "coach", "trends", "history"])'), "Expected floating quick actions to stay off form-heavy tabs.");
+assert(indexCode.includes("v=1.5.21"), "Expected index shell references to use bumped app version.");
 assert(!indexCode.includes('id="app" class="app-content" aria-live'), "Expected broad app aria-live to be removed in favor of targeted live regions.");
-assert(serviceWorkerCode.includes("trainwise-cache-v42"), "Expected service worker cache version bump.");
+assert(serviceWorkerCode.includes("trainwise-cache-v43"), "Expected service worker cache version bump.");
 
 const nutritionQuickTotals = runScenario(`
   ${reset}
@@ -354,6 +358,44 @@ assert(nutritionMealOverrideMarkup.includes("nutrition-quick-card is-overridden"
 assert(nutritionMealOverrideMarkup.includes("Using meal details for today"), "Expected override message to explain meal details are active.");
 assert(nutritionMealOverrideMarkup.includes('id="calories" name="calories" data-quick-field="calories" type="number" inputmode="decimal" min="0" step="1" value="" readonly aria-disabled="true"'), "Expected quick calories input to lock when meal details exist.");
 assert(nutritionMealOverrideMarkup.includes('id="protein" name="protein" data-quick-field="protein" type="number" inputmode="decimal" min="0" step="1" value="" placeholder="g" readonly aria-disabled="true"'), "Expected quick protein input to lock when meal details exist.");
+
+const nutritionDateSwitchClearsStaleDraft = runScenario(`
+  ${reset}
+  state.logMode = "metrics";
+  state.metricDate = "2026-06-15";
+  state.metricFormDraft = {
+    date: "2026-06-15",
+    data: { date: "2026-06-15", calories: "2400", protein: "180", bodyWeight: "182", notes: "old date" }
+  };
+  loadMetricDateDraft("2026-06-16");
+  renderLog();
+`);
+
+assert(nutritionDateSwitchClearsStaleDraft.includes('id="metric-date"'), "Expected nutrition date field to render after switching date.");
+assert(!nutritionDateSwitchClearsStaleDraft.includes('value="2400"'), "Expected quick calories from the previous date not to follow the new nutrition date.");
+assert(!nutritionDateSwitchClearsStaleDraft.includes("old date"), "Expected notes from the previous date not to follow the new nutrition date.");
+
+const recoveryScopeClearsOnlyNutrition = runScenario(`
+  ${reset}
+  var storage = {};
+  localStorage.getItem = (key) => storage[key] || null;
+  localStorage.setItem = (key, value) => { storage[key] = value; };
+  localStorage.removeItem = (key) => { delete storage[key]; };
+  safeLocalStorageSet(DRAFT_RECOVERY_KEY, JSON.stringify({
+    version: APP_VERSION,
+    reason: "test",
+    savedAt: "2026-06-16T12:00:00.000Z",
+    strength: { date: "2026-06-16", workoutDraft: [{ exercise: "Bench Press", setRows: [{ weight: 100, reps: 10 }] }] },
+    metric: { date: "2026-06-16", data: { calories: "2000" } },
+    exercise: { name: "Incline Curl" }
+  }));
+  clearDraftRecoveryScope("metric");
+  JSON.parse(storage[DRAFT_RECOVERY_KEY]);
+`);
+
+assert(recoveryScopeClearsOnlyNutrition.strength, "Expected saving nutrition to preserve recoverable strength draft.");
+assert.strictEqual(recoveryScopeClearsOnlyNutrition.metric, null, "Expected nutrition draft recovery to be cleared after saving nutrition.");
+assert(recoveryScopeClearsOnlyNutrition.exercise, "Expected unrelated exercise draft recovery to remain.");
 
 const setRecords = runScenario(`
   ${reset}
@@ -1031,7 +1073,8 @@ const mobileQolMarkup = runScenario(`
     banner: renderAppBanner(),
     logNotice: renderLogDraftNotice(),
     hiddenNotice: (state.activeTab = "exercises", renderLogDraftNotice()),
-    quick: renderMobileQuickActions(),
+    quick: (state.activeTab = "dashboard", renderMobileQuickActions()),
+    hiddenQuick: (state.activeTab = "log", renderMobileQuickActions()),
     modal: renderImportPreview(),
     widgets: selectedDashboardWidgets(),
     order: dashboardWidgetOrder(),
@@ -1048,6 +1091,7 @@ assert.strictEqual(mobileQolMarkup.hiddenNotice, "", "Expected Log draft notice 
 assert(mobileQolMarkup.quick.includes("Log strength"), "Expected quick action sheet to include strength logging.");
 assert(mobileQolMarkup.quick.includes("Log nutrition"), "Expected quick action sheet to include nutrition logging.");
 assert(mobileQolMarkup.quick.includes("Copy Coach plan"), "Expected quick action sheet to include Coach copy.");
+assert.strictEqual(mobileQolMarkup.hiddenQuick, "", "Expected floating quick actions to stay hidden on Log forms.");
 assert(mobileQolMarkup.modal.includes("Review backup import"), "Expected import preview dialog.");
 assert(mobileQolMarkup.modal.includes("2</strong> workouts"), "Expected import preview workout count.");
 assert.deepEqual(mobileQolMarkup.widgets, ["health", "weeklySets"], `Expected selected dashboard widgets to persist, got ${mobileQolMarkup.widgets.join(", ")}`);

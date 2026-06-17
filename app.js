@@ -3,7 +3,7 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 2;
 const STORES = ["workouts", "metrics", "settings"];
-const APP_VERSION = "1.5.20";
+const APP_VERSION = "1.5.21";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 const DRAFT_RECOVERY_KEY = "trainwise-draft-recovery-v1";
 let dbOpenPromise = null;
@@ -1493,6 +1493,25 @@ function clearDraftRecovery() {
   safeLocalStorageRemove(DRAFT_RECOVERY_KEY);
 }
 
+function clearDraftRecoveryScope(scope) {
+  let recovery = null;
+  try {
+    recovery = JSON.parse(safeLocalStorageGet(DRAFT_RECOVERY_KEY) || "null");
+  } catch {
+    recovery = null;
+  }
+  if (!recovery || typeof recovery !== "object") return;
+  if (scope === "strength") recovery.strength = null;
+  if (scope === "metric") recovery.metric = null;
+  if (scope === "exercise") recovery.exercise = null;
+  if (!recovery.strength && !recovery.metric && !recovery.exercise) {
+    clearDraftRecovery();
+    return;
+  }
+  recovery.savedAt = new Date().toISOString();
+  safeLocalStorageSet(DRAFT_RECOVERY_KEY, JSON.stringify(recovery));
+}
+
 function restoreDraftRecovery(payload = null) {
   let recovery = payload;
   if (!recovery) {
@@ -1523,6 +1542,12 @@ function restoreDraftRecovery(payload = null) {
     state.exerciseFormErrors = {};
   }
   return true;
+}
+
+function loadMetricDateDraft(date = todayISO()) {
+  state.metricDate = date || todayISO();
+  state.metricFormDraft = null;
+  clearLogDraftNotice();
 }
 
 function preserveVisibleDraft(reason = "navigation") {
@@ -4116,10 +4141,10 @@ function renderCoach() {
     ${renderCoachTargetSelector()}
     ${renderTodayPlan(todayPlan)}
     ${renderCoachWhy(todayPlan)}
-    <section class="section chart-panel">
-      <div class="chart-header"><h3>Muscle set audit</h3><span class="muted small">10 set floor, 12-20 growth zone</span></div>
+    <details class="section chart-panel collapsible-panel muscle-audit-panel">
+      <summary><span>Muscle set audit</span><small>10 set floor, 12-20 growth zone</small></summary>
       ${muscleProgressMarkup(coachMuscleSetStats())}
-    </section>
+    </details>
     <details class="section chart-panel collapsible-panel coach-notes-panel">
       <summary><span>Coach notes</span><small>secondary checks</small></summary>
       ${recs.map((rec) => `<div class="coach-card ${rec.tone}"><strong>${escapeHtml(rec.title)}</strong><p>${escapeHtml(rec.body)}</p></div>`).join("")}
@@ -4176,6 +4201,8 @@ function syncLogDraftNoticeDom() {
 }
 
 function renderMobileQuickActions() {
+  const quickActionTabs = new Set(["dashboard", "coach", "trends", "history"]);
+  if (!quickActionTabs.has(state.activeTab)) return "";
   const plan = buildTodayPlan(selectedCoachTimeframeMinutes());
   const canCopyPlan = !!plan.sessionPlan.items.length;
   return `
@@ -4311,13 +4338,21 @@ function renderDashboardWidgetSelector() {
   `;
 }
 
+function renderSettingsPanel(title, detail, body) {
+  return `
+    <details class="section settings-panel collapsible-panel">
+      <summary><span>${escapeHtml(title)}</span><small>${escapeHtml(detail)}</small></summary>
+      ${body}
+    </details>
+  `;
+}
+
 async function renderSettings() {
   const estimate = await storageEstimateMarkup();
   const sampleWorkouts = state.workouts.filter(isSampleEntry).length;
   const sampleMetrics = state.metrics.filter(isSampleEntry).length;
   return `
-    <section class="settings-panel">
-      <h2>Hypertrophy defaults</h2>
+    ${renderSettingsPanel("Hypertrophy defaults", "training rules", `
       <div class="settings-list">
         <span>Weekly floor <strong>${HYPERTROPHY.minimumSets} hard sets/muscle</strong></span>
         <span>Growth zone <strong>${HYPERTROPHY.growthLow}-${HYPERTROPHY.growthHigh} sets</strong></span>
@@ -4325,56 +4360,49 @@ async function renderSettings() {
         <span>Protein floor <strong>${HYPERTROPHY.proteinFloorGPerKg} g/kg/day</strong></span>
       </div>
       <p class="muted small">This is training guidance for personal tracking, not medical advice.</p>
-    </section>
+    `)}
 
-    <section class="section settings-panel">
-      <h2>Nutrition goal</h2>
+    ${renderSettingsPanel("Nutrition goal", nutritionGoalLabel(selectedNutritionGoal()), `
       <p class="muted small">Coach uses this to interpret calories and body-weight trend.</p>
       ${renderNutritionGoalSelector()}
-    </section>
+    `)}
 
-    <section class="section settings-panel">
-      <h2>Today widgets</h2>
+    ${renderSettingsPanel("Today widgets", `${selectedDashboardWidgets().length} shown`, `
       <p class="muted small">Choose what appears below the Today summary and put the most useful cards first.</p>
       ${renderDashboardWidgetSelector()}
-    </section>
+    `)}
 
-    <section class="section settings-panel">
-      <h2>Data safety</h2>
+    ${renderSettingsPanel("Data safety", "backup status", `
       <p class="muted small">A quick confidence check before imports, cloud sync, or app updates.</p>
       ${dataSafetySummaryMarkup()}
-    </section>
+    `)}
 
-    <section class="section settings-panel">
-      <h2>Storage</h2>
+    ${renderSettingsPanel("Storage", "backup/import", `
       ${estimate}
       <div class="grid two">
         <button class="primary-button" type="button" data-action="export-data">Export backup</button>
         <button class="ghost-button" type="button" data-action="import-click">Import backup</button>
       </div>
       <input class="hidden" id="import-file" type="file" accept="application/json">
-    </section>
+    `)}
 
-    <details class="section settings-panel collapsible-panel">
-      <summary><span>Sample chart data</span><small>${sampleWorkouts + sampleMetrics ? `${sampleWorkouts} lifts/metrics loaded` : "optional"}</small></summary>
+    ${renderSettingsPanel("Sample chart data", sampleWorkouts + sampleMetrics ? `${sampleWorkouts} lifts/metrics loaded` : "optional", `
       <p class="muted small">${sampleWorkouts + sampleMetrics ? `${sampleWorkouts} sample lifts and ${sampleMetrics} sample metrics are loaded.` : "Load demo logs to test every chart and recommendation without touching your real backups."}</p>
       <div class="grid two">
         <button class="primary-button" type="button" data-action="load-sample-data">Load sample data</button>
         <button class="ghost-button" type="button" data-action="remove-sample-data">Remove sample data</button>
       </div>
-    </details>
+    `)}
 
-    <details class="section settings-panel collapsible-panel">
-      <summary><span>App update</span><small>v${APP_VERSION}</small></summary>
+    ${renderSettingsPanel("App update", `v${APP_VERSION}`, `
       <div class="settings-list">
         <span>Installed shell <strong>v${APP_VERSION}</strong></span>
       </div>
       <p class="muted small">Refresh the app shell if iPhone Safari keeps showing an older screen. This clears cached app files only; workouts and metrics stay in browser storage.</p>
       <button class="ghost-button full-button" type="button" data-action="refresh-app-shell">Refresh app shell</button>
-    </details>
+    `)}
 
-    <details class="section settings-panel collapsible-panel">
-      <summary><span>Supabase sync</span><small>${escapeHtml(supabaseStatus())}</small></summary>
+    ${renderSettingsPanel("Supabase sync", supabaseStatus(), `
       <p class="muted small">Status: ${escapeHtml(supabaseStatus())}</p>
       <div class="field">
         <label for="supabaseUrl">Project URL</label>
@@ -4404,13 +4432,12 @@ async function renderSettings() {
         <button class="ghost-button" type="button" data-action="push-supabase">Push backup</button>
         <button class="ghost-button" type="button" data-action="pull-supabase">Pull latest</button>
       </div>
-    </details>
+    `)}
 
-    <details class="section settings-panel collapsible-panel">
-      <summary><span>Danger zone</span><small>destructive</small></summary>
+    ${renderSettingsPanel("Danger zone", "destructive", `
       <p class="muted small">Export a backup before clearing data.</p>
       <button class="danger-button" type="button" data-action="clear-all">Clear local data</button>
-    </details>
+    `)}
   `;
 }
 
@@ -4478,7 +4505,7 @@ async function saveExercise(form) {
   state.exerciseFormErrors = {};
   state.selectedExercise = exercise.name;
   state.draftTargetMuscle = exercise.primaryMuscles[0] || "chest";
-  clearDraftRecovery();
+  clearDraftRecoveryScope("exercise");
   announce(existing ? "Exercise updated." : "Exercise saved.", { tone: "good" });
   await render();
 }
@@ -4539,7 +4566,7 @@ async function saveWorkout(form) {
   }));
   state.loadedWorkoutDateIds = entries.map((entry) => entry.id).filter(Boolean);
   await loadState();
-  clearDraftRecovery();
+  clearDraftRecoveryScope("strength");
   announce(hadExisting ? "Workout updated." : "Workout locked in.", {
     tone: "good",
     detail: "Charts updated. Undo is available if this was accidental.",
@@ -4560,7 +4587,8 @@ async function saveMetric(form) {
   await loadState();
   state.metricDate = date;
   state.metricFormDraft = null;
-  clearDraftRecovery();
+  clearDraftRecoveryScope("metric");
+  clearLogDraftNotice();
   announce(existing ? "Metrics updated." : "Metrics saved.", { tone: "good" });
   await render();
 }
@@ -5210,9 +5238,7 @@ async function applySharedDateInput(input) {
     return;
   }
   if (input.id === "metric-date") {
-    state.metricFormDraft = metricDraftFromForm();
-    saveDraftRecovery("date-change");
-    state.metricDate = value;
+    loadMetricDateDraft(value);
     await render();
     return;
   }
@@ -5220,6 +5246,20 @@ async function applySharedDateInput(input) {
     state.historyMode = "dates";
     state.historyDate = value;
     await render();
+  }
+}
+
+function applyLogModeSwitch(nextMode) {
+  if (nextMode === "metrics") {
+    const date = state.draftDate || state.metricDate || todayISO();
+    state.metricDate = date;
+    if (state.metricFormDraft?.date !== date) state.metricFormDraft = null;
+    clearLogDraftNotice();
+    return;
+  }
+  if (nextMode === "strength") {
+    loadWorkoutDateDraft(state.metricDate || state.draftDate || todayISO());
+    clearLogDraftNotice();
   }
 }
 
@@ -5263,6 +5303,7 @@ async function handleAction(action, target) {
       state.quickActionsOpen = false;
       state.activeTab = "log";
       state.logMode = "strength";
+      loadWorkoutDateDraft(todayISO());
       await render({ animate: true });
     },
     async "quick-log-nutrition"() {
@@ -5270,7 +5311,7 @@ async function handleAction(action, target) {
       state.quickActionsOpen = false;
       state.activeTab = "log";
       state.logMode = "metrics";
-      state.metricDate = todayISO();
+      loadMetricDateDraft(todayISO());
       await render({ animate: true });
     },
     async "quick-add-exercise"() {
@@ -5806,8 +5847,12 @@ document.addEventListener("click", async (event) => {
       await render({ animate: true });
     }
     if (logMode) {
-      if (logMode.dataset.logMode !== state.logMode) preserveVisibleDraft("log-mode-change");
-      state.logMode = logMode.dataset.logMode;
+      const nextMode = logMode.dataset.logMode;
+      if (nextMode !== state.logMode) {
+        preserveVisibleDraft("log-mode-change");
+        applyLogModeSwitch(nextMode);
+      }
+      state.logMode = nextMode;
       await render();
     }
     if (action) {
