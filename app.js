@@ -3,7 +3,7 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 2;
 const STORES = ["workouts", "metrics", "settings"];
-const APP_VERSION = "1.5.24";
+const APP_VERSION = "1.5.25";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 const DRAFT_RECOVERY_KEY = "trainwise-draft-recovery-v1";
 let dbOpenPromise = null;
@@ -310,6 +310,13 @@ function scrollTopButtonShouldShow(scrollY = 0, scrollHeight = 0, clientHeight =
   if (!scrollHeight || !clientHeight || scrollHeight <= clientHeight * 1.5) return false;
   const scrollable = Math.max(scrollHeight - clientHeight, 1);
   return scrollY / scrollable > 0.55;
+}
+
+function scrollTopButtonTopOffset(scrollY = 0, viewport = null, innerHeightValue = 0, tabbarHeight = 76, buttonSize = 42, containingBlockOffset = 0) {
+  const safeGap = 12;
+  const visibleTop = viewport?.offsetTop || 0;
+  const visibleHeight = viewport?.height || innerHeightValue;
+  return Math.max(0, scrollY + visibleTop + visibleHeight - tabbarHeight - safeGap - buttonSize - containingBlockOffset);
 }
 
 function clearBanner() {
@@ -3417,12 +3424,10 @@ function exerciseCard(exercise, editable = false) {
 }
 
 function exerciseCoverageMarkup() {
+  const coveredCount = exerciseCoverageStats().filter((item) => !item.missing).length;
   return `
-    <section class="section chart-panel exercise-coverage-panel">
-      <div class="chart-header">
-        <h3>Primary coverage</h3>
-        <span class="muted small">${exerciseCoverageStats().filter((item) => !item.missing).length}/${muscleGroups.length} muscles covered</span>
-      </div>
+    <details class="section chart-panel collapsible-panel exercise-coverage-panel" open>
+      <summary><span>Primary coverage</span><small>${coveredCount}/${muscleGroups.length} muscles covered</small></summary>
       <div class="exercise-coverage-list">
         ${exerciseCoverageStats().map((item) => `
           <details class="coverage-row ${item.missing ? "is-missing" : ""}">
@@ -3451,13 +3456,14 @@ function exerciseCoverageMarkup() {
           </details>
         `).join("")}
       </div>
-    </section>
+    </details>
   `;
 }
 
 function exerciseLibraryControlsMarkup() {
   return `
-    <section class="section form-panel exercise-library-controls">
+    <details class="section form-panel collapsible-panel exercise-library-controls" open>
+      <summary><span>Find exercises</span><small>search, filter, sort</small></summary>
       <div class="field exercise-search-field">
         <label for="exercise-search">Search exercises</label>
         <input id="exercise-search" data-exercise-search value="${escapeHtml(state.exerciseSearch)}" placeholder="Bench, row, curl">
@@ -3479,7 +3485,7 @@ function exerciseLibraryControlsMarkup() {
           </select>
         </div>
       </div>
-    </section>
+    </details>
   `;
 }
 
@@ -3505,8 +3511,8 @@ function renderExercises() {
 
     ${exerciseCoverageMarkup()}
 
-    <section class="section form-panel">
-      <h3>${editing ? "Edit exercise" : "Add exercise"}</h3>
+    <details class="section form-panel collapsible-panel exercise-form-panel" open>
+      <summary><span>${editing ? "Edit exercise" : "Add exercise"}</span><small>${editing ? escapeHtml(editing.name) : "custom movement"}</small></summary>
       <form id="exercise-form">
         <div class="field-row exercise-form-grid">
           <div class="field">
@@ -3548,19 +3554,16 @@ function renderExercises() {
           ${editing ? `<button class="ghost-button" type="button" data-action="cancel-exercise-edit">Cancel edit</button>` : `<button class="ghost-button" type="button" data-action="exercise-clear-form">Clear form</button>`}
         </div>
       </form>
-    </section>
+    </details>
 
     ${exerciseLibraryControlsMarkup()}
 
-    <section class="section chart-panel">
-      <div class="chart-header">
-        <h3>Your exercise database</h3>
-        <span class="muted small">${visibleExercises.length}/${getCustomExercises().length} active</span>
-      </div>
+    <details class="section chart-panel collapsible-panel exercise-database-panel" open>
+      <summary><span>Your exercise database</span><small>${visibleExercises.length}/${getCustomExercises().length} active</small></summary>
       <div class="exercise-list">
         ${visibleExercises.length ? visibleExercises.map((exercise) => exerciseCard(exercise, true)).join("") : `<div class="empty">No active exercises match this view.</div>`}
       </div>
-    </section>
+    </details>
 
     <details class="section chart-panel collapsible-panel archived-exercise-panel">
       <summary><span>Archived exercises</span><small>${archivedExercises.length} archived</small></summary>
@@ -4277,6 +4280,13 @@ function updateScrollTopButton() {
   if (!button) return;
   const doc = document.documentElement;
   const scrollY = window.scrollY || doc.scrollTop || 0;
+  const tabbar = document.querySelector(".tabbar");
+  const tabbarHeight = tabbar ? tabbar.getBoundingClientRect().height : 76;
+  const buttonSize = button.getBoundingClientRect().height || 42;
+  const offsetParent = button.offsetParent;
+  const parentOffset = offsetParent ? scrollY + offsetParent.getBoundingClientRect().top : 0;
+  const topOffset = scrollTopButtonTopOffset(scrollY, window.visualViewport || null, window.innerHeight || doc.clientHeight || 0, tabbarHeight, buttonSize, parentOffset);
+  button.style.setProperty("--scroll-top-top", `${Math.round(topOffset)}px`);
   const shouldShow = scrollTopButtonShouldShow(scrollY, doc.scrollHeight, doc.clientHeight);
   if (!shouldShow) {
     hideScrollTopButton();
@@ -6117,6 +6127,8 @@ document.addEventListener("touchcancel", () => {
 if (window.addEventListener) {
   window.addEventListener("scroll", updateScrollTopButton, { passive: true });
   window.addEventListener("resize", updateScrollTopButton);
+  window.visualViewport?.addEventListener("scroll", updateScrollTopButton, { passive: true });
+  window.visualViewport?.addEventListener("resize", updateScrollTopButton);
 }
 
 document.addEventListener("submit", async (event) => {

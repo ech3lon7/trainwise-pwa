@@ -149,17 +149,19 @@ assert(stylesCode.includes(".settings-panel.collapsible-panel"), "Expected Setti
 assert(stylesCode.includes(".log-draft-notice strong"), "Expected compact Log draft notice text styling.");
 assert(appCode.includes("muscle-audit-panel"), "Expected long Coach muscle set audit to be collapsible.");
 assert(appCode.includes("scrollTopButtonShouldShow"), "Expected scroll-to-top threshold helper.");
+assert(appCode.includes("scrollTopButtonTopOffset"), "Expected scroll-to-top viewport positioning helper.");
 assert(appCode.includes("renderScrollTopButton"), "Expected app chrome to include scroll-to-top control.");
 assert(stylesCode.includes(".scroll-top-button"), "Expected scroll-to-top button styling.");
+assert(stylesCode.includes(".scroll-top-button::before"), "Expected scroll-to-top button to use a chevron-style icon.");
 assert(stylesCode.includes("translateX(calc(100% + 18px))"), "Expected scroll-to-top button to slide in from the right.");
 assert(!appCode.includes("renderMobileQuickActions"), "Expected floating quick action renderer to be removed.");
 assert(!appCode.includes('selectedExercise: "Push-up"'), "Expected Log startup not to default to Push-up.");
 assert(!appCode.includes('showBanner("Unsaved draft restored."'), "Expected startup draft recovery not to show a top banner.");
 assert(appCode.includes("notifyMetricSaved"), "Expected metrics saves to use a dedicated bottom-only notification helper.");
 assert(!stylesCode.includes(".mobile-quick-toggle"), "Expected floating quick action button styling to be removed.");
-assert(indexCode.includes("v=1.5.24"), "Expected index shell references to use bumped app version.");
+assert(indexCode.includes("v=1.5.25"), "Expected index shell references to use bumped app version.");
 assert(!indexCode.includes('id="app" class="app-content" aria-live'), "Expected broad app aria-live to be removed in favor of targeted live regions.");
-assert(serviceWorkerCode.includes("trainwise-cache-v46"), "Expected service worker cache version bump.");
+assert(serviceWorkerCode.includes("trainwise-cache-v47"), "Expected service worker cache version bump.");
 
 const nutritionQuickTotals = runScenario(`
   ${reset}
@@ -1124,6 +1126,10 @@ const exerciseCoverageAndFilters = runScenario(`
     hasSearch: markup.includes('data-exercise-search'),
     hasCoverage: markup.includes('exercise-coverage-list'),
     hasCoverageRows: markup.includes('coverage-row'),
+    hasCoveragePanelCollapse: markup.includes('exercise-coverage-panel') && markup.includes('<summary><span>Primary coverage</span>'),
+    hasFormPanelCollapse: markup.includes('exercise-form-panel') && markup.includes('<summary><span>Add exercise</span>'),
+    hasControlsPanelCollapse: markup.includes('exercise-library-controls') && markup.includes('<summary><span>Find exercises</span>'),
+    hasDatabasePanelCollapse: markup.includes('exercise-database-panel') && markup.includes('<summary><span>Your exercise database</span>'),
     showsBenchUnderChest: markup.includes('Bench Press'),
     showsRowUnderBack: markup.includes('Cable Row'),
     hasCollapseArrow: markup.includes('collapse-arrow'),
@@ -1141,6 +1147,10 @@ assert.deepEqual(exerciseCoverageAndFilters.archivedNames, ["Curl"], `Expected a
 assert.strictEqual(exerciseCoverageAndFilters.hasSearch, true, "Expected Exercises markup to include search input.");
 assert.strictEqual(exerciseCoverageAndFilters.hasCoverage, true, "Expected Exercises markup to include coverage panel.");
 assert.strictEqual(exerciseCoverageAndFilters.hasCoverageRows, true, "Expected Exercises coverage to render collapsible muscle rows.");
+assert.strictEqual(exerciseCoverageAndFilters.hasCoveragePanelCollapse, true, "Expected Primary coverage section to be a collapsible panel.");
+assert.strictEqual(exerciseCoverageAndFilters.hasFormPanelCollapse, true, "Expected Add/Edit exercise section to be a collapsible panel.");
+assert.strictEqual(exerciseCoverageAndFilters.hasControlsPanelCollapse, true, "Expected Exercises filter controls to be a collapsible panel.");
+assert.strictEqual(exerciseCoverageAndFilters.hasDatabasePanelCollapse, true, "Expected active exercise database section to be a collapsible panel.");
 assert.strictEqual(exerciseCoverageAndFilters.showsBenchUnderChest, true, "Expected covered Chest row to list primary exercises.");
 assert.strictEqual(exerciseCoverageAndFilters.showsRowUnderBack, true, "Expected covered Back row to list primary exercises.");
 assert.strictEqual(exerciseCoverageAndFilters.hasCollapseArrow, true, "Expected collapsible coverage rows to show a right-edge arrow.");
@@ -1189,6 +1199,8 @@ const scrollTopThreshold = runScenario(`
     beforeHalf: scrollTopButtonShouldShow(400, 2200, 800),
     pastHalf: scrollTopButtonShouldShow(800, 2200, 800),
     exactEnoughLength: scrollTopButtonShouldShow(500, 1200, 800),
+    fallbackTop: scrollTopButtonTopOffset(400, null, 800, 76, 42),
+    viewportTop: scrollTopButtonTopOffset(400, { offsetTop: 40, height: 620 }, 800, 76, 42),
     chrome: renderAppChrome()
   });
 `);
@@ -1197,6 +1209,8 @@ assert.strictEqual(scrollTopThreshold.shortPage, false, "Expected scroll-to-top 
 assert.strictEqual(scrollTopThreshold.beforeHalf, false, "Expected scroll-to-top to stay hidden before 55% scroll.");
 assert.strictEqual(scrollTopThreshold.pastHalf, true, "Expected scroll-to-top to show after 55% scroll.");
 assert.strictEqual(scrollTopThreshold.exactEnoughLength, false, "Expected scroll-to-top to require pages longer than 1.5 view heights.");
+assert.strictEqual(scrollTopThreshold.fallbackTop, 1070, `Expected fallback scroll-to-top top position to track current scroll, got ${scrollTopThreshold.fallbackTop}`);
+assert.strictEqual(scrollTopThreshold.viewportTop, 930, `Expected visual viewport top position to keep button inside visible screen, got ${scrollTopThreshold.viewportTop}`);
 assert(scrollTopThreshold.chrome.includes('data-action="scroll-top"'), "Expected app chrome to render scroll-to-top action.");
 
 const collapsibleLongScreens = runScenario(`

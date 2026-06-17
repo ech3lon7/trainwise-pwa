@@ -2455,29 +2455,37 @@ textarea {
 }
 
 .scroll-top-button {
-  position: fixed;
+  position: absolute;
   right: 12px;
-  bottom: calc(86px + env(safe-area-inset-bottom));
+  top: var(--scroll-top-top, calc(100vh - 128px));
   z-index: 23;
   display: grid;
   place-items: center;
-  width: 40px;
-  height: 40px;
-  border: 2px solid rgba(233, 241, 230, 0.62);
+  width: 42px;
+  height: 42px;
+  border: 4px solid rgba(233, 241, 230, 0.58);
   border-radius: 999px;
-  background: rgba(18, 22, 18, 0.72);
-  color: rgba(233, 241, 230, 0.88);
-  font-size: 21px;
-  font-weight: 900;
+  background: rgba(18, 22, 18, 0.46);
+  color: transparent;
+  font-size: 0;
   opacity: 0;
   pointer-events: none;
   transform: translateX(calc(100% + 18px));
-  transition: opacity 0.22s ease, transform 0.22s ease, filter 0.16s ease;
+  transition: opacity 0.22s ease, transform 0.22s ease, filter 0.16s ease, bottom 0.12s ease;
   backdrop-filter: blur(10px);
 }
 
+.scroll-top-button::before {
+  content: "";
+  width: 16px;
+  height: 16px;
+  border-top: 5px solid rgba(233, 241, 230, 0.82);
+  border-left: 5px solid rgba(233, 241, 230, 0.82);
+  transform: translateY(4px) rotate(45deg);
+}
+
 .scroll-top-button.is-visible {
-  opacity: 0.86;
+  opacity: 0.82;
   pointer-events: auto;
   transform: translateX(0);
 }
