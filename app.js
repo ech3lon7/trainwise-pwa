@@ -3,13 +3,14 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 2;
 const STORES = ["workouts", "metrics", "settings"];
-const APP_VERSION = "1.5.23";
+const APP_VERSION = "1.5.24";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 const DRAFT_RECOVERY_KEY = "trainwise-draft-recovery-v1";
 let dbOpenPromise = null;
 let chartId = 0;
 let reloadingForUpdate = false;
 let renderToken = 0;
+let scrollTopTimer = null;
 const SESSION_LIMIT_MINUTES = 60;
 const COACH_TIME_TOLERANCE_MINUTES = 3;
 const COACH_TIMEFRAME_OPTIONS = [
@@ -303,6 +304,12 @@ function announce(message, options = {}) {
 
 function notifyMetricSaved(existing) {
   toast(existing ? "Metrics updated." : "Metrics saved.", { duration: 2000 });
+}
+
+function scrollTopButtonShouldShow(scrollY = 0, scrollHeight = 0, clientHeight = 0) {
+  if (!scrollHeight || !clientHeight || scrollHeight <= clientHeight * 1.5) return false;
+  const scrollable = Math.max(scrollHeight - clientHeight, 1);
+  return scrollY / scrollable > 0.55;
 }
 
 function clearBanner() {
@@ -2644,8 +2651,8 @@ function renderDashboard() {
       </section>
     `,
     lowestSets: `
-      <section class="section card dashboard-widget" data-dashboard-widget="lowestSets">
-        <h3>Lowest set counts</h3>
+      <details class="section card dashboard-widget collapsible-panel dashboard-lowestSets-panel" data-dashboard-widget="lowestSets" open>
+        <summary><span>Lowest set counts</span><small>${underTarget.length ? `${underTarget.length} under target` : "covered"}</small></summary>
         <div class="list">
           ${underTarget.length ? underTarget.map((stat) => `
             <div class="list-item simple">
@@ -2654,33 +2661,34 @@ function renderDashboard() {
             </div>
           `).join("") : `<div class="empty">All tracked muscles have reached the weekly floor.</div>`}
         </div>
-      </section>
+      </details>
     `,
     health: `
-      <section class="section card coach-action dashboard-widget" data-dashboard-widget="health">
+      <details class="section card coach-action dashboard-widget collapsible-panel dashboard-health-panel" data-dashboard-widget="health" open>
+        <summary><span>Health coach</span><small>${escapeHtml(health.goalLabel)}</small></summary>
         <span class="badge">Health coach</span>
         <h3>${escapeHtml(health.goalLabel)} nutrition check</h3>
         <p>${escapeHtml(health.recommendation)}</p>
         ${healthCoachStatMarkup(health)}
-      </section>
+      </details>
     `,
     weeklySets: `
-      <section class="section chart-panel dashboard-widget" data-dashboard-widget="weeklySets">
-        <div class="chart-header"><h3>This week's hard sets</h3><span class="muted small">Monday-start week - ${fmt(weeklyVolume)} lb load</span></div>
+      <details class="section chart-panel dashboard-widget collapsible-panel dashboard-weeklySets-panel" data-dashboard-widget="weeklySets" open>
+        <summary><span>This week's hard sets</span><small>Monday-start week - ${fmt(weeklyVolume)} lb load</small></summary>
         ${muscleProgressMarkup(stats, true)}
-      </section>
+      </details>
     `,
     bodyWeight: `
-      <section class="section chart-panel dashboard-widget" data-dashboard-widget="bodyWeight">
-        <div class="chart-header"><h3>Body weight</h3><span class="muted small">${bodyWeight ? "logged" : "preview"}</span></div>
+      <details class="section chart-panel dashboard-widget collapsible-panel dashboard-bodyWeight-panel" data-dashboard-widget="bodyWeight" open>
+        <summary><span>Body weight</span><small>${bodyWeight ? "logged" : "preview"}</small></summary>
         ${lineChart(seriesFromMetrics("bodyWeight").length ? seriesFromMetrics("bodyWeight") : previewSeries("bodyWeight"), "#f2d06b", " lb")}
-      </section>
+      </details>
     `,
     protein: `
-      <section class="section chart-panel dashboard-widget" data-dashboard-widget="protein">
-        <div class="chart-header"><h3>Protein</h3><span class="muted small">${proteinAvg ? `${fmt(proteinAvg)}g avg` : "preview"}</span></div>
+      <details class="section chart-panel dashboard-widget collapsible-panel dashboard-protein-panel" data-dashboard-widget="protein" open>
+        <summary><span>Protein</span><small>${proteinAvg ? `${fmt(proteinAvg)}g avg` : "preview"}</small></summary>
         ${lineChart(seriesFromMetrics("protein").length ? seriesFromMetrics("protein") : previewSeries("protein"), "#ff6b5f", "g")}
-      </section>
+      </details>
     `
   };
 
@@ -3977,7 +3985,8 @@ function renderTrends() {
   const health = healthCoachSummary();
 
   return `
-    <section class="trend-section">
+    <details class="section trend-section collapsible-panel muscle-trends-panel" open>
+      <summary><span>Muscle trends</span><small>${escapeHtml(selectedMuscleLabel)}</small></summary>
       <div class="trend-section-header">
         <div>
           <h2>Muscle trends</h2>
@@ -3998,9 +4007,10 @@ function renderTrends() {
           ${lineChart(muscleVolumeSeries, "#35d58c", " lb")}
         </div>
       </div>
-    </section>
+    </details>
 
-    <section class="section trend-section">
+    <details class="section trend-section collapsible-panel exercise-performance-panel" open>
+      <summary><span>Exercise performance</span><small>${escapeHtml(selectedExercise || "No exercise")}</small></summary>
       <div class="trend-section-header">
         <div>
           <h2>Exercise performance</h2>
@@ -4021,9 +4031,10 @@ function renderTrends() {
           ${lineChart(e1rmSeries, "#ff6b5f", " lb")}
         </div>
       </div>
-    </section>
+    </details>
 
-    <section class="section trend-section">
+    <details class="section trend-section collapsible-panel health-trends-panel" open>
+      <summary><span>Health trends</span><small>${escapeHtml(health.goalLabel)}</small></summary>
       <div class="trend-section-header">
         <div>
           <h2>Health trends</h2>
@@ -4045,7 +4056,7 @@ function renderTrends() {
           ${lineChart(seriesFromMetrics("calories"), "#35d58c", "")}
         </div>
       </div>
-    </section>
+    </details>
   `;
 }
 
@@ -4053,7 +4064,8 @@ function renderTodayPlan(plan) {
   const items = plan.sessionPlan.items;
   const muscles = [...new Set(items.map((item) => item.muscle.label))];
   return `
-    <section class="section card coach-action featured-action today-plan-card">
+    <details class="section card coach-action featured-action today-plan-card collapsible-panel" open>
+      <summary><span>Today's Plan</span><small>${plan.sessionPlan.totalMinutes || "--"} min</small></summary>
       <span class="badge">${escapeHtml(plan.mode === "restart" ? "Restart plan" : plan.mode === "progression" ? "Progression" : plan.mode === "library-gap" ? "Library gap" : "Today's plan")}</span>
       <div class="today-plan-header">
         <div>
@@ -4102,7 +4114,7 @@ function renderTodayPlan(plan) {
           Missing primary exercise: ${escapeHtml(plan.sessionPlan.missing.map((muscle) => muscle.label).join(", "))}.
         </div>
       ` : ""}
-    </section>
+    </details>
   `;
 }
 
@@ -4156,8 +4168,8 @@ function renderCoachWhy(plan) {
     { title: "Other checks", items: explanation.notes || plan.notes || [] }
   ].filter((section) => section.items.length);
   return `
-    <section class="section card coach-why-card">
-      <div class="chart-header"><h3>Why this?</h3><span class="muted small">readiness + gaps</span></div>
+    <details class="section card coach-why-card collapsible-panel" open>
+      <summary><span>Why this?</span><small>readiness + gaps</small></summary>
       ${sections.length ? `
         <div class="coach-why-list">
           ${sections.map((section) => `
@@ -4168,7 +4180,7 @@ function renderCoachWhy(plan) {
           `).join("")}
         </div>
       ` : `<div class="empty compact-empty">No priority issues right now.</div>`}
-    </section>
+    </details>
   `;
 }
 
@@ -4246,6 +4258,37 @@ function syncLogDraftNoticeDom() {
   els.app.insertAdjacentHTML("afterbegin", markup);
 }
 
+function renderScrollTopButton() {
+  return `
+    <button class="scroll-top-button" type="button" data-action="scroll-top" aria-label="Back to top">
+      ↑
+    </button>
+  `;
+}
+
+function hideScrollTopButton() {
+  window.clearTimeout(scrollTopTimer);
+  scrollTopTimer = null;
+  document.querySelector(".scroll-top-button")?.classList.remove("is-visible");
+}
+
+function updateScrollTopButton() {
+  const button = document.querySelector(".scroll-top-button");
+  if (!button) return;
+  const doc = document.documentElement;
+  const scrollY = window.scrollY || doc.scrollTop || 0;
+  const shouldShow = scrollTopButtonShouldShow(scrollY, doc.scrollHeight, doc.clientHeight);
+  if (!shouldShow) {
+    hideScrollTopButton();
+    return;
+  }
+  button.classList.add("is-visible");
+  window.clearTimeout(scrollTopTimer);
+  scrollTopTimer = window.setTimeout(() => {
+    button.classList.remove("is-visible");
+  }, 3000);
+}
+
 function renderImportPreview() {
   const pending = state.pendingImport;
   if (!pending) return "";
@@ -4271,7 +4314,7 @@ function renderImportPreview() {
 }
 
 function renderAppChrome() {
-  return `${renderAppBanner()}${renderImportPreview()}${renderLogDraftNotice()}`;
+  return `${renderAppBanner()}${renderImportPreview()}${renderLogDraftNotice()}${renderScrollTopButton()}`;
 }
 
 function dataSafetySummaryMarkup() {
@@ -4504,6 +4547,8 @@ async function render({ animate = false } = {}) {
   els.app.classList.remove("content-exit", "content-enter");
   if (animate) els.app.classList.add("content-enter");
   applyStaggerAnimations();
+  if (typeof requestAnimationFrame === "function") requestAnimationFrame(updateScrollTopButton);
+  else updateScrollTopButton();
 }
 
 async function saveExercise(form) {
@@ -5315,6 +5360,10 @@ async function handleAction(action, target) {
       clearLogDraftNotice();
       syncLogDraftNoticeDom();
     },
+    async "scroll-top"() {
+      hideScrollTopButton();
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    },
     async "undo-last-action"() { await undoLastAction(); },
     async "restore-draft"() {
       if (!restoreDraftRecovery()) throw new Error("No saved draft found.");
@@ -6064,6 +6113,11 @@ document.addEventListener("touchcancel", () => {
     section.style.transform = "";
   });
 });
+
+if (window.addEventListener) {
+  window.addEventListener("scroll", updateScrollTopButton, { passive: true });
+  window.addEventListener("resize", updateScrollTopButton);
+}
 
 document.addEventListener("submit", async (event) => {
   event.preventDefault();

@@ -2454,6 +2454,39 @@ textarea {
   animation: toastBounce 0.32s ease-out both;
 }
 
+.scroll-top-button {
+  position: fixed;
+  right: 12px;
+  bottom: calc(86px + env(safe-area-inset-bottom));
+  z-index: 23;
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  border: 2px solid rgba(233, 241, 230, 0.62);
+  border-radius: 999px;
+  background: rgba(18, 22, 18, 0.72);
+  color: rgba(233, 241, 230, 0.88);
+  font-size: 21px;
+  font-weight: 900;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateX(calc(100% + 18px));
+  transition: opacity 0.22s ease, transform 0.22s ease, filter 0.16s ease;
+  backdrop-filter: blur(10px);
+}
+
+.scroll-top-button.is-visible {
+  opacity: 0.86;
+  pointer-events: auto;
+  transform: translateX(0);
+}
+
+.scroll-top-button:active {
+  filter: brightness(1.16);
+  transform: translateX(0) scale(0.96);
+}
+
 .hidden {
   display: none !important;
 }

@@ -148,14 +148,18 @@ assert(stylesCode.includes(".collapsible-panel"), "Expected secondary settings/n
 assert(stylesCode.includes(".settings-panel.collapsible-panel"), "Expected Settings panels to use collapsible panel styling.");
 assert(stylesCode.includes(".log-draft-notice strong"), "Expected compact Log draft notice text styling.");
 assert(appCode.includes("muscle-audit-panel"), "Expected long Coach muscle set audit to be collapsible.");
+assert(appCode.includes("scrollTopButtonShouldShow"), "Expected scroll-to-top threshold helper.");
+assert(appCode.includes("renderScrollTopButton"), "Expected app chrome to include scroll-to-top control.");
+assert(stylesCode.includes(".scroll-top-button"), "Expected scroll-to-top button styling.");
+assert(stylesCode.includes("translateX(calc(100% + 18px))"), "Expected scroll-to-top button to slide in from the right.");
 assert(!appCode.includes("renderMobileQuickActions"), "Expected floating quick action renderer to be removed.");
 assert(!appCode.includes('selectedExercise: "Push-up"'), "Expected Log startup not to default to Push-up.");
 assert(!appCode.includes('showBanner("Unsaved draft restored."'), "Expected startup draft recovery not to show a top banner.");
 assert(appCode.includes("notifyMetricSaved"), "Expected metrics saves to use a dedicated bottom-only notification helper.");
 assert(!stylesCode.includes(".mobile-quick-toggle"), "Expected floating quick action button styling to be removed.");
-assert(indexCode.includes("v=1.5.23"), "Expected index shell references to use bumped app version.");
+assert(indexCode.includes("v=1.5.24"), "Expected index shell references to use bumped app version.");
 assert(!indexCode.includes('id="app" class="app-content" aria-live'), "Expected broad app aria-live to be removed in favor of targeted live regions.");
-assert(serviceWorkerCode.includes("trainwise-cache-v45"), "Expected service worker cache version bump.");
+assert(serviceWorkerCode.includes("trainwise-cache-v46"), "Expected service worker cache version bump.");
 
 const nutritionQuickTotals = runScenario(`
   ${reset}
@@ -1177,6 +1181,50 @@ assert.strictEqual(mobileQolMarkup.order[0], "health", `Expected widget order to
 assert(mobileQolMarkup.date.includes('data-action="date-step"'), "Expected shared date control to include previous/next actions.");
 assert(mobileQolMarkup.date.includes('data-action="date-today"'), "Expected shared date control to include Today action.");
 assert(mobileQolMarkup.settings.includes('data-action="toggle-dashboard-widget"'), "Expected widget settings markup to include preference controls.");
+
+const scrollTopThreshold = runScenario(`
+  ${reset}
+  ({
+    shortPage: scrollTopButtonShouldShow(600, 1000, 800),
+    beforeHalf: scrollTopButtonShouldShow(400, 2200, 800),
+    pastHalf: scrollTopButtonShouldShow(800, 2200, 800),
+    exactEnoughLength: scrollTopButtonShouldShow(500, 1200, 800),
+    chrome: renderAppChrome()
+  });
+`);
+
+assert.strictEqual(scrollTopThreshold.shortPage, false, "Expected scroll-to-top to stay hidden on short pages.");
+assert.strictEqual(scrollTopThreshold.beforeHalf, false, "Expected scroll-to-top to stay hidden before 55% scroll.");
+assert.strictEqual(scrollTopThreshold.pastHalf, true, "Expected scroll-to-top to show after 55% scroll.");
+assert.strictEqual(scrollTopThreshold.exactEnoughLength, false, "Expected scroll-to-top to require pages longer than 1.5 view heights.");
+assert(scrollTopThreshold.chrome.includes('data-action="scroll-top"'), "Expected app chrome to render scroll-to-top action.");
+
+const collapsibleLongScreens = runScenario(`
+  ${reset}
+  state.settings.dashboardWidgets = ["health", "weeklySets", "lowestSets", "bodyWeight", "protein", "nextLift"];
+  state.settings.dashboardWidgetOrder = ["health", "weeklySets", "lowestSets", "bodyWeight", "protein", "nextLift"];
+  state.workouts = [
+    makeWorkout({ exercise: "Bench Press", exerciseId: "custom-bench", date: "2026-06-10" }),
+    makeWorkout({ exercise: "Cable Row", exerciseId: "custom-row", primaryMuscles: ["back"], secondaryMuscles: ["biceps"], date: "2026-06-11" })
+  ];
+  ({
+    today: renderDashboard(),
+    coach: renderCoach(),
+    trends: renderTrends()
+  });
+`);
+
+assert(collapsibleLongScreens.coach.includes("today-plan-card") && collapsibleLongScreens.coach.includes("<summary><span>Today's Plan</span>"), "Expected Coach Today's Plan to be collapsible.");
+assert(collapsibleLongScreens.coach.includes("coach-why-card") && collapsibleLongScreens.coach.includes("<summary><span>Why this?</span>"), "Expected Coach Why this to be collapsible.");
+assert(collapsibleLongScreens.trends.includes("muscle-trends-panel") && collapsibleLongScreens.trends.includes("<summary><span>Muscle trends</span>"), "Expected Muscle trends to be collapsible.");
+assert(collapsibleLongScreens.trends.includes("exercise-performance-panel") && collapsibleLongScreens.trends.includes("<summary><span>Exercise performance</span>"), "Expected Exercise performance to be collapsible.");
+assert(collapsibleLongScreens.trends.includes("health-trends-panel") && collapsibleLongScreens.trends.includes("<summary><span>Health trends</span>"), "Expected Health trends to be collapsible.");
+assert(collapsibleLongScreens.today.includes("dashboard-health-panel") && collapsibleLongScreens.today.includes("<summary><span>Health coach</span>"), "Expected Today health widget to be collapsible.");
+assert(collapsibleLongScreens.today.includes("dashboard-weeklySets-panel") && collapsibleLongScreens.today.includes("<summary><span>This week's hard sets</span>"), "Expected Today weekly sets widget to be collapsible.");
+assert(collapsibleLongScreens.today.includes("dashboard-lowestSets-panel") && collapsibleLongScreens.today.includes("<summary><span>Lowest set counts</span>"), "Expected Today lowest sets widget to be collapsible.");
+assert(collapsibleLongScreens.today.includes("dashboard-bodyWeight-panel") && collapsibleLongScreens.today.includes("<summary><span>Body weight</span>"), "Expected Today body weight widget to be collapsible.");
+assert(collapsibleLongScreens.today.includes("dashboard-protein-panel") && collapsibleLongScreens.today.includes("<summary><span>Protein</span>"), "Expected Today protein widget to be collapsible.");
+assert(collapsibleLongScreens.today.includes("coach-action dashboard-widget") && !collapsibleLongScreens.today.includes("dashboard-nextLift-panel"), "Expected Next best lift to remain a normal card.");
 
 const backupPreviewSummary = runScenario(`
   ${reset}
