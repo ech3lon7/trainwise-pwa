@@ -1,27 +1,27 @@
 "use strict";
 
-const CACHE_NAME = "trainwise-cache-v44";
+const CACHE_NAME = "trainwise-cache-v45";
 const ASSETS = [
   "./",
   "./index.html",
-  "./styles.css?v=1.5.22",
-  "./app.js?v=1.5.22",
-  "./manifest.webmanifest?v=1.5.22",
-  "./icon.svg?v=1.5.22",
-  "./icon-512.png?v=1.5.22",
-  "./apple-touch-icon.png?v=1.5.22",
-  "./assets/muscles/abs.png?v=1.5.22",
-  "./assets/muscles/back.png?v=1.5.22",
-  "./assets/muscles/bicep.png?v=1.5.22",
-  "./assets/muscles/calves.png?v=1.5.22",
-  "./assets/muscles/chest.png?v=1.5.22",
-  "./assets/muscles/glutes.png?v=1.5.22",
-  "./assets/muscles/hamstrings.png?v=1.5.22",
-  "./assets/muscles/quads.png?v=1.5.22",
-  "./assets/muscles/shoulders.png?v=1.5.22",
-  "./assets/muscles/triceps.png?v=1.5.22",
-  "./assets/dumbbell.png?v=1.5.22",
-  "./assets/dumbbell.svg?v=1.5.22"
+  "./styles.css?v=1.5.23",
+  "./app.js?v=1.5.23",
+  "./manifest.webmanifest?v=1.5.23",
+  "./icon.svg?v=1.5.23",
+  "./icon-512.png?v=1.5.23",
+  "./apple-touch-icon.png?v=1.5.23",
+  "./assets/muscles/abs.png?v=1.5.23",
+  "./assets/muscles/back.png?v=1.5.23",
+  "./assets/muscles/bicep.png?v=1.5.23",
+  "./assets/muscles/calves.png?v=1.5.23",
+  "./assets/muscles/chest.png?v=1.5.23",
+  "./assets/muscles/glutes.png?v=1.5.23",
+  "./assets/muscles/hamstrings.png?v=1.5.23",
+  "./assets/muscles/quads.png?v=1.5.23",
+  "./assets/muscles/shoulders.png?v=1.5.23",
+  "./assets/muscles/triceps.png?v=1.5.23",
+  "./assets/dumbbell.png?v=1.5.23",
+  "./assets/dumbbell.svg?v=1.5.23"
 ];
 
 function shouldHandleRequest(request) {

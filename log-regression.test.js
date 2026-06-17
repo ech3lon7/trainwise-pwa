@@ -136,9 +136,9 @@ assert(appCode.includes("Delete this workout?"), "Expected workout deletes to as
 assert(appCode.includes("Delete nutrition entry"), "Expected metric deletes to ask for confirmation.");
 assert(appCode.includes("Stored only in this browser on this device"), "Expected Supabase password helper text.");
 assert(stylesCode.includes(".exercise-library-controls"), "Expected Exercises library controls to have dedicated styling.");
-assert(stylesCode.includes(".exercise-coverage-grid"), "Expected Exercises coverage panel to have dedicated styling.");
+assert(stylesCode.includes(".exercise-coverage-list"), "Expected Exercises coverage panel to have dedicated styling.");
 assert(stylesCode.includes(".exercise-action-menu"), "Expected Exercises card action menu styling.");
-assert(stylesCode.includes(".mobile-quick-actions"), "Expected mobile quick actions to have dedicated styling.");
+assert(!stylesCode.includes(".mobile-quick-actions"), "Expected floating mobile quick actions to be removed.");
 assert(stylesCode.includes(".app-banner"), "Expected persistent app banner styling.");
 assert(stylesCode.includes(".date-control"), "Expected shared date control styling.");
 assert(stylesCode.includes(".modal-backdrop"), "Expected import preview modal styling.");
@@ -148,14 +148,14 @@ assert(stylesCode.includes(".collapsible-panel"), "Expected secondary settings/n
 assert(stylesCode.includes(".settings-panel.collapsible-panel"), "Expected Settings panels to use collapsible panel styling.");
 assert(stylesCode.includes(".log-draft-notice strong"), "Expected compact Log draft notice text styling.");
 assert(appCode.includes("muscle-audit-panel"), "Expected long Coach muscle set audit to be collapsible.");
-assert(appCode.includes('new Set(["dashboard"])'), "Expected floating quick actions to stay off input-heavy tabs.");
+assert(!appCode.includes("renderMobileQuickActions"), "Expected floating quick action renderer to be removed.");
 assert(!appCode.includes('selectedExercise: "Push-up"'), "Expected Log startup not to default to Push-up.");
 assert(!appCode.includes('showBanner("Unsaved draft restored."'), "Expected startup draft recovery not to show a top banner.");
 assert(appCode.includes("notifyMetricSaved"), "Expected metrics saves to use a dedicated bottom-only notification helper.");
-assert(stylesCode.includes(".mobile-quick-actions.is-obscured"), "Expected floating quick actions to support a non-overlapping mobile position.");
-assert(indexCode.includes("v=1.5.22"), "Expected index shell references to use bumped app version.");
+assert(!stylesCode.includes(".mobile-quick-toggle"), "Expected floating quick action button styling to be removed.");
+assert(indexCode.includes("v=1.5.23"), "Expected index shell references to use bumped app version.");
 assert(!indexCode.includes('id="app" class="app-content" aria-live'), "Expected broad app aria-live to be removed in favor of targeted live regions.");
-assert(serviceWorkerCode.includes("trainwise-cache-v44"), "Expected service worker cache version bump.");
+assert(serviceWorkerCode.includes("trainwise-cache-v45"), "Expected service worker cache version bump.");
 
 const nutritionQuickTotals = runScenario(`
   ${reset}
@@ -376,6 +376,52 @@ const emptyLogStartup = runScenario(`
 assert(emptyLogStartup.includes("Add an exercise to start logging strength."), "Expected empty Log to ask for a real library exercise.");
 assert(!emptyLogStartup.includes("Push-up"), "Expected empty Log startup not to render Push-up.");
 assert(!emptyLogStartup.includes('class="set-table"'), "Expected empty Log startup not to create a fake set table.");
+
+const emptyLogWithLibrary = runScenario(`
+  ${reset}
+  state.logMode = "strength";
+  clearWorkoutDraft("2026-06-16");
+  renderLog();
+`);
+
+assert(emptyLogWithLibrary.includes("Add an exercise to start logging strength."), "Expected empty strength date to remain empty even when library exercises exist.");
+assert(!emptyLogWithLibrary.includes("Bench Press"), "Expected empty strength date not to auto-load the first library exercise.");
+assert(!emptyLogWithLibrary.includes('class="set-table"'), "Expected empty strength date not to create a set table from library defaults.");
+
+const explicitAddExerciseCreatesDraft = runScenario(`
+  ${reset}
+  state.logMode = "strength";
+  clearWorkoutDraft("2026-06-16");
+  state.workoutDraft.push(defaultDraftExercise(defaultLogExerciseName()));
+  syncLegacyDraftFromFirst();
+  renderLog();
+`);
+
+assert(explicitAddExerciseCreatesDraft.includes("Bench Press"), "Expected explicit Add exercise action to create a library draft.");
+assert(explicitAddExerciseCreatesDraft.includes('class="set-table"'), "Expected explicit Add exercise action to create an editable set table.");
+
+const nutritionToEmptyStrength = runScenario(`
+  ${reset}
+  state.logMode = "metrics";
+  state.metricDate = "2026-06-16";
+  applyLogModeSwitch("strength");
+  state.logMode = "strength";
+  renderLog();
+`);
+
+assert(nutritionToEmptyStrength.includes("Add an exercise to start logging strength."), "Expected switching from nutrition to empty strength date to stay empty.");
+assert(!nutritionToEmptyStrength.includes("Bench Press"), "Expected nutrition-to-strength switch not to create a stale first exercise.");
+
+const savedDateStillLoadsStrength = runScenario(`
+  ${reset}
+  state.workouts = [makeWorkout({ id: "saved-bench", date: "2026-06-16", exercise: "Bench Press", exerciseId: "custom-bench" })];
+  state.logMode = "strength";
+  loadWorkoutDateDraft("2026-06-16");
+  renderLog();
+`);
+
+assert(savedDateStillLoadsStrength.includes("Bench Press"), "Expected saved strength date to load existing workout entries.");
+assert(savedDateStillLoadsStrength.includes('class="set-table"'), "Expected saved strength date to keep editable set table.");
 
 const nutritionDateSwitchClearsStaleDraft = runScenario(`
   ${reset}
@@ -765,9 +811,6 @@ const emptyDateReset = runScenario(`
     editingWorkoutId: state.editingWorkoutId,
     notes: state.draftNotes,
     draftCount: state.workoutDraft.length,
-    firstExercise: state.workoutDraft[0].exercise,
-    firstNotes: state.workoutDraft[0].notes,
-    firstRows: state.workoutDraft[0].setRows,
     selectedExercise: state.selectedExercise
   });
 `);
@@ -775,12 +818,8 @@ const emptyDateReset = runScenario(`
 assert.strictEqual(emptyDateReset.date, "2026-06-12", "Expected empty date to stay selected.");
 assert.strictEqual(emptyDateReset.editingWorkoutId, null, "Expected empty date to clear edit mode.");
 assert.strictEqual(emptyDateReset.notes, "", "Expected empty date to clear stale notes.");
-assert.strictEqual(emptyDateReset.draftCount, 1, "Expected empty date to reset to one fresh draft.");
-assert.strictEqual(emptyDateReset.firstExercise, "Bench Press", `Expected fresh default library exercise, got ${emptyDateReset.firstExercise}`);
-assert.strictEqual(emptyDateReset.firstNotes, "", "Expected fresh draft notes.");
-assert.strictEqual(emptyDateReset.firstRows.length, 3, "Expected default fresh set rows.");
-assert(emptyDateReset.firstRows.every((row) => row.weight === "" || row.weight === 0), "Expected empty date not to keep stale weight setup.");
-assert.strictEqual(emptyDateReset.selectedExercise, "Bench Press", "Expected selected exercise to match fresh default draft.");
+assert.strictEqual(emptyDateReset.draftCount, 0, "Expected empty date to render no draft tables.");
+assert.strictEqual(emptyDateReset.selectedExercise, "", "Expected empty date not to select a default exercise.");
 
 const populatedDateLoad = runScenario(`
   ${reset}
@@ -1079,7 +1118,11 @@ const exerciseCoverageAndFilters = runScenario(`
     mostLogged: filteredExerciseList({ search: "", muscle: "all", sort: "most" }).map((item) => item.name),
     archivedNames: filteredExerciseList({ includeArchived: true, archivedOnly: true }).map((item) => item.name),
     hasSearch: markup.includes('data-exercise-search'),
-    hasCoverage: markup.includes('exercise-coverage-grid'),
+    hasCoverage: markup.includes('exercise-coverage-list'),
+    hasCoverageRows: markup.includes('coverage-row'),
+    showsBenchUnderChest: markup.includes('Bench Press'),
+    showsRowUnderBack: markup.includes('Cable Row'),
+    hasCollapseArrow: markup.includes('collapse-arrow'),
     hasArchiveSection: markup.includes('Archived exercises')
   });
 `);
@@ -1093,11 +1136,14 @@ assert.strictEqual(exerciseCoverageAndFilters.mostLogged[0], "Bench Press", `Exp
 assert.deepEqual(exerciseCoverageAndFilters.archivedNames, ["Curl"], `Expected archived list to include archived exercises, got ${exerciseCoverageAndFilters.archivedNames.join(", ")}`);
 assert.strictEqual(exerciseCoverageAndFilters.hasSearch, true, "Expected Exercises markup to include search input.");
 assert.strictEqual(exerciseCoverageAndFilters.hasCoverage, true, "Expected Exercises markup to include coverage panel.");
+assert.strictEqual(exerciseCoverageAndFilters.hasCoverageRows, true, "Expected Exercises coverage to render collapsible muscle rows.");
+assert.strictEqual(exerciseCoverageAndFilters.showsBenchUnderChest, true, "Expected covered Chest row to list primary exercises.");
+assert.strictEqual(exerciseCoverageAndFilters.showsRowUnderBack, true, "Expected covered Back row to list primary exercises.");
+assert.strictEqual(exerciseCoverageAndFilters.hasCollapseArrow, true, "Expected collapsible coverage rows to show a right-edge arrow.");
 assert.strictEqual(exerciseCoverageAndFilters.hasArchiveSection, true, "Expected Exercises markup to include archived section.");
 
 const mobileQolMarkup = runScenario(`
   ${reset}
-  state.quickActionsOpen = true;
   state.activeTab = "log";
   state.appBanner = { message: "Workout locked in.", tone: "good", detail: "Undo is available.", action: "undo-last-action", actionLabel: "Undo" };
   state.logDraftNotice = { message: "Draft saved locally.", detail: "Restore it." };
@@ -1111,8 +1157,6 @@ const mobileQolMarkup = runScenario(`
     banner: renderAppBanner(),
     logNotice: renderLogDraftNotice(),
     hiddenNotice: (state.activeTab = "exercises", renderLogDraftNotice()),
-    quick: (state.activeTab = "dashboard", renderMobileQuickActions()),
-    hiddenQuick: (state.activeTab = "log", renderMobileQuickActions()),
     modal: renderImportPreview(),
     widgets: selectedDashboardWidgets(),
     order: dashboardWidgetOrder(),
@@ -1126,10 +1170,6 @@ assert(mobileQolMarkup.banner.includes("Workout locked in."), "Expected normal a
 assert(mobileQolMarkup.logNotice.includes("Draft saved locally."), "Expected Log draft notice to render the draft-save message.");
 assert(mobileQolMarkup.logNotice.includes('data-action="restore-draft"'), "Expected Log draft notice to include restore action.");
 assert.strictEqual(mobileQolMarkup.hiddenNotice, "", "Expected Log draft notice to stay hidden outside the Log tab.");
-assert(mobileQolMarkup.quick.includes("Log strength"), "Expected quick action sheet to include strength logging.");
-assert(mobileQolMarkup.quick.includes("Log nutrition"), "Expected quick action sheet to include nutrition logging.");
-assert(mobileQolMarkup.quick.includes("Copy Coach plan"), "Expected quick action sheet to include Coach copy.");
-assert.strictEqual(mobileQolMarkup.hiddenQuick, "", "Expected floating quick actions to stay hidden on Log forms.");
 assert(mobileQolMarkup.modal.includes("Review backup import"), "Expected import preview dialog.");
 assert(mobileQolMarkup.modal.includes("2</strong> workouts"), "Expected import preview workout count.");
 assert.deepEqual(mobileQolMarkup.widgets, ["health", "weeklySets"], `Expected selected dashboard widgets to persist, got ${mobileQolMarkup.widgets.join(", ")}`);

@@ -3,7 +3,7 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 2;
 const STORES = ["workouts", "metrics", "settings"];
-const APP_VERSION = "1.5.22";
+const APP_VERSION = "1.5.23";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 const DRAFT_RECOVERY_KEY = "trainwise-draft-recovery-v1";
 let dbOpenPromise = null;
@@ -135,7 +135,6 @@ const state = {
   coachTimeframeMinutes: SESSION_LIMIT_MINUTES,
   coachTargetMuscles: [],
   draggingDraftId: null,
-  quickActionsOpen: false,
   appBanner: null,
   logDraftNotice: null,
   undoAction: null,
@@ -721,8 +720,8 @@ function exerciseRemovalMode(exerciseOrName) {
 function exerciseCoverageStats() {
   const active = getCustomExercises();
   return muscleGroups.map((muscle) => {
-    const count = active.filter((exercise) => (exercise.primaryMuscles || []).includes(muscle.id)).length;
-    return { ...muscle, count, missing: count === 0 };
+    const exercises = active.filter((exercise) => (exercise.primaryMuscles || []).includes(muscle.id));
+    return { ...muscle, exercises, count: exercises.length, missing: exercises.length === 0 };
   });
 }
 
@@ -2861,7 +2860,7 @@ function ensureWorkoutDraft() {
 }
 
 function syncLegacyDraftFromFirst() {
-  const first = ensureWorkoutDraft()[0];
+  const first = Array.isArray(state.workoutDraft) ? state.workoutDraft[0] : null;
   if (!first) {
     state.selectedExercise = "";
     state.draftTargetMuscle = "chest";
@@ -3416,12 +3415,32 @@ function exerciseCoverageMarkup() {
         <h3>Primary coverage</h3>
         <span class="muted small">${exerciseCoverageStats().filter((item) => !item.missing).length}/${muscleGroups.length} muscles covered</span>
       </div>
-      <div class="exercise-coverage-grid">
+      <div class="exercise-coverage-list">
         ${exerciseCoverageStats().map((item) => `
-          <div class="coverage-chip ${item.missing ? "is-missing" : ""}">
-            <span><strong>${escapeHtml(item.label)}</strong><small>${item.count} primary</small></span>
-            ${item.missing ? `<button class="ghost-mini" type="button" data-action="exercise-add-primary" data-muscle-id="${item.id}">Add primary</button>` : ""}
-          </div>
+          <details class="coverage-row ${item.missing ? "is-missing" : ""}">
+            <summary>
+              <span class="coverage-row-title"><strong>${escapeHtml(item.label)}</strong><small>${item.missing ? "Missing primary exercise" : `${item.count} primary`}</small></span>
+              <span class="collapse-arrow" aria-hidden="true">⌄</span>
+            </summary>
+            ${item.missing ? `
+              <div class="coverage-empty-row">
+                <p class="muted small">Add a primary ${escapeHtml(item.label)} exercise so Coach can recommend it.</p>
+                <button class="ghost-mini" type="button" data-action="exercise-add-primary" data-muscle-id="${item.id}">Add primary</button>
+              </div>
+            ` : `
+              <div class="coverage-detail-list">
+                ${item.exercises.map((exercise) => {
+                  const usage = exerciseUsageStats(exercise);
+                  return `
+                    <div class="coverage-exercise-row">
+                      <strong>${escapeHtml(exercise.name)}</strong>
+                      <span class="muted micro">${usage.lastUsedAt ? `Last ${escapeHtml(formatShortDate(usage.lastUsedAt))}` : "Never used"} - ${usage.sessionCount} sessions</span>
+                    </div>
+                  `;
+                }).join("")}
+              </div>
+            `}
+          </details>
         `).join("")}
       </div>
     </section>
@@ -3654,19 +3673,19 @@ function exerciseDraftTable(draft, index, total) {
   `;
 }
 
-function emptyStrengthLogMarkup() {
+function emptyStrengthLogMarkup(canAddExerciseTable = false) {
   return `
     <section class="empty log-empty-state">
       <h3>Add an exercise to start logging strength.</h3>
-      <p class="muted small">Create a library exercise, load a template, or copy Coach's plan before logging sets.</p>
-      <button class="primary-button" type="button" data-action="quick-add-exercise">Add exercise</button>
+      <p class="muted small">${canAddExerciseTable ? "Add a library exercise, load a template, or copy Coach's plan before logging sets." : "Create a library exercise, load a template, or copy Coach's plan before logging sets."}</p>
+      <button class="primary-button" type="button" data-action="${canAddExerciseTable ? "add-exercise-table" : "quick-add-exercise"}">Add exercise</button>
     </section>
   `;
 }
 
 function renderLog() {
   const templates = getDayTemplates();
-  const draft = ensureWorkoutDraft();
+  const draft = Array.isArray(state.workoutDraft) ? state.workoutDraft : [];
   const canAddExerciseTable = exerciseNames().length > 0;
   const lockLabel = draft.some((item) => item.editingWorkoutId) ? "Update workout" : "Lock in workout";
   if (state.logHistoryExercise) return exerciseHistoryScreen(state.logHistoryExercise);
@@ -3719,7 +3738,7 @@ function renderLog() {
 
             <button class="primary-button lock-button" type="submit">${lockLabel}</button>
             <p class="muted micro form-note">Most hypertrophy work should stop 1-3 reps before failure. Keep the whole workout inside roughly ${SESSION_LIMIT_MINUTES} minutes.</p>
-          ` : emptyStrengthLogMarkup()}
+          ` : emptyStrengthLogMarkup(canAddExerciseTable)}
         </form>
       ` : `
         <form id="metric-form">
@@ -4227,30 +4246,6 @@ function syncLogDraftNoticeDom() {
   els.app.insertAdjacentHTML("afterbegin", markup);
 }
 
-function renderMobileQuickActions() {
-  const quickActionTabs = new Set(["dashboard"]);
-  if (!quickActionTabs.has(state.activeTab)) return "";
-  const plan = buildTodayPlan(selectedCoachTimeframeMinutes());
-  const canCopyPlan = !!plan.sessionPlan.items.length;
-  const obscured = state.appBanner || state.logDraftNotice || state.pendingImport;
-  return `
-    <div class="mobile-quick-actions ${state.quickActionsOpen ? "is-open" : ""}${obscured ? " is-obscured" : ""}">
-      ${state.quickActionsOpen ? `
-        <div class="mobile-quick-sheet" role="menu" aria-label="Quick actions">
-          <button type="button" data-action="quick-log-strength" role="menuitem">Log strength</button>
-          <button type="button" data-action="quick-log-nutrition" role="menuitem">Log nutrition</button>
-          <button type="button" data-action="copy-coach-plan" role="menuitem" ${canCopyPlan ? "" : "disabled"}>Copy Coach plan</button>
-          <button type="button" data-action="quick-add-exercise" role="menuitem">Add exercise</button>
-          <button type="button" data-action="quick-backup" role="menuitem">Backup</button>
-        </div>
-      ` : ""}
-      <button class="mobile-quick-toggle" type="button" data-action="toggle-quick-actions" aria-expanded="${state.quickActionsOpen}" aria-label="${state.quickActionsOpen ? "Close quick actions" : "Open quick actions"}">
-        ${state.quickActionsOpen ? "x" : "+"}
-      </button>
-    </div>
-  `;
-}
-
 function renderImportPreview() {
   const pending = state.pendingImport;
   if (!pending) return "";
@@ -4276,7 +4271,7 @@ function renderImportPreview() {
 }
 
 function renderAppChrome() {
-  return `${renderAppBanner()}${renderImportPreview()}${renderLogDraftNotice()}${renderMobileQuickActions()}`;
+  return `${renderAppBanner()}${renderImportPreview()}${renderLogDraftNotice()}`;
 }
 
 function dataSafetySummaryMarkup() {
@@ -4470,10 +4465,17 @@ async function renderSettings() {
 }
 
 function applyStaggerAnimations() {
-  const animated = els.app.querySelectorAll(".card, .chart-panel, .stat, .coach-card, .exercise-definition, .exercise-draft, .history-exercise-card, .history-session-card, .form-panel, .settings-panel");
+  const animated = els.app.querySelectorAll(".card, .chart-panel, .stat, .coach-card, .exercise-definition, .exercise-draft, .coverage-row, .history-exercise-card, .history-session-card, .form-panel, .settings-panel");
   animated.forEach((element, index) => {
     element.style.setProperty("--i", String(Math.min(index, 12)));
   });
+}
+
+async function flashSelection(target) {
+  const element = target?.closest?.(".history-exercise-card, .exercise-definition, .exercise-draft, .history-session-card, button");
+  if (!element) return;
+  element.classList.add("is-selecting");
+  await sleep(90);
 }
 
 async function render({ animate = false } = {}) {
@@ -5228,16 +5230,14 @@ function applyWorkoutSaveUndoSnapshot(workouts = [], payload = {}) {
 }
 
 function clearWorkoutDraft(date = todayISO()) {
-  const exercise = defaultLogExerciseName();
-  const meta = exercise ? resolveExerciseMeta(exercise) : { primaryMuscles: ["chest"] };
   state.editingWorkoutId = null;
   state.loadedWorkoutDateIds = [];
   state.draftDate = date;
   state.draftNotes = "";
-  state.selectedExercise = exercise;
-  state.draftTargetMuscle = meta.primaryMuscles[0] || "chest";
+  state.selectedExercise = "";
+  state.draftTargetMuscle = "chest";
   state.setRows = defaultSetRows();
-  state.workoutDraft = exercise ? [defaultDraftExercise(exercise)] : [];
+  state.workoutDraft = [];
   state.logHistoryExercise = "";
   syncLegacyDraftFromFirst();
 }
@@ -5319,32 +5319,11 @@ async function handleAction(action, target) {
     async "restore-draft"() {
       if (!restoreDraftRecovery()) throw new Error("No saved draft found.");
       clearLogDraftNotice();
-      showBanner("Draft restored.", { tone: "good" });
+      toast("Draft restored.", { duration: 2000 });
       await render();
-    },
-    async "toggle-quick-actions"() {
-      state.quickActionsOpen = !state.quickActionsOpen;
-      await render();
-    },
-    async "quick-log-strength"() {
-      preserveVisibleDraft("quick-action");
-      state.quickActionsOpen = false;
-      state.activeTab = "log";
-      state.logMode = "strength";
-      loadWorkoutDateDraft(todayISO());
-      await render({ animate: true });
-    },
-    async "quick-log-nutrition"() {
-      preserveVisibleDraft("quick-action");
-      state.quickActionsOpen = false;
-      state.activeTab = "log";
-      state.logMode = "metrics";
-      loadMetricDateDraft(todayISO());
-      await render({ animate: true });
     },
     async "quick-add-exercise"() {
-      preserveVisibleDraft("quick-action");
-      state.quickActionsOpen = false;
+      preserveVisibleDraft("add-exercise");
       state.activeTab = "exercises";
       state.editingExerciseId = null;
       state.exerciseFormDraft = null;
@@ -5410,27 +5389,29 @@ async function handleAction(action, target) {
       await render();
     },
     async "history-select-exercise"() {
+      await flashSelection(target);
       state.historyExercise = target.dataset.exercise || "";
       state.historyMode = "exercises";
-      await render();
+      await render({ animate: true });
     },
     async "history-back"() {
       state.historyExercise = "";
       state.historyMode = "exercises";
-      await render();
+      await render({ animate: true });
     },
     async "history-set-mode"() {
       state.historyMode = target.dataset.historyMode === "dates" ? "dates" : "exercises";
-      await render();
+      await render({ animate: true });
     },
     async "history-date-chip"() {
+      await flashSelection(target);
       state.historyMode = "dates";
       state.historyDate = target.dataset.historyDateValue || "";
-      await render();
+      await render({ animate: true });
     },
     async "clear-history-date"() {
       state.historyDate = "";
-      await render();
+      await render({ animate: true });
     },
     async "coach-timeframe"() {
       const minutes = Number(target.dataset.coachMinutes);
@@ -5456,7 +5437,6 @@ async function handleAction(action, target) {
     },
     async "copy-coach-plan"() {
       copyCoachPlanToLog(buildTodayPlan(selectedCoachTimeframeMinutes()));
-      state.quickActionsOpen = false;
       announce("Coach plan copied to Log.", { tone: "good", detail: "Exercises and planned sets are ready as an unsaved draft." });
       await render({ animate: true });
     },
@@ -5480,7 +5460,6 @@ async function handleAction(action, target) {
         state.editingExerciseId = null;
         state.exerciseFormDraft = null;
         state.exerciseFormErrors = {};
-        state.quickActionsOpen = false;
         await render({ animate: true });
         return;
       }
@@ -5502,13 +5481,14 @@ async function handleAction(action, target) {
     },
     async "open-exercise-history"() {
       readDraftFromForm();
+      await flashSelection(target);
       state.logHistoryExercise = target.dataset.exercise;
       state.openExerciseMenu = null;
-      await render();
+      await render({ animate: true });
     },
     async "close-log-history"() {
       state.logHistoryExercise = "";
-      await render();
+      await render({ animate: true });
     },
     async "edit-exercise"() {
       state.activeTab = "exercises";
@@ -5584,7 +5564,7 @@ async function handleAction(action, target) {
       delete restored.archivedAt;
       await saveSetting("customExercises", exercises.map((item) => item.id === exercise.id ? restored : item));
       state.openExerciseActionMenu = null;
-      announce("Exercise restored.", { tone: "good", action: "undo-last-action", actionLabel: "Undo" });
+      toast("Exercise restored.", { duration: 2000 });
       await render();
     },
     async "delete-exercise"() {
@@ -5601,11 +5581,11 @@ async function handleAction(action, target) {
       await render();
     },
     async "log-exercise"() {
+      await flashSelection(target);
       preserveVisibleDraft("log-exercise");
       state.activeTab = "log";
       state.logMode = "strength";
       state.editingWorkoutId = null;
-      state.quickActionsOpen = false;
       state.selectedExercise = target.dataset.exercise;
       state.draftTargetMuscle = resolveExerciseMeta(state.selectedExercise).primaryMuscles[0] || "chest";
       state.setRows = defaultSetRows();
@@ -5615,25 +5595,21 @@ async function handleAction(action, target) {
     async "open-exercise-trend"() {
       const exercise = target.dataset.exercise;
       if (!exercise) return;
+      await flashSelection(target);
       preserveVisibleDraft("cross-tab");
       state.selectedExercise = exercise;
       state.activeTab = "trends";
-      state.quickActionsOpen = false;
       await render({ animate: true });
     },
     async "open-exercise-history-global"() {
       const exercise = target.dataset.exercise;
       if (!exercise) return;
+      await flashSelection(target);
       preserveVisibleDraft("cross-tab");
       state.historyExercise = exercise;
       state.historyMode = "exercises";
       state.activeTab = "history";
-      state.quickActionsOpen = false;
       await render({ animate: true });
-    },
-    async "quick-backup"() {
-      state.quickActionsOpen = false;
-      await downloadBackup();
     },
     async "export-data"() { await downloadBackup(); },
     "import-click"() { document.getElementById("import-file")?.click(); },
@@ -5881,7 +5857,6 @@ document.addEventListener("click", async (event) => {
     if (tab) {
       if (tab.dataset.tab !== state.activeTab) preserveVisibleDraft("tab-change");
       state.activeTab = tab.dataset.tab;
-      state.quickActionsOpen = false;
       await render({ animate: true });
     }
     if (logMode) {

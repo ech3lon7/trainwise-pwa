@@ -436,6 +436,11 @@ h3 {
   transform: scale(0.97);
 }
 
+.is-selecting {
+  filter: brightness(1.14);
+  transform: scale(0.985);
+}
+
 .tab {
   background: transparent;
   color: var(--muted);
@@ -445,50 +450,6 @@ h3 {
 .tab.is-active {
   background: var(--panel-2);
   color: var(--green);
-}
-
-.mobile-quick-actions {
-  display: none;
-}
-
-.mobile-quick-toggle {
-  display: grid;
-  place-items: center;
-  width: 56px;
-  height: 56px;
-  border: 0;
-  border-radius: 999px;
-  background: var(--green);
-  color: #08120b;
-  font-size: 30px;
-  font-weight: 900;
-  box-shadow: 0 14px 30px rgba(53, 213, 140, 0.26);
-}
-
-.mobile-quick-sheet {
-  display: grid;
-  gap: 8px;
-  width: min(260px, calc(100vw - 28px));
-  margin-bottom: 10px;
-  padding: 10px;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 8px;
-  background: rgba(18, 22, 18, 0.96);
-  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.34);
-  backdrop-filter: blur(16px);
-}
-
-.mobile-quick-sheet button {
-  min-height: 44px;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 8px;
-  background: rgba(255, 255, 255, 0.05);
-  color: var(--text);
-  font-weight: 800;
-}
-
-.mobile-quick-sheet button:disabled {
-  opacity: 0.5;
 }
 
 .ghost-button {
@@ -662,7 +623,7 @@ textarea {
 .collapsible-panel summary {
   cursor: pointer;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) auto auto;
   gap: 10px;
   align-items: center;
   min-height: 44px;
@@ -671,6 +632,35 @@ textarea {
 
 .collapsible-panel summary::-webkit-details-marker {
   display: none;
+}
+
+.collapsible-panel summary::after {
+  content: "⌄";
+  justify-self: end;
+  color: var(--muted);
+  font-size: 18px;
+  line-height: 1;
+  opacity: 0.8;
+  transition: transform 0.16s ease, opacity 0.16s ease;
+}
+
+.collapsible-panel[open] summary::after {
+  transform: rotate(180deg);
+  opacity: 1;
+}
+
+.collapse-arrow {
+  justify-self: end;
+  color: var(--muted);
+  font-size: 18px;
+  line-height: 1;
+  opacity: 0.8;
+  transition: transform 0.16s ease, opacity 0.16s ease;
+}
+
+.coverage-row[open] .collapse-arrow {
+  transform: rotate(180deg);
+  opacity: 1;
 }
 
 .collapsible-panel summary span {
@@ -1933,45 +1923,87 @@ textarea {
   margin-top: 14px;
 }
 
-.exercise-coverage-grid {
+.exercise-coverage-list {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 8px;
 }
 
-.coverage-chip {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  min-width: 0;
-  padding: 10px;
+.coverage-row {
+  overflow: hidden;
   border: 1px solid rgba(53, 213, 140, 0.16);
   border-radius: 8px;
   background: rgba(53, 213, 140, 0.07);
 }
 
-.coverage-chip.is-missing {
+.coverage-row.is-missing {
   border-color: rgba(255, 209, 102, 0.22);
   background: rgba(255, 209, 102, 0.07);
 }
 
-.coverage-chip span {
+.coverage-row summary {
+  cursor: pointer;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  min-height: 48px;
+  padding: 10px;
+  list-style: none;
+}
+
+.coverage-row summary::-webkit-details-marker {
+  display: none;
+}
+
+.coverage-row-title {
   display: grid;
   gap: 2px;
   min-width: 0;
 }
 
-.coverage-chip strong,
-.coverage-chip small {
+.coverage-row-title strong,
+.coverage-row-title small {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.coverage-chip small {
+.coverage-row-title small {
   color: var(--muted);
   font-size: 11px;
+}
+
+.coverage-detail-list {
+  display: grid;
+  gap: 8px;
+  padding: 0 10px 10px;
+}
+
+.coverage-exercise-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  padding: 9px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.045);
+}
+
+.coverage-exercise-row strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.coverage-empty-row {
+  display: grid;
+  gap: 8px;
+  align-items: start;
+  padding: 10px;
+}
+
+.coverage-empty-row p {
+  margin-bottom: 0;
 }
 
 .exercise-library-controls {
@@ -2455,19 +2487,6 @@ textarea {
     width: min(220px, calc(100vw - 96px));
   }
 
-  .mobile-quick-actions {
-    position: fixed;
-    right: 20px;
-    bottom: calc(82px + env(safe-area-inset-bottom));
-    z-index: 24;
-    display: grid;
-    justify-items: end;
-  }
-
-  .mobile-quick-actions.is-obscured {
-    bottom: calc(136px + env(safe-area-inset-bottom));
-  }
-
   .modal-backdrop {
     padding-bottom: calc(128px + env(safe-area-inset-bottom));
   }
@@ -2691,10 +2710,6 @@ textarea {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .exercise-coverage-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
   .exercise-control-row {
     grid-template-columns: 1fr;
   }
@@ -2815,19 +2830,6 @@ textarea {
 
   .checkbox-grid {
     grid-template-columns: 1fr;
-  }
-
-  .exercise-coverage-grid {
-    grid-template-columns: 1fr;
-  }
-
-  .coverage-chip {
-    align-items: stretch;
-    flex-direction: column;
-  }
-
-  .coverage-chip .ghost-mini {
-    width: 100%;
   }
 
   .muscle-grid,
