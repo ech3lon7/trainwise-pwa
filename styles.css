@@ -372,8 +372,9 @@ h3 {
   position: fixed;
   left: 12px;
   right: 12px;
-  bottom: max(10px, env(safe-area-inset-bottom));
-  z-index: 20;
+  top: calc(100dvh - 66px - env(safe-area-inset-bottom));
+  bottom: auto;
+  z-index: 32;
   display: grid;
   grid-template-columns: repeat(7, minmax(0, 1fr));
   gap: 4px;
@@ -384,6 +385,7 @@ h3 {
   border-radius: 8px;
   background: rgba(18, 22, 18, 0.94);
   backdrop-filter: blur(16px);
+  pointer-events: auto;
 }
 
 .tab,
@@ -1159,6 +1161,71 @@ textarea {
   min-width: 84px;
 }
 
+.coach-growth-mode-list {
+  display: grid;
+  gap: 8px;
+}
+
+.coach-growth-mode-row {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.coach-growth-mode-row > span {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 850;
+}
+
+.coach-growth-mode-options {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.growth-mode-chip {
+  min-height: 40px;
+  padding: 0 8px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.growth-mode-chip.is-active {
+  border-color: rgba(155, 140, 255, 0.52);
+  background: rgba(155, 140, 255, 0.16);
+  color: #c8bdff;
+}
+
+.coach-copied-plan-card {
+  display: grid;
+  gap: 10px;
+}
+
+.coach-next-preview {
+  display: grid;
+  gap: 8px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.coach-next-preview > strong {
+  font-size: 14px;
+}
+
+.coach-next-preview > p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
 .nutrition-goal-options .timeframe-chip {
   display: grid;
   place-items: center;
@@ -1458,6 +1525,10 @@ textarea {
   z-index: 10;
 }
 
+.exercise-draft.is-drag-pending {
+  border-color: rgba(155, 140, 255, 0.3);
+}
+
 .reorder-arrows {
   display: flex;
   gap: 4px;
@@ -1542,6 +1613,14 @@ textarea {
   font-weight: 900;
   touch-action: none;
   user-select: none;
+  transition: transform 0.16s ease, box-shadow 0.16s ease, background 0.16s ease;
+}
+
+.drag-handle.is-pending,
+.exercise-draft.is-drag-pending .drag-handle {
+  background: rgba(155, 140, 255, 0.18);
+  box-shadow: 0 0 0 4px rgba(155, 140, 255, 0.1);
+  transform: scale(1.04);
 }
 
 .exercise-table-title > div,
@@ -2455,33 +2534,33 @@ textarea {
 }
 
 .scroll-top-button {
-  position: absolute;
-  right: 12px;
-  top: var(--scroll-top-top, calc(100vh - 128px));
+  position: fixed;
+  right: 16px;
+  top: calc(100dvh - 135px - env(safe-area-inset-bottom));
   z-index: 23;
   display: grid;
   place-items: center;
-  width: 42px;
-  height: 42px;
-  border: 4px solid rgba(233, 241, 230, 0.58);
+  width: 36px;
+  height: 36px;
+  border: 3px solid rgba(233, 241, 230, 0.58);
   border-radius: 999px;
   background: rgba(18, 22, 18, 0.46);
   color: transparent;
   font-size: 0;
   opacity: 0;
   pointer-events: none;
-  transform: translateX(calc(100% + 18px));
-  transition: opacity 0.22s ease, transform 0.22s ease, filter 0.16s ease, bottom 0.12s ease;
+  transform: translateX(58px);
+  transition: opacity 0.22s ease, transform 0.22s ease, filter 0.16s ease;
   backdrop-filter: blur(10px);
 }
 
 .scroll-top-button::before {
   content: "";
-  width: 16px;
-  height: 16px;
-  border-top: 5px solid rgba(233, 241, 230, 0.82);
-  border-left: 5px solid rgba(233, 241, 230, 0.82);
-  transform: translateY(4px) rotate(45deg);
+  width: 14px;
+  height: 14px;
+  border-top: 4px solid rgba(233, 241, 230, 0.82);
+  border-left: 4px solid rgba(233, 241, 230, 0.82);
+  transform: translateY(3px) rotate(45deg);
 }
 
 .scroll-top-button.is-visible {

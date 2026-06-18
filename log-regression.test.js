@@ -150,18 +150,19 @@ assert(stylesCode.includes(".log-draft-notice strong"), "Expected compact Log dr
 assert(appCode.includes("muscle-audit-panel"), "Expected long Coach muscle set audit to be collapsible.");
 assert(appCode.includes("scrollTopButtonShouldShow"), "Expected scroll-to-top threshold helper.");
 assert(appCode.includes("scrollTopButtonTopOffset"), "Expected scroll-to-top viewport positioning helper.");
-assert(appCode.includes("renderScrollTopButton"), "Expected app chrome to include scroll-to-top control.");
+assert(indexCode.includes("scroll-top-button"), "Expected app shell to include scroll-to-top control outside app content.");
 assert(stylesCode.includes(".scroll-top-button"), "Expected scroll-to-top button styling.");
 assert(stylesCode.includes(".scroll-top-button::before"), "Expected scroll-to-top button to use a chevron-style icon.");
-assert(stylesCode.includes("translateX(calc(100% + 18px))"), "Expected scroll-to-top button to slide in from the right.");
+assert(stylesCode.includes(".drag-handle.is-pending"), "Expected drag handle pending animation styling.");
+assert(stylesCode.includes("translateX(58px)"), "Expected scroll-to-top button to slide in from the right.");
 assert(!appCode.includes("renderMobileQuickActions"), "Expected floating quick action renderer to be removed.");
 assert(!appCode.includes('selectedExercise: "Push-up"'), "Expected Log startup not to default to Push-up.");
 assert(!appCode.includes('showBanner("Unsaved draft restored."'), "Expected startup draft recovery not to show a top banner.");
 assert(appCode.includes("notifyMetricSaved"), "Expected metrics saves to use a dedicated bottom-only notification helper.");
 assert(!stylesCode.includes(".mobile-quick-toggle"), "Expected floating quick action button styling to be removed.");
-assert(indexCode.includes("v=1.5.25"), "Expected index shell references to use bumped app version.");
+assert(indexCode.includes("v=1.5.26"), "Expected index shell references to use bumped app version.");
 assert(!indexCode.includes('id="app" class="app-content" aria-live'), "Expected broad app aria-live to be removed in favor of targeted live regions.");
-assert(serviceWorkerCode.includes("trainwise-cache-v47"), "Expected service worker cache version bump.");
+assert(serviceWorkerCode.includes("trainwise-cache-v48"), "Expected service worker cache version bump.");
 
 const nutritionQuickTotals = runScenario(`
   ${reset}
@@ -664,6 +665,25 @@ const orderPreserved = runScenario(`
 
 assert.deepEqual(orderPreserved, ["First", "Second", "Third"], `Expected saved exercise order, got ${orderPreserved.join(", ")}`);
 
+const removeLastExerciseTable = runScenario(`
+  ${reset}
+  state.logMode = "strength";
+  state.workoutDraft = [defaultDraftExercise("Bench Press")];
+  state.draftNotes = "remove me";
+  state.setRows = [{ weight: 100, reps: 10, rir: 2, restSeconds: 120 }];
+  removeExerciseDraftTable(state.workoutDraft[0].draftId);
+  ({
+    draftLength: state.workoutDraft.length,
+    setRowsLength: state.setRows.length,
+    selectedExercise: state.selectedExercise,
+    markup: renderLog()
+  });
+`);
+
+assert.strictEqual(removeLastExerciseTable.draftLength, 0, `Expected removing last exercise to empty draft, got ${removeLastExerciseTable.draftLength}`);
+assert.strictEqual(removeLastExerciseTable.setRowsLength, 0, `Expected legacy rows to clear when Log is empty, got ${removeLastExerciseTable.setRowsLength}`);
+assert(removeLastExerciseTable.markup.includes("Add an exercise to start logging strength."), "Expected removing the last table to render the empty strength state.");
+
 const coachPlanCopy = runScenario(`
   ${reset}
   state.workouts = [
@@ -1133,6 +1153,7 @@ const exerciseCoverageAndFilters = runScenario(`
     showsBenchUnderChest: markup.includes('Bench Press'),
     showsRowUnderBack: markup.includes('Cable Row'),
     hasCollapseArrow: markup.includes('collapse-arrow'),
+    coverageRowsHaveStandardArrowOnly: !markup.includes('class="collapse-arrow"'),
     hasArchiveSection: markup.includes('Archived exercises')
   });
 `);
@@ -1153,7 +1174,7 @@ assert.strictEqual(exerciseCoverageAndFilters.hasControlsPanelCollapse, true, "E
 assert.strictEqual(exerciseCoverageAndFilters.hasDatabasePanelCollapse, true, "Expected active exercise database section to be a collapsible panel.");
 assert.strictEqual(exerciseCoverageAndFilters.showsBenchUnderChest, true, "Expected covered Chest row to list primary exercises.");
 assert.strictEqual(exerciseCoverageAndFilters.showsRowUnderBack, true, "Expected covered Back row to list primary exercises.");
-assert.strictEqual(exerciseCoverageAndFilters.hasCollapseArrow, true, "Expected collapsible coverage rows to show a right-edge arrow.");
+assert.strictEqual(exerciseCoverageAndFilters.coverageRowsHaveStandardArrowOnly, true, "Expected coverage rows to avoid redundant inner collapse arrows.");
 assert.strictEqual(exerciseCoverageAndFilters.hasArchiveSection, true, "Expected Exercises markup to include archived section.");
 
 const mobileQolMarkup = runScenario(`
@@ -1199,8 +1220,8 @@ const scrollTopThreshold = runScenario(`
     beforeHalf: scrollTopButtonShouldShow(400, 2200, 800),
     pastHalf: scrollTopButtonShouldShow(800, 2200, 800),
     exactEnoughLength: scrollTopButtonShouldShow(500, 1200, 800),
-    fallbackTop: scrollTopButtonTopOffset(400, null, 800, 76, 42),
-    viewportTop: scrollTopButtonTopOffset(400, { offsetTop: 40, height: 620 }, 800, 76, 42),
+    fallbackTop: scrollTopButtonTopOffset(400, null, 800, 76, 36),
+    viewportTop: scrollTopButtonTopOffset(400, { offsetTop: 40, height: 620 }, 800, 76, 36),
     chrome: renderAppChrome()
   });
 `);
@@ -1209,9 +1230,31 @@ assert.strictEqual(scrollTopThreshold.shortPage, false, "Expected scroll-to-top 
 assert.strictEqual(scrollTopThreshold.beforeHalf, false, "Expected scroll-to-top to stay hidden before 55% scroll.");
 assert.strictEqual(scrollTopThreshold.pastHalf, true, "Expected scroll-to-top to show after 55% scroll.");
 assert.strictEqual(scrollTopThreshold.exactEnoughLength, false, "Expected scroll-to-top to require pages longer than 1.5 view heights.");
-assert.strictEqual(scrollTopThreshold.fallbackTop, 1070, `Expected fallback scroll-to-top top position to track current scroll, got ${scrollTopThreshold.fallbackTop}`);
-assert.strictEqual(scrollTopThreshold.viewportTop, 930, `Expected visual viewport top position to keep button inside visible screen, got ${scrollTopThreshold.viewportTop}`);
-assert(scrollTopThreshold.chrome.includes('data-action="scroll-top"'), "Expected app chrome to render scroll-to-top action.");
+assert.strictEqual(scrollTopThreshold.fallbackTop, 1054, `Expected fallback scroll-to-top top position to sit higher above tabbar, got ${scrollTopThreshold.fallbackTop}`);
+assert.strictEqual(scrollTopThreshold.viewportTop, 914, `Expected visual viewport top position to sit higher inside visible screen, got ${scrollTopThreshold.viewportTop}`);
+assert(indexCode.includes('data-action="scroll-top"'), "Expected app shell to render scroll-to-top action outside scrolling content.");
+
+const dragPendingTolerance = runScenario(`
+  ${reset}
+  state.workoutDraft = [defaultDraftExercise("Bench Press"), defaultDraftExercise("Cable Row")];
+  var handle = {
+    classList: { added: [], removed: [], add(value) { this.added.push(value); }, remove(value) { this.removed.push(value); } },
+    closest(selector) { return selector === ".exercise-draft" ? { dataset: { draftId: state.workoutDraft[0].draftId }, classList: { add() {}, remove() {} }, style: {} } : null; },
+    setPointerCapture() {}
+  };
+  startExerciseDrag(handle, { clientY: 100, pointerId: 1 });
+  updatePendingExerciseDrag({ clientY: 104 });
+  clearTimeout(dragState.dragTimer);
+  ({
+    pending: dragState.pending,
+    currentY: dragState.currentY,
+    pendingClass: handle.classList.added.includes("is-pending")
+  });
+`);
+
+assert.strictEqual(dragPendingTolerance.pending, true, "Expected tiny mobile drag movement not to cancel pending long-press drag.");
+assert.strictEqual(dragPendingTolerance.currentY, 104, `Expected pending drag currentY to update, got ${dragPendingTolerance.currentY}`);
+assert.strictEqual(dragPendingTolerance.pendingClass, true, "Expected drag handle pending animation class.");
 
 const collapsibleLongScreens = runScenario(`
   ${reset}

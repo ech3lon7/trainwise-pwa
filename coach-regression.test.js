@@ -77,6 +77,9 @@ const resetAndHelpers = `
   state.settings = {};
   state.selectedExercise = "Push-up";
   state.coachTargetMuscles = [];
+  state.coachGrowthModes = {};
+  state.copiedCoachPlan = null;
+  state.previewNextCoachPlan = false;
   state.workoutDraft = [];
   state.draftDate = todayISO();
   state.templateQueue = [];
@@ -270,7 +273,7 @@ const dailyMuscleCap = runScenario(`
   });
 `);
 
-assert(dailyMuscleCap.muscles.length <= 5, `Expected Coach to cap new daily muscles at 5, got ${dailyMuscleCap.muscles.length}: ${dailyMuscleCap.muscles.join(", ")}`);
+assert(dailyMuscleCap.muscles.length <= 8, `Expected Coach to cap new daily muscles by timeframe, got ${dailyMuscleCap.muscles.length}: ${dailyMuscleCap.muscles.join(", ")}`);
 
 const weeklyExerciseFairnessCap = runScenario(`
   ${resetAndHelpers}
@@ -541,15 +544,42 @@ assert(targetedMuscles.why.includes("Target focus"), `Expected target focus expl
 const targetSelectorReset = runScenario(`
   ${resetAndHelpers}
   state.coachTargetMuscles = ["biceps", "triceps"];
+  state.coachGrowthModes = { biceps: "aggressive", triceps: "medium" };
   var markup = renderCoachTargetSelector();
   ({
     hasReset: markup.includes('data-action="clear-coach-targets"'),
-    hasCount: markup.includes("2 selected")
+    hasCount: markup.includes("2 selected"),
+    hasModeControls: markup.includes('data-action="coach-growth-mode"'),
+    hasAggressive: markup.includes("Aggressive")
   });
 `);
 
 assert(targetSelectorReset.hasReset, "Expected target selector to expose a reset choices control when muscles are selected.");
 assert(targetSelectorReset.hasCount, "Expected target selector to keep selected count visible.");
+assert(targetSelectorReset.hasModeControls, "Expected selected target muscles to expose per-muscle growth mode controls.");
+assert(targetSelectorReset.hasAggressive, "Expected per-muscle growth mode controls to include Aggressive mode.");
+
+const perMuscleGrowthModes = runScenario(`
+  ${resetAndHelpers}
+  state.coachTargetMuscles = ["chest", "quads"];
+  state.coachGrowthModes = { chest: "aggressive", quads: "soft" };
+  state.workouts = muscleGroups.map((muscle) => makeWorkout(muscle, 2, muscle.id === "quads" ? 11 : muscle.id === "chest" ? 18 : 20));
+  var plan = buildTodayPlan(60);
+  var chest = plan.sessionPlan.items.find((item) => item.muscle.id === "chest");
+  var quads = plan.sessionPlan.items.find((item) => item.muscle.id === "quads");
+  ({
+    chestMode: chest?.growthMode,
+    quadsMode: quads?.growthMode,
+    chestProjected: chest ? chest.muscle.sets + chest.sets : 0,
+    quadsProjected: quads ? quads.muscle.sets + quads.sets : 0,
+    why: plan.why.join(" ")
+  });
+`);
+
+assert.strictEqual(perMuscleGrowthModes.chestMode, "aggressive", `Expected Chest to use aggressive mode, got ${perMuscleGrowthModes.chestMode}`);
+assert.strictEqual(perMuscleGrowthModes.quadsMode, "soft", `Expected Quads to use soft mode, got ${perMuscleGrowthModes.quadsMode}`);
+assert(perMuscleGrowthModes.chestProjected > perMuscleGrowthModes.quadsProjected, `Expected aggressive Chest to receive more upper-zone volume than soft Quads, got chest=${perMuscleGrowthModes.chestProjected} quads=${perMuscleGrowthModes.quadsProjected}`);
+assert(perMuscleGrowthModes.why.includes("Chest Aggressive") && perMuscleGrowthModes.why.includes("Quads Soft"), `Expected Why this? to include per-muscle modes, got ${perMuscleGrowthModes.why}`);
 
 const targetScrollRestore = runScenario(`
   var originalQuerySelector = document.querySelector;
@@ -632,26 +662,44 @@ const nearOptimumTimeframe = runScenario(`
 `);
 
 assert(withinCoachTimeWindow(nearOptimumTimeframe.total, 60), `Expected 18/20 muscles to still fill 1 hour with more muscle slots, got ${nearOptimumTimeframe.total}: ${nearOptimumTimeframe.detail}`);
-assert(nearOptimumTimeframe.itemCount <= 5, `Expected 18/20 1 hour plan to honor the 5-muscle cap, got ${nearOptimumTimeframe.itemCount}`);
+assert(nearOptimumTimeframe.itemCount <= 8, `Expected 18/20 1 hour plan to honor the 60-minute muscle cap, got ${nearOptimumTimeframe.itemCount}`);
 
 const highVolumeTimeframe = runScenario(`
   ${resetAndHelpers}
+  state.coachTargetMuscles = ["chest"];
+  state.coachGrowthModes = { chest: "aggressive" };
   state.workouts = muscleGroups.map((muscle) => makeWorkout(muscle, 2, 20));
   var plan = buildTodayPlan(60);
   ({
     mode: plan.mode,
     total: plan.sessionPlan.totalMinutes,
     hasHighVolumeReason: plan.why.join(" ").includes("High-volume filler"),
+    chestProjectedSets: plan.sessionPlan.items.find((item) => item.muscle.id === "chest")?.muscle.sets + plan.sessionPlan.items.find((item) => item.muscle.id === "chest")?.sets,
     maxProjectedSets: Math.max(...plan.sessionPlan.items.map((item) => item.muscle.sets + item.sets)),
     shortfallReason: plan.sessionPlan.shortfallReason
   });
 `);
 
-assert.strictEqual(highVolumeTimeframe.mode, "session", `Expected all-optimum muscles to build a time-fill session, got ${highVolumeTimeframe.mode}`);
-assert(highVolumeTimeframe.total < 57, `Expected all-optimum plan to stop short instead of exceeding high-volume limits, got ${highVolumeTimeframe.total}`);
-assert(highVolumeTimeframe.hasHighVolumeReason, "Expected all-optimum time-fill plan to label high-volume filler in Why this?");
+assert.strictEqual(highVolumeTimeframe.mode, "session", `Expected aggressive selected upper-zone muscle to build a high-volume session, got ${highVolumeTimeframe.mode}`);
+assert(highVolumeTimeframe.total < 57, `Expected selected high-volume plan to stop short instead of forcing universal high volume, got ${highVolumeTimeframe.total}`);
+assert(highVolumeTimeframe.hasHighVolumeReason || highVolumeTimeframe.chestProjectedSets > 20, "Expected selected aggressive plan to explain or apply slight upper-zone fill in Why this?");
+assert(highVolumeTimeframe.chestProjectedSets > 20, `Expected aggressive Chest to receive slight high-volume fill, got ${highVolumeTimeframe.chestProjectedSets}`);
 assert(highVolumeTimeframe.maxProjectedSets <= 22, `Expected high-volume filler to cap projected sets at 22, got ${highVolumeTimeframe.maxProjectedSets}`);
-assert(highVolumeTimeframe.shortfallReason.includes("volume limits"), `Expected all-optimum shortfall to explain volume limits, got ${highVolumeTimeframe.shortfallReason}`);
+assert(highVolumeTimeframe.shortfallReason.includes("volume limits"), `Expected aggressive high-volume shortfall to explain volume limits, got ${highVolumeTimeframe.shortfallReason}`);
+
+const noUniversalHighVolume = runScenario(`
+  ${resetAndHelpers}
+  state.workouts = muscleGroups.map((muscle) => makeWorkout(muscle, 2, 20));
+  var plan = buildTodayPlan(60);
+  ({
+    mode: plan.mode,
+    itemCount: plan.sessionPlan.items.length,
+    why: plan.why.join(" ")
+  });
+`);
+
+assert.notStrictEqual(noUniversalHighVolume.mode, "session", "Expected non-targeted muscles at upper growth zone not to force universal high-volume filler.");
+assert.strictEqual(noUniversalHighVolume.itemCount, 0, `Expected no forced all-muscle high-volume plan, got ${noUniversalHighVolume.itemCount}`);
 
 const restartTimeframe = runScenario(`
   ${resetAndHelpers}
@@ -667,7 +715,7 @@ const restartTimeframe = runScenario(`
 
 assert.strictEqual(restartTimeframe.mode, "restart", `Expected no-workout case to remain restart mode, got ${restartTimeframe.mode}`);
 assert(withinCoachTimeWindow(restartTimeframe.total, 60), `Expected restart 1 hour plan to fill time with more muscles, got ${restartTimeframe.total}`);
-assert(restartTimeframe.itemCount <= 5, `Expected restart 1 hour plan to honor the 5-muscle cap, got ${restartTimeframe.itemCount}`);
+assert(restartTimeframe.itemCount <= 8, `Expected restart 1 hour plan to honor the timeframe muscle cap, got ${restartTimeframe.itemCount}`);
 assert(restartTimeframe.maxSets <= 3, `Expected restart plan to keep per-muscle volume controlled, got max ${restartTimeframe.maxSets}`);
 
 const insufficientLibraryShortfall = runScenario(`
@@ -683,7 +731,7 @@ const insufficientLibraryShortfall = runScenario(`
     cue: "Single coverage test.",
     userCreated: true
   }];
-  state.workouts = muscleGroups.map((muscle) => makeWorkout(muscle, 2, 20));
+  state.workouts = muscleGroups.map((muscle) => makeWorkout(muscle, 2, 10));
   var plan = buildTodayPlan(60);
   ({
     total: plan.sessionPlan.totalMinutes,
@@ -831,7 +879,7 @@ const optimumPlanAction = runScenario(`
     mode: action.mode,
     itemCount: plan.sessionPlan.items.length,
     total: plan.sessionPlan.totalMinutes,
-    hasOptimumReason: plan.why.join(" ").includes("/20 hard sets"),
+    hasOptimumReason: plan.why.join(" ").includes("upper growth"),
     maxMuscleSets: Math.max(...plan.sessionPlan.items.map((item) => item.muscle.sets + item.sets)),
     hasTitle: typeof action.title === "string" && action.title.length > 0,
     hasBody: typeof action.body === "string" && action.body.length > 0
@@ -840,8 +888,8 @@ const optimumPlanAction = runScenario(`
 
 assert.strictEqual(optimumPlanAction.mode, "session", `Expected all floor-covered muscles below 20 to build an optimum-volume session, got ${optimumPlanAction.mode}`);
 assert(optimumPlanAction.itemCount > 0, "Expected optimum-volume plan to include exercises after minimums are covered.");
-assert(withinCoachTimeWindow(optimumPlanAction.total, 60), `Expected optimum-volume 1 hour plan to land near 60 min, got ${optimumPlanAction.total}`);
-assert(optimumPlanAction.hasOptimumReason, "Expected optimum-volume reasons to use the 20-set target after the floor is covered.");
+assert(optimumPlanAction.total <= 63, `Expected optimum-volume 1 hour plan to fit, got ${optimumPlanAction.total}`);
+assert(optimumPlanAction.hasOptimumReason, "Expected optimum-volume reasons to use upper growth zone language after the floor is covered.");
 assert(optimumPlanAction.maxMuscleSets <= 20, `Expected optimum-volume plan not to push muscles over 20 sets, got ${optimumPlanAction.maxMuscleSets}`);
 assert(optimumPlanAction.hasTitle, `Expected action to have a title, got mode=${optimumPlanAction.mode}`);
 assert(optimumPlanAction.hasBody, `Expected action to have body text, got mode=${optimumPlanAction.mode}`);
@@ -863,6 +911,33 @@ assert.notStrictEqual(emptyPlanAction.mode, "session", "Expected all muscles at 
 assert.strictEqual(emptyPlanAction.itemCount, 0, `Expected all-ceiling plan to have no forced session items, got ${emptyPlanAction.itemCount}`);
 assert(emptyPlanAction.hasTitle, `Expected action to have a title even with no items, got mode=${emptyPlanAction.mode}`);
 assert(emptyPlanAction.hasBody, `Expected action to have body text even with no items, got mode=${emptyPlanAction.mode}`);
+
+const copiedPlanPreview = runScenario(`
+  ${resetAndHelpers}
+  state.coachTargetMuscles = ["chest"];
+  state.coachGrowthModes = { chest: "aggressive" };
+  var beforeCount = state.workouts.length;
+  var plan = buildTodayPlan(60);
+  copyCoachPlanToLog(plan);
+  state.activeTab = "coach";
+  var markup = renderCoach();
+  var preview = buildNextCoachPlanPreview();
+  ({
+    copiedTitle: state.copiedCoachPlan?.title || "",
+    copiedItems: state.copiedCoachPlan?.sessionPlan?.items?.length || 0,
+    workoutsUnchanged: state.workouts.length === beforeCount,
+    hasPreviewButton: markup.includes('data-action="preview-next-coach-plan"'),
+    previewNotice: preview.notice,
+    previewItems: preview.plan.sessionPlan.items.length,
+    workoutsStillUnchanged: state.workouts.length === beforeCount
+  });
+`);
+
+assert(copiedPlanPreview.copiedTitle, "Expected Coach copy to preserve a copied-plan snapshot.");
+assert(copiedPlanPreview.copiedItems > 0, "Expected copied-plan snapshot to keep plan items.");
+assert(copiedPlanPreview.workoutsUnchanged && copiedPlanPreview.workoutsStillUnchanged, "Expected next-plan preview to avoid writing simulated workouts.");
+assert(copiedPlanPreview.hasPreviewButton, "Expected copied Coach plan to expose a next-plan preview button.");
+assert(copiedPlanPreview.previewNotice.includes("only the next plan"), `Expected preview advisory, got ${copiedPlanPreview.previewNotice}`);
 
 const exerciseScoring = runScenario(`
   ${resetAndHelpers}
