@@ -77,6 +77,7 @@ const resetAndHelpers = `
   state.settings = {};
   state.selectedExercise = "Push-up";
   state.coachTargetMuscles = [];
+  state.coachGlobalGrowthMode = "medium";
   state.coachGrowthModes = {};
   state.copiedCoachPlan = null;
   state.previewNextCoachPlan = false;
@@ -541,6 +542,132 @@ assert(targetedMuscles.muscles.includes("biceps"), `Expected biceps target in pl
 assert(targetedMuscles.bicepsSets > 0, `Expected biceps target to receive work, got ${targetedMuscles.bicepsSets}`);
 assert(targetedMuscles.why.includes("Target focus"), `Expected target focus explanation, got ${targetedMuscles.why}`);
 
+const globalGrowthModeSelector = runScenario(`
+  ${resetAndHelpers}
+  state.coachGlobalGrowthMode = "";
+  var markup = renderCoachGrowthModeSelector();
+  ({
+    selected: selectedCoachGlobalGrowthMode(),
+    hasSelector: markup.includes('data-action="coach-global-growth-mode"'),
+    mediumActive: markup.includes('growth-mode-chip is-active') && markup.includes('Medium'),
+    hasLabel: markup.includes("Plan intensity")
+  });
+`);
+
+assert.strictEqual(globalGrowthModeSelector.selected, "medium", `Expected global growth mode to default to medium, got ${globalGrowthModeSelector.selected}`);
+assert(globalGrowthModeSelector.hasSelector, "Expected Coach to render a global plan intensity selector.");
+assert(globalGrowthModeSelector.mediumActive, "Expected global plan intensity selector to show Medium as active by default.");
+assert(globalGrowthModeSelector.hasLabel, "Expected global plan intensity selector to be labeled Plan intensity.");
+
+const globalGrowthModesChangeSets = runScenario(`
+  ${resetAndHelpers}
+  state.settings.customExercises = [
+    { id: "supinated-curls", name: "Supinated Curls", primaryMuscles: ["biceps"], secondaryMuscles: [], equipment: "dumbbells", reps: "8-15", rest: "60-120 sec", cue: "Curl.", userCreated: true },
+    ...muscleGroups.filter((muscle) => muscle.id !== "biceps").map((muscle) => ({
+      id: "custom-" + muscle.id,
+      name: muscle.label + " Exercise",
+      primaryMuscles: [muscle.id],
+      secondaryMuscles: [],
+      equipment: "dumbbells",
+      reps: "8-12",
+      rest: "90-180 sec",
+      cue: "Test exercise for " + muscle.label,
+      userCreated: true
+    }))
+  ];
+  state.workouts = muscleGroups.map((muscle) => makeWorkout(muscle, 2, muscle.id === "biceps" ? 10 : 20, muscle.id === "biceps" ? { exercise: "Supinated Curls", exerciseId: "supinated-curls", primaryMuscles: ["biceps"], restSeconds: 90 } : {}));
+  state.coachGlobalGrowthMode = "soft";
+  var soft = buildTodayPlan(60).sessionPlan.items.find((item) => item.muscle.id === "biceps");
+  state.coachGlobalGrowthMode = "medium";
+  var medium = buildTodayPlan(60).sessionPlan.items.find((item) => item.muscle.id === "biceps");
+  state.coachGlobalGrowthMode = "aggressive";
+  var aggressive = buildTodayPlan(60).sessionPlan.items.find((item) => item.muscle.id === "biceps");
+  ({
+    softSets: soft?.sets || 0,
+    mediumSets: medium?.sets || 0,
+    aggressiveSets: aggressive?.sets || 0,
+    aggressiveMode: aggressive?.growthMode,
+    why: buildTodayPlan(60).why.join(" ")
+  });
+`);
+
+assert(globalGrowthModesChangeSets.softSets < globalGrowthModesChangeSets.mediumSets, `Expected Medium to prescribe more Biceps sets than Soft, got soft=${globalGrowthModesChangeSets.softSets}, medium=${globalGrowthModesChangeSets.mediumSets}`);
+assert(globalGrowthModesChangeSets.mediumSets <= globalGrowthModesChangeSets.aggressiveSets, `Expected Aggressive to prescribe at least Medium Biceps sets, got medium=${globalGrowthModesChangeSets.mediumSets}, aggressive=${globalGrowthModesChangeSets.aggressiveSets}`);
+assert.strictEqual(globalGrowthModesChangeSets.aggressiveMode, "aggressive", `Expected inherited aggressive global mode, got ${globalGrowthModesChangeSets.aggressiveMode}`);
+assert(globalGrowthModesChangeSets.why.includes("Aggressive plan intensity"), `Expected Why this? to include global plan intensity, got ${globalGrowthModesChangeSets.why}`);
+
+const belowFloorModeDifferentiation = runScenario(`
+  ${resetAndHelpers}
+  state.settings.customExercises = [
+    { id: "supinated-curls", name: "Supinated Curls", primaryMuscles: ["biceps"], secondaryMuscles: [], equipment: "dumbbells", reps: "8-15", rest: "60-120 sec", cue: "Curl.", userCreated: true },
+    ...muscleGroups.filter((muscle) => muscle.id !== "biceps").map((muscle) => ({
+      id: "custom-" + muscle.id,
+      name: muscle.label + " Exercise",
+      primaryMuscles: [muscle.id],
+      secondaryMuscles: [],
+      equipment: "dumbbells",
+      reps: "8-12",
+      rest: "90-180 sec",
+      cue: "Test exercise for " + muscle.label,
+      userCreated: true
+    }))
+  ];
+  state.workouts = muscleGroups.map((muscle) => makeWorkout(muscle, 2, muscle.id === "biceps" ? 8 : 20, muscle.id === "biceps" ? { exercise: "Supinated Curls", exerciseId: "supinated-curls", primaryMuscles: ["biceps"], restSeconds: 90 } : {}));
+  state.coachTargetMuscles = ["biceps"];
+  state.coachGlobalGrowthMode = "soft";
+  var soft = buildTodayPlan(60).sessionPlan.items.find((item) => item.muscle.id === "biceps");
+  state.coachGlobalGrowthMode = "medium";
+  var medium = buildTodayPlan(60).sessionPlan.items.find((item) => item.muscle.id === "biceps");
+  state.coachGlobalGrowthMode = "aggressive";
+  var aggressive = buildTodayPlan(60).sessionPlan.items.find((item) => item.muscle.id === "biceps");
+  ({
+    softSets: soft?.sets || 0,
+    mediumSets: medium?.sets || 0,
+    aggressiveSets: aggressive?.sets || 0,
+    softProjected: soft ? soft.muscle.sets + soft.sets : 0,
+    mediumProjected: medium ? medium.muscle.sets + medium.sets : 0,
+    aggressiveProjected: aggressive ? aggressive.muscle.sets + aggressive.sets : 0
+  });
+`);
+
+assert.strictEqual(belowFloorModeDifferentiation.softProjected, 10, `Expected Soft Biceps to clear the floor only, got projected ${belowFloorModeDifferentiation.softProjected}`);
+assert(belowFloorModeDifferentiation.mediumSets > belowFloorModeDifferentiation.softSets, `Expected Medium Biceps to exceed Soft below-floor sets, got soft=${belowFloorModeDifferentiation.softSets}, medium=${belowFloorModeDifferentiation.mediumSets}`);
+assert(belowFloorModeDifferentiation.aggressiveSets >= belowFloorModeDifferentiation.mediumSets, `Expected Aggressive Biceps to match or exceed Medium below-floor sets, got medium=${belowFloorModeDifferentiation.mediumSets}, aggressive=${belowFloorModeDifferentiation.aggressiveSets}`);
+
+const modeAwarePerExerciseCaps = runScenario(`
+  ${resetAndHelpers}
+  state.settings.customExercises = [
+    { id: "calve-raises", name: "Calve Raises", primaryMuscles: ["calves"], secondaryMuscles: [], equipment: "machine", reps: "8-15", rest: "60-120 sec", cue: "Raise.", userCreated: true },
+    ...muscleGroups.filter((muscle) => muscle.id !== "calves").map((muscle) => ({
+      id: "custom-" + muscle.id,
+      name: muscle.label + " Exercise",
+      primaryMuscles: [muscle.id],
+      secondaryMuscles: [],
+      equipment: "dumbbells",
+      reps: "8-12",
+      rest: "90-180 sec",
+      cue: "Test exercise for " + muscle.label,
+      userCreated: true
+    }))
+  ];
+  state.workouts = muscleGroups.map((muscle) => makeWorkout(muscle, 2, muscle.id === "calves" ? 10 : 20, muscle.id === "calves" ? { exercise: "Calve Raises", exerciseId: "calve-raises", primaryMuscles: ["calves"], restSeconds: 90 } : {}));
+  state.coachTargetMuscles = ["calves"];
+  state.coachGlobalGrowthMode = "soft";
+  var soft = buildTodayPlan(60).sessionPlan.items.find((item) => item.muscle.id === "calves");
+  state.coachGlobalGrowthMode = "medium";
+  var medium = buildTodayPlan(60).sessionPlan.items.find((item) => item.muscle.id === "calves");
+  state.coachGlobalGrowthMode = "aggressive";
+  var aggressive = buildTodayPlan(60).sessionPlan.items.find((item) => item.muscle.id === "calves");
+  ({
+    softSets: soft?.sets || 0,
+    mediumSets: medium?.sets || 0,
+    aggressiveSets: aggressive?.sets || 0
+  });
+`);
+
+assert(modeAwarePerExerciseCaps.softSets < modeAwarePerExerciseCaps.mediumSets, `Expected Medium Calves to exceed Soft, got soft=${modeAwarePerExerciseCaps.softSets}, medium=${modeAwarePerExerciseCaps.mediumSets}`);
+assert(modeAwarePerExerciseCaps.aggressiveSets > modeAwarePerExerciseCaps.mediumSets, `Expected Aggressive Calves to exceed the old 8-set Medium cap, got medium=${modeAwarePerExerciseCaps.mediumSets}, aggressive=${modeAwarePerExerciseCaps.aggressiveSets}`);
+
 const targetSelectorReset = runScenario(`
   ${resetAndHelpers}
   state.coachTargetMuscles = ["biceps", "triceps"];
@@ -561,6 +688,7 @@ assert(targetSelectorReset.hasAggressive, "Expected per-muscle growth mode contr
 
 const perMuscleGrowthModes = runScenario(`
   ${resetAndHelpers}
+  state.coachGlobalGrowthMode = "aggressive";
   state.coachTargetMuscles = ["chest", "quads"];
   state.coachGrowthModes = { chest: "aggressive", quads: "soft" };
   state.workouts = muscleGroups.map((muscle) => makeWorkout(muscle, 2, muscle.id === "quads" ? 11 : muscle.id === "chest" ? 18 : 20));
@@ -579,7 +707,7 @@ const perMuscleGrowthModes = runScenario(`
 assert.strictEqual(perMuscleGrowthModes.chestMode, "aggressive", `Expected Chest to use aggressive mode, got ${perMuscleGrowthModes.chestMode}`);
 assert.strictEqual(perMuscleGrowthModes.quadsMode, "soft", `Expected Quads to use soft mode, got ${perMuscleGrowthModes.quadsMode}`);
 assert(perMuscleGrowthModes.chestProjected > perMuscleGrowthModes.quadsProjected, `Expected aggressive Chest to receive more upper-zone volume than soft Quads, got chest=${perMuscleGrowthModes.chestProjected} quads=${perMuscleGrowthModes.quadsProjected}`);
-assert(perMuscleGrowthModes.why.includes("Chest Aggressive") && perMuscleGrowthModes.why.includes("Quads Soft"), `Expected Why this? to include per-muscle modes, got ${perMuscleGrowthModes.why}`);
+assert(perMuscleGrowthModes.why.includes("Chest Aggressive override") && perMuscleGrowthModes.why.includes("Quads Soft override"), `Expected Why this? to include per-muscle overrides, got ${perMuscleGrowthModes.why}`);
 
 const targetScrollRestore = runScenario(`
   var originalQuerySelector = document.querySelector;

@@ -1095,6 +1095,7 @@ textarea {
 }
 
 .coach-timeframe-card,
+.coach-growth-card,
 .coach-target-card {
   display: grid;
   gap: 10px;
@@ -1115,6 +1116,10 @@ textarea {
 .coach-timeframe-options::-webkit-scrollbar,
 .coach-target-options::-webkit-scrollbar {
   display: none;
+}
+
+.coach-global-growth-options {
+  width: 100%;
 }
 
 .coach-target-controls {
