@@ -160,9 +160,9 @@ assert(!appCode.includes('selectedExercise: "Push-up"'), "Expected Log startup n
 assert(!appCode.includes('showBanner("Unsaved draft restored."'), "Expected startup draft recovery not to show a top banner.");
 assert(appCode.includes("notifyMetricSaved"), "Expected metrics saves to use a dedicated bottom-only notification helper.");
 assert(!stylesCode.includes(".mobile-quick-toggle"), "Expected floating quick action button styling to be removed.");
-assert(indexCode.includes("v=1.5.29"), "Expected index shell references to use bumped app version.");
+assert(indexCode.includes("v=1.5.30"), "Expected index shell references to use bumped app version.");
 assert(!indexCode.includes('id="app" class="app-content" aria-live'), "Expected broad app aria-live to be removed in favor of targeted live regions.");
-assert(serviceWorkerCode.includes("trainwise-cache-v51"), "Expected service worker cache version bump.");
+assert(serviceWorkerCode.includes("trainwise-cache-v52"), "Expected service worker cache version bump.");
 
 const nutritionQuickTotals = runScenario(`
   ${reset}
@@ -1282,6 +1282,34 @@ assert(collapsibleLongScreens.today.includes("dashboard-lowestSets-panel") && co
 assert(collapsibleLongScreens.today.includes("dashboard-bodyWeight-panel") && collapsibleLongScreens.today.includes("<summary><span>Body weight</span>"), "Expected Today body weight widget to be collapsible.");
 assert(collapsibleLongScreens.today.includes("dashboard-protein-panel") && collapsibleLongScreens.today.includes("<summary><span>Protein</span>"), "Expected Today protein widget to be collapsible.");
 assert(collapsibleLongScreens.today.includes("coach-action dashboard-widget") && !collapsibleLongScreens.today.includes("dashboard-nextLift-panel"), "Expected Next best lift to remain a normal card.");
+
+const historyCollapseSupport = runScenario(`
+  ${reset}
+  state.workouts = [
+    makeWorkout({ id: "h1", date: "2026-06-16", exercise: "Bench Press", exerciseId: "custom-bench" }),
+    makeWorkout({ id: "h2", date: "2026-06-15", exercise: "Cable Row", exerciseId: "custom-row", primaryMuscles: ["back"], secondaryMuscles: ["biceps"] })
+  ];
+  state.historyMode = "exercises";
+  var list = renderHistory();
+  state.historyMode = "dates";
+  var dates = renderHistory();
+  state.historyExercise = "Bench Press";
+  var detail = renderHistory();
+  ({
+    list,
+    dates,
+    detail
+  });
+`);
+
+assert(historyCollapseSupport.list.includes("history-filter-panel") && historyCollapseSupport.list.includes("collapsible-panel"), "Expected History search/filter panel to be collapsible.");
+assert(historyCollapseSupport.list.includes("history-exercises-panel") && historyCollapseSupport.list.includes("<summary><span>Exercise records</span>"), "Expected History exercise records to be collapsible.");
+assert(historyCollapseSupport.dates.includes("history-date-panel") && historyCollapseSupport.dates.includes("<summary><span>Browse by date</span>"), "Expected History date browser to be collapsible.");
+assert(historyCollapseSupport.detail.includes("history-summary-panel") && historyCollapseSupport.detail.includes("<summary><span>Exercise summary</span>"), "Expected History detail summary to be collapsible.");
+assert(historyCollapseSupport.detail.includes("history-load-panel") && historyCollapseSupport.detail.includes("<summary><span>Load volume</span>"), "Expected History load chart to be collapsible.");
+assert(historyCollapseSupport.detail.includes("history-e1rm-panel") && historyCollapseSupport.detail.includes("<summary><span>Estimated 1RM</span>"), "Expected History e1RM chart to be collapsible.");
+assert(historyCollapseSupport.detail.includes("history-sessions-panel") && historyCollapseSupport.detail.includes("<summary><span>Logged sessions</span>"), "Expected History session list to be collapsible.");
+assert(historyCollapseSupport.detail.includes("history-session-card collapsible-panel"), "Expected individual History session cards to use collapse affordance styling.");
 
 const backupPreviewSummary = runScenario(`
   ${reset}

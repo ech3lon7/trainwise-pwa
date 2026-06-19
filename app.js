@@ -3,7 +3,7 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 2;
 const STORES = ["workouts", "metrics", "settings"];
-const APP_VERSION = "1.5.29";
+const APP_VERSION = "1.5.30";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 const DRAFT_RECOVERY_KEY = "trainwise-draft-recovery-v1";
 const COPIED_COACH_PLAN_KEY = "trainwise-copied-coach-plan-v1";
@@ -3420,7 +3420,7 @@ function exerciseHistoryScreen(exerciseName) {
       ${sessions.length ? sessions.map((entry) => {
         const rows = setRowsFromWorkout(entry);
         return `
-          <details class="history-session-card">
+          <details class="history-session-card collapsible-panel">
             <summary>
               <strong>${escapeHtml(entry.date)}</strong>
               <span>${rows.length} sets - best ${bestSetLabel(entry)} - ${fmt(workoutVolume(entry))} lb load volume</span>
@@ -4045,39 +4045,43 @@ function renderHistoryModeSegment() {
 
 function renderHistoryExercisesMode(exercises) {
   return `
-    <section class="section form-panel history-filter-panel">
+    <details class="section form-panel collapsible-panel history-filter-panel" open>
+      <summary><span>Search exercises</span><small>${exercises.length} match${exercises.length === 1 ? "" : "es"}</small></summary>
       <div class="field history-search-field">
         <label for="history-search">Search exercises</label>
         <input id="history-search" class="search-input" data-history-search value="${escapeHtml(state.historySearch)}" placeholder="Bench press, row, squat">
       </div>
-    </section>
+    </details>
 
-    <section class="section history-exercise-grid">
-      ${exercises.length ? exercises.map((exercise) => {
-        const meta = resolveExerciseMeta(exercise);
-        const stats = exerciseStats(exercise);
-        const indicator = progressiveOverloadIndicator(exercise);
-        const volumeSeries = seriesFromWorkouts(exercise, workoutVolume);
-        return `
-          <button class="history-exercise-card" type="button" data-action="history-select-exercise" data-exercise="${escapeHtml(exercise)}">
-            <div class="history-card-top">
-              <div>
-                <strong>${escapeHtml(exercise)}</strong>
-                ${exerciseMuscleBadges(meta)}
+    <details class="section chart-panel collapsible-panel history-exercises-panel" open>
+      <summary><span>Exercise records</span><small>${exercises.length} exercise${exercises.length === 1 ? "" : "s"}</small></summary>
+      <div class="history-exercise-grid">
+        ${exercises.length ? exercises.map((exercise) => {
+          const meta = resolveExerciseMeta(exercise);
+          const stats = exerciseStats(exercise);
+          const indicator = progressiveOverloadIndicator(exercise);
+          const volumeSeries = seriesFromWorkouts(exercise, workoutVolume);
+          return `
+            <button class="history-exercise-card" type="button" data-action="history-select-exercise" data-exercise="${escapeHtml(exercise)}">
+              <div class="history-card-top">
+                <div>
+                  <strong>${escapeHtml(exercise)}</strong>
+                  ${exerciseMuscleBadges(meta)}
+                </div>
+                <span class="history-overload-indicator ${indicator.tone}" title="${escapeHtml(indicator.label)}">${indicator.symbol}</span>
               </div>
-              <span class="history-overload-indicator ${indicator.tone}" title="${escapeHtml(indicator.label)}">${indicator.symbol}</span>
-            </div>
-            ${miniSparkline(volumeSeries.slice(-8), "#9b8cff")}
-            <div class="history-stats-row">
-              <span class="history-stat"><strong>${stats.sessions}</strong><small>sessions</small></span>
-              <span class="history-stat"><strong>${fmt(stats.totalLoadVolume)}</strong><small>lb tonnage</small></span>
-              <span class="history-stat"><strong>${escapeHtml(bestSetLabel(stats.entries[stats.entries.length - 1] || {}))}</strong><small>latest best</small></span>
-            </div>
-            <div class="history-pr-badge">PR: ${stats.bestSet ? `${fmt(stats.bestSet.weight, 1)} x ${fmt(stats.bestSet.reps)} on ${escapeHtml(stats.bestSet.date)}` : "not yet"}</div>
-          </button>
-        `;
-      }).join("") : `<div class="empty">No exercise history matches that search.</div>`}
-    </section>
+              ${miniSparkline(volumeSeries.slice(-8), "#9b8cff")}
+              <div class="history-stats-row">
+                <span class="history-stat"><strong>${stats.sessions}</strong><small>sessions</small></span>
+                <span class="history-stat"><strong>${fmt(stats.totalLoadVolume)}</strong><small>lb tonnage</small></span>
+                <span class="history-stat"><strong>${escapeHtml(bestSetLabel(stats.entries[stats.entries.length - 1] || {}))}</strong><small>latest best</small></span>
+              </div>
+              <div class="history-pr-badge">PR: ${stats.bestSet ? `${fmt(stats.bestSet.weight, 1)} x ${fmt(stats.bestSet.reps)} on ${escapeHtml(stats.bestSet.date)}` : "not yet"}</div>
+            </button>
+          `;
+        }).join("") : `<div class="empty">No exercise history matches that search.</div>`}
+      </div>
+    </details>
   `;
 }
 
@@ -4086,7 +4090,8 @@ function renderHistoryDatesMode() {
   const selectedDate = effectiveHistoryDate(recentDates);
   const dateWorkouts = selectedDate ? workoutsForDate(selectedDate) : [];
   return `
-    <section class="section form-panel history-date-panel">
+    <details class="section form-panel collapsible-panel history-date-panel" open>
+      <summary><span>Browse by date</span><small>${selectedDate ? formatShortDate(selectedDate) : "no workouts"}</small></summary>
       ${recentDates.length ? `
         <div class="history-date-chip-row" aria-label="Recent workout dates">
           ${recentDates.map((date) => `
@@ -4109,7 +4114,7 @@ function renderHistoryDatesMode() {
           ` : `<div class="empty">No workouts logged on ${escapeHtml(selectedDate)}.</div>`}
         </div>
       ` : `<div class="empty">No workouts logged yet.</div>`}
-    </section>
+    </details>
   `;
 }
 
@@ -4150,51 +4155,57 @@ function renderHistoryDetail(exerciseName) {
       ${exerciseMuscleBadges(meta)}
     </section>
 
-    <section class="section grid four history-summary-grid">
-      <div class="stat"><span class="label">Sessions</span><strong class="value">${stats.sessions}</strong><span class="hint">${escapeHtml(stats.firstDate || "--")} to ${escapeHtml(stats.lastDate || "--")}</span></div>
-      <div class="stat"><span class="label">Load volume</span><strong class="value">${fmt(stats.totalLoadVolume)}</strong><span class="hint">lb total tonnage</span></div>
-      <div class="stat"><span class="label">Best set</span><strong class="value">${stats.bestSet ? `${fmt(stats.bestSet.weight, 1)} x ${fmt(stats.bestSet.reps)}` : "--"}</strong><span class="hint">${escapeHtml(stats.bestSet?.date || "No PR yet")}</span></div>
-      <div class="stat"><span class="label">Best session</span><strong class="value">${fmt(stats.bestLoadVolume)}</strong><span class="hint">${escapeHtml(stats.bestLoadVolumeDate || "No tonnage yet")}</span></div>
-    </section>
+    <details class="section chart-panel collapsible-panel history-summary-panel" open>
+      <summary><span>Exercise summary</span><small>${stats.sessions} session${stats.sessions === 1 ? "" : "s"}</small></summary>
+      <div class="grid four history-summary-grid">
+        <div class="stat"><span class="label">Sessions</span><strong class="value">${stats.sessions}</strong><span class="hint">${escapeHtml(stats.firstDate || "--")} to ${escapeHtml(stats.lastDate || "--")}</span></div>
+        <div class="stat"><span class="label">Load volume</span><strong class="value">${fmt(stats.totalLoadVolume)}</strong><span class="hint">lb total tonnage</span></div>
+        <div class="stat"><span class="label">Best set</span><strong class="value">${stats.bestSet ? `${fmt(stats.bestSet.weight, 1)} x ${fmt(stats.bestSet.reps)}` : "--"}</strong><span class="hint">${escapeHtml(stats.bestSet?.date || "No PR yet")}</span></div>
+        <div class="stat"><span class="label">Best session</span><strong class="value">${fmt(stats.bestLoadVolume)}</strong><span class="hint">${escapeHtml(stats.bestLoadVolumeDate || "No tonnage yet")}</span></div>
+      </div>
+    </details>
 
-    <section class="section grid two">
-      <div class="chart-panel">
-        <div class="chart-header"><h3>Load volume</h3><span class="muted small">sets x reps x load</span></div>
+    <section class="section grid two history-chart-grid">
+      <details class="chart-panel collapsible-panel history-load-panel" open>
+        <summary><span>Load volume</span><small>sets x reps x load</small></summary>
         ${lineChart(seriesFromWorkouts(exerciseName, workoutVolume), "#9b8cff", " lb")}
-      </div>
-      <div class="chart-panel">
-        <div class="chart-header"><h3>Estimated 1RM</h3><span class="muted small">best set estimate</span></div>
+      </details>
+      <details class="chart-panel collapsible-panel history-e1rm-panel" open>
+        <summary><span>Estimated 1RM</span><small>best set estimate</small></summary>
         ${lineChart(seriesFromWorkouts(exerciseName, e1rm), "#ff6b5f", " lb")}
-      </div>
+      </details>
     </section>
 
-    <section class="section history-session-list">
-      ${entries.length ? entries.map((entry) => {
-        const rows = setRowsFromWorkout(entry);
-        return `
-          <details class="history-session-card">
-            <summary>
-              <strong>${escapeHtml(entry.date)}</strong>
-              <span>${rows.length} sets - best ${bestSetLabel(entry)} - ${fmt(workoutVolume(entry))} lb load volume</span>
-            </summary>
-            <div class="history-set-grid">
-              ${rows.map((row, index) => `
-                <div class="history-set">
-                  <span>Set ${index + 1}</span>
-                  <strong>${fmt(row.weight)} lb x ${fmt(row.reps)}</strong>
-                  <small>${row.rir === null ? "--" : fmt(row.rir, 1)} RIR - Rest ${formatRest(row.restSeconds)}</small>
-                </div>
-              `).join("")}
-            </div>
-            <div class="row-actions">
-              <button class="ghost-mini" type="button" data-action="edit-workout" data-id="${escapeHtml(entry.id)}">Edit</button>
-              <button class="delete-small" type="button" aria-label="Delete workout" data-action="delete-workout" data-id="${escapeHtml(entry.id)}">x</button>
-            </div>
-            ${entry.notes ? `<p class="muted small">${escapeHtml(entry.notes)}</p>` : ""}
-          </details>
-        `;
-      }).join("") : `<div class="empty">No recorded sessions for this exercise yet.</div>`}
-    </section>
+    <details class="section chart-panel collapsible-panel history-sessions-panel" open>
+      <summary><span>Logged sessions</span><small>${entries.length} session${entries.length === 1 ? "" : "s"}</small></summary>
+      <div class="history-session-list">
+        ${entries.length ? entries.map((entry) => {
+          const rows = setRowsFromWorkout(entry);
+          return `
+            <details class="history-session-card collapsible-panel">
+              <summary>
+                <strong>${escapeHtml(entry.date)}</strong>
+                <span>${rows.length} sets - best ${bestSetLabel(entry)} - ${fmt(workoutVolume(entry))} lb load volume</span>
+              </summary>
+              <div class="history-set-grid">
+                ${rows.map((row, index) => `
+                  <div class="history-set">
+                    <span>Set ${index + 1}</span>
+                    <strong>${fmt(row.weight)} lb x ${fmt(row.reps)}</strong>
+                    <small>${row.rir === null ? "--" : fmt(row.rir, 1)} RIR - Rest ${formatRest(row.restSeconds)}</small>
+                  </div>
+                `).join("")}
+              </div>
+              <div class="row-actions">
+                <button class="ghost-mini" type="button" data-action="edit-workout" data-id="${escapeHtml(entry.id)}">Edit</button>
+                <button class="delete-small" type="button" aria-label="Delete workout" data-action="delete-workout" data-id="${escapeHtml(entry.id)}">x</button>
+              </div>
+              ${entry.notes ? `<p class="muted small">${escapeHtml(entry.notes)}</p>` : ""}
+            </details>
+          `;
+        }).join("") : `<div class="empty">No recorded sessions for this exercise yet.</div>`}
+      </div>
+    </details>
   `;
 }
 
