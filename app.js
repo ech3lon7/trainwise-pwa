@@ -3,7 +3,7 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 2;
 const STORES = ["workouts", "metrics", "settings"];
-const APP_VERSION = "1.5.31";
+const APP_VERSION = "1.5.32";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 const DRAFT_RECOVERY_KEY = "trainwise-draft-recovery-v1";
 const COPIED_COACH_PLAN_KEY = "trainwise-copied-coach-plan-v1";
@@ -2060,8 +2060,8 @@ function planSetGap(target, allowHighVolume = false, growthMode = coachGrowthMod
   return Math.max(0, Math.ceil(planSetCeilingForTarget(target, allowHighVolume, growthMode) - target.sets));
 }
 
-function plannedSetGap(item, allowHighVolume = false) {
-  return Math.max(0, Math.ceil(planSetCeilingForTarget(item.muscle, allowHighVolume, item.growthMode) - (item.muscle.sets + item.sets)));
+function plannedSetGap(item, allowHighVolume = false, growthMode = item.growthMode) {
+  return Math.max(0, Math.ceil(planSetCeilingForTarget(item.muscle, allowHighVolume, growthMode) - (item.muscle.sets + item.sets)));
 }
 
 function planPriorityReason(item) {
@@ -2151,18 +2151,71 @@ function plannedExerciseMinutes(item, sets = item.sets) {
   return estimateExerciseMinutes(item.exercise, sets);
 }
 
+function coachModePlanningBehavior(growthMode, caps, isTarget = false) {
+  const option = coachGrowthModeOption(growthMode);
+  const mode = option.id;
+  const maxSets = mode === "soft"
+    ? Math.max(caps.minSets, caps.maxSets - 2)
+    : mode === "aggressive"
+      ? caps.maxSets + (isTarget ? 3 : 2)
+      : caps.maxSets;
+  return {
+    ...option,
+    maxSets,
+    startSets: Math.max(caps.minSets, option.startSets || caps.minSets),
+    fillRank: option.rank || 0
+  };
+}
+
 function maxSetsForMode(caps, growthMode, isTarget = false) {
-  const mode = coachGrowthModeOption(growthMode).id;
-  if (mode === "soft") return Math.max(caps.minSets, caps.maxSets - 2);
-  if (mode === "aggressive") return caps.maxSets + (isTarget ? 3 : 2);
-  return caps.maxSets;
+  const mode = coachModePlanningBehavior(growthMode, caps, isTarget);
+  return mode.maxSets;
+}
+
+function modeAdjustedGrowthMode(item, floorGrowthMode = "") {
+  return floorGrowthMode && item.growthMode === "aggressive" ? floorGrowthMode : item.growthMode;
+}
+
+function totalPlanSets(plan) {
+  return (plan?.items || []).reduce((sum, item) => sum + (Number(item.sets) || 0), 0);
+}
+
+function planItemsReducedFromBaseline(plan, baselinePlan) {
+  const baselineByMuscle = new Map((baselinePlan?.items || []).map((item) => [item.muscle.id, item]));
+  return (plan?.items || []).filter((item) => {
+    const baseline = baselineByMuscle.get(item.muscle.id);
+    return baseline && item.sets < baseline.sets;
+  });
+}
+
+function aggressivePlanLimitingReason(plan, baselinePlan) {
+  if (!plan || !baselinePlan) return "";
+  const lowerItems = planItemsReducedFromBaseline(plan, baselinePlan);
+  if (totalPlanSets(plan) > totalPlanSets(baselinePlan) && !lowerItems.length) return "";
+  if (plan.totalMinutes >= plan.hardLimitMinutes || baselinePlan.totalMinutes >= baselinePlan.hardLimitMinutes) {
+    return "Aggressive held at Medium-level volume because the selected timeframe is already filled.";
+  }
+  if (plan.performanceNotes?.length) {
+    return "Aggressive held at Medium-level volume because performance or deload safeguards are active.";
+  }
+  if (plan.missing?.length) {
+    return "Aggressive held at Medium-level volume because library-safe coverage is missing.";
+  }
+  if (plan.deprioritized?.length || baselinePlan.deprioritized?.length) {
+    return "Aggressive held at Medium-level volume because remaining useful muscles are inside the 2-day recovery gap.";
+  }
+  const atCeiling = (plan.items || []).length && plan.items.every((item) => plannedSetGap(item, item.phase === "high-volume") <= 0);
+  if (atCeiling) {
+    return "Aggressive held at Medium-level volume because planned muscles are already near the upper growth zone.";
+  }
+  return "Aggressive held at Medium-level volume because current guardrails leave no recoverable extra volume.";
 }
 
 function initialSetsForPlanTarget(target, caps, allowHighVolume = false, growthMode = coachGrowthModeForMuscle(target.id)) {
   const gap = planSetGap(target, allowHighVolume, growthMode);
   if (!gap) return 0;
-  const desiredStart = coachGrowthModeOption(growthMode).startSets || caps.minSets;
-  return Math.max(1, Math.min(maxSetsForMode(caps, growthMode), gap, Math.max(caps.minSets, desiredStart)));
+  const behavior = coachModePlanningBehavior(growthMode, caps);
+  return Math.max(1, Math.min(behavior.maxSets, gap, behavior.startSets));
 }
 
 function maxSetsForPlanTarget(target, caps, fillToTime = false, allowHighVolume = false, growthMode = coachGrowthModeForMuscle(target.id), isTarget = false) {
@@ -2171,6 +2224,13 @@ function maxSetsForPlanTarget(target, caps, fillToTime = false, allowHighVolume 
   if (!targetGap) return 0;
   if (fillToTime) return Math.max(1, Math.min(modeMaxSets, targetGap));
   return Math.max(1, Math.min(modeMaxSets, Math.max(1, Math.ceil(target.deficit))));
+}
+
+function mediumComparisonGrowthModes(growthModes = {}) {
+  return Object.fromEntries(Object.entries(growthModes).map(([muscleId, mode]) => [
+    muscleId,
+    mode === "aggressive" ? "medium" : mode
+  ]));
 }
 
 function sessionShortfallReason({ totalMinutes, cappedLimit, targetFloor, allStats, items, missing }) {
@@ -2313,22 +2373,28 @@ function buildSessionPlan(limitMinutes = SESSION_LIMIT_MINUTES, options = {}) {
 
   const addSetsToExisting = (fillOptions = {}) => {
     const allowHighVolume = fillOptions.allowHighVolume === true;
+    const floorGrowthMode = fillOptions.floorGrowthMode || "";
     let changed = true;
     while (changed) {
       changed = false;
       const eligible = items
-        .filter((item) => item.sets < maxSetsForPlanTarget(
-          item.muscle,
-          caps,
-          allowHighVolume || (!restart && (optimumCandidates.length > 0 || targetMuscles.length > 0)),
-          allowHighVolume,
-          item.growthMode,
-          isCoachTargetMuscle(item.muscle.id, targetMuscles)
-        ))
+        .map((item) => {
+          const effectiveGrowthMode = modeAdjustedGrowthMode(item, floorGrowthMode);
+          const maxSets = maxSetsForPlanTarget(
+            item.muscle,
+            caps,
+            allowHighVolume || (!restart && (optimumCandidates.length > 0 || targetMuscles.length > 0)),
+            allowHighVolume,
+            effectiveGrowthMode,
+            isCoachTargetMuscle(item.muscle.id, targetMuscles)
+          );
+          return { item, effectiveGrowthMode, maxSets };
+        })
+        .filter(({ item, maxSets }) => item.sets < maxSets)
         .sort((a, b) => (
-          Number(isCoachTargetMuscle(b.muscle.id, targetMuscles)) - Number(isCoachTargetMuscle(a.muscle.id, targetMuscles))
-        ) || (coachGrowthModeRank(b.growthMode) - coachGrowthModeRank(a.growthMode)) || (plannedSetGap(b, allowHighVolume) - plannedSetGap(a, allowHighVolume)) || (plannedOptimumGap(b) - plannedOptimumGap(a)) || (b.muscle.deficit - a.muscle.deficit) || (a.sets - b.sets) || (plannedExerciseMinutes(a, a.sets + 1) - plannedExerciseMinutes(b, b.sets + 1)));
-      for (const item of eligible) {
+          Number(isCoachTargetMuscle(b.item.muscle.id, targetMuscles)) - Number(isCoachTargetMuscle(a.item.muscle.id, targetMuscles))
+        ) || (coachGrowthModeRank(b.item.growthMode) - coachGrowthModeRank(a.item.growthMode)) || (plannedSetGap(b.item, allowHighVolume, b.effectiveGrowthMode) - plannedSetGap(a.item, allowHighVolume, a.effectiveGrowthMode)) || (plannedOptimumGap(b.item) - plannedOptimumGap(a.item)) || (b.item.muscle.deficit - a.item.muscle.deficit) || (a.item.sets - b.item.sets) || (plannedExerciseMinutes(a.item, a.item.sets + 1) - plannedExerciseMinutes(b.item, b.item.sets + 1)));
+      for (const { item } of eligible) {
         const nextMinutes = plannedExerciseMinutes(item, item.sets + 1);
         const extraMinutes = nextMinutes - item.minutes;
         if (totalMinutes + extraMinutes > hardLimit) continue;
@@ -2342,6 +2408,9 @@ function buildSessionPlan(limitMinutes = SESSION_LIMIT_MINUTES, options = {}) {
     }
   };
 
+  if (globalGrowthMode === "aggressive" || items.some((item) => item.growthMode === "aggressive")) {
+    addSetsToExisting({ floorGrowthMode: "medium" });
+  }
   addSetsToExisting();
 
   if (!restart && totalMinutes < targetFloor) {
@@ -2399,6 +2468,16 @@ function buildTodayPlan(limitMinutes = selectedCoachTimeframeMinutes()) {
   const growthModes = selectedCoachGrowthModes(targetMuscles);
   const ranked = rankedCoachMuscles(planningContext);
   const sessionPlan = buildSessionPlan(limitMinutes, { restart, targetMuscles, globalGrowthMode, growthModes, context: planningContext });
+  const mediumComparisonPlan = globalGrowthMode === "aggressive" || Object.values(growthModes).includes("aggressive")
+    ? buildSessionPlan(limitMinutes, {
+      restart,
+      targetMuscles,
+      globalGrowthMode: globalGrowthMode === "aggressive" ? "medium" : globalGrowthMode,
+      growthModes: mediumComparisonGrowthModes(growthModes),
+      context: planningContext
+    })
+    : null;
+  const aggressiveLimitReason = aggressivePlanLimitingReason(sessionPlan, mediumComparisonPlan);
   const proteinAvg = getAverage("protein", 7);
   const protein = proteinTargets();
   const highVolume = ranked.filter((stat) => stat.sets > HYPERTROPHY.growthHigh);
@@ -2440,6 +2519,10 @@ function buildTodayPlan(limitMinutes = selectedCoachTimeframeMinutes()) {
   if (sessionPlan.shortfallReason) {
     notes.push(sessionPlan.shortfallReason);
     why.push(sessionPlan.shortfallReason);
+  }
+  if (aggressiveLimitReason) {
+    notes.push(aggressiveLimitReason);
+    why.push(aggressiveLimitReason);
   }
   if (sessionPlan.performanceNotes?.length) {
     notes.push(...sessionPlan.performanceNotes);
@@ -5244,7 +5327,7 @@ function coachDebugModeComparison() {
     ? { ...state.coachGrowthModes }
     : {};
   try {
-    return Object.fromEntries(COACH_GROWTH_MODE_OPTIONS.map((option) => {
+    const comparisons = Object.fromEntries(COACH_GROWTH_MODE_OPTIONS.map((option) => {
       state.coachGlobalGrowthMode = option.id;
       state.coachGrowthModes = {};
       const plan = buildTodayPlan(selectedCoachTimeframeMinutes());
@@ -5275,6 +5358,36 @@ function coachDebugModeComparison() {
         notes: summary.notes
       }];
     }));
+    if (comparisons.aggressive && comparisons.medium) {
+      const aggressivePlan = {
+        ...comparisons.aggressive,
+        items: comparisons.aggressive.items.map((item) => ({
+          ...item,
+          muscle: { id: item.muscleId, label: item.muscle, sets: 0 },
+          sets: Number(item.sets) || 0
+        })),
+        totalMinutes: comparisons.aggressive.totalMinutes,
+        hardLimitMinutes: (comparisons.aggressive.limitMinutes || selectedCoachTimeframeMinutes()) + COACH_TIME_TOLERANCE_MINUTES,
+        performanceNotes: comparisons.aggressive.performanceNotes,
+        missing: comparisons.aggressive.missing,
+        deprioritized: comparisons.aggressive.deprioritized
+      };
+      const mediumPlan = {
+        ...comparisons.medium,
+        items: comparisons.medium.items.map((item) => ({
+          ...item,
+          muscle: { id: item.muscleId, label: item.muscle, sets: 0 },
+          sets: Number(item.sets) || 0
+        })),
+        totalMinutes: comparisons.medium.totalMinutes,
+        hardLimitMinutes: (comparisons.medium.limitMinutes || selectedCoachTimeframeMinutes()) + COACH_TIME_TOLERANCE_MINUTES,
+        performanceNotes: comparisons.medium.performanceNotes,
+        missing: comparisons.medium.missing,
+        deprioritized: comparisons.medium.deprioritized
+      };
+      comparisons.aggressive.limitingReason = aggressivePlanLimitingReason(aggressivePlan, mediumPlan);
+    }
+    return comparisons;
   } finally {
     state.coachGlobalGrowthMode = originalMode;
     state.coachGrowthModes = originalGrowthModes;

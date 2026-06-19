@@ -722,6 +722,45 @@ const modeAwarePerExerciseCaps = runScenario(`
 assert(modeAwarePerExerciseCaps.softSets < modeAwarePerExerciseCaps.mediumSets, `Expected Medium Calves to exceed Soft, got soft=${modeAwarePerExerciseCaps.softSets}, medium=${modeAwarePerExerciseCaps.mediumSets}`);
 assert(modeAwarePerExerciseCaps.aggressiveSets > modeAwarePerExerciseCaps.mediumSets, `Expected Aggressive Calves to exceed the old 8-set Medium cap, got medium=${modeAwarePerExerciseCaps.mediumSets}, aggressive=${modeAwarePerExerciseCaps.aggressiveSets}`);
 
+const realisticModeComparisonExplainsAggressiveLimits = runScenario(`
+  ${resetAndHelpers}
+  state.workouts = [
+    makeWorkout(muscleGroups.find((muscle) => muscle.id === "chest"), 2, 10, { restSeconds: 120 }),
+    makeWorkout(muscleGroups.find((muscle) => muscle.id === "back"), 2, 12, { restSeconds: 90 }),
+    makeWorkout(muscleGroups.find((muscle) => muscle.id === "quads"), 2, 10, { restSeconds: 90 }),
+    makeWorkout(muscleGroups.find((muscle) => muscle.id === "abs"), 2, 15, { restSeconds: 75 }),
+    makeWorkout(muscleGroups.find((muscle) => muscle.id === "triceps"), 2, 13, { restSeconds: 75 }),
+    makeWorkout(muscleGroups.find((muscle) => muscle.id === "shoulders"), 1, 18, { restSeconds: 90 }),
+    makeWorkout(muscleGroups.find((muscle) => muscle.id === "glutes"), 1, 18, { restSeconds: 90 }),
+    makeWorkout(muscleGroups.find((muscle) => muscle.id === "calves"), 1, 18, { restSeconds: 75 }),
+    makeWorkout(muscleGroups.find((muscle) => muscle.id === "biceps"), 1, 19, { restSeconds: 75 }),
+    makeWorkout(muscleGroups.find((muscle) => muscle.id === "hamstrings"), 1, 20, { restSeconds: 90 })
+  ];
+  var comparison = coachDebugModeComparison();
+  var mediumByMuscle = Object.fromEntries(comparison.medium.items.map((item) => [item.muscleId, item.sets]));
+  var lowerAggressiveItems = comparison.aggressive.items
+    .filter((item) => mediumByMuscle[item.muscleId] && item.sets < mediumByMuscle[item.muscleId])
+    .map((item) => item.muscle + ":" + item.sets + "<" + mediumByMuscle[item.muscleId]);
+  ({
+    mediumSets: comparison.medium.totalSets,
+    aggressiveSets: comparison.aggressive.totalSets,
+    aggressiveReason: comparison.aggressive.limitingReason || "",
+    lowerAggressiveItems,
+    aggressiveItems: comparison.aggressive.items.map((item) => item.muscle + ":" + item.sets).join(", ")
+  });
+`);
+
+assert(
+  realisticModeComparisonExplainsAggressiveLimits.aggressiveSets >= realisticModeComparisonExplainsAggressiveLimits.mediumSets
+    || realisticModeComparisonExplainsAggressiveLimits.aggressiveReason.includes("Aggressive held"),
+  `Expected Aggressive to beat Medium or explain the guardrail, got medium=${realisticModeComparisonExplainsAggressiveLimits.mediumSets}, aggressive=${realisticModeComparisonExplainsAggressiveLimits.aggressiveSets}, reason=${realisticModeComparisonExplainsAggressiveLimits.aggressiveReason}, items=${realisticModeComparisonExplainsAggressiveLimits.aggressiveItems}`
+);
+assert(
+  realisticModeComparisonExplainsAggressiveLimits.lowerAggressiveItems.length === 0
+    || realisticModeComparisonExplainsAggressiveLimits.aggressiveReason.includes("Aggressive held"),
+  `Expected Aggressive not to quietly reduce planned muscles below Medium, got ${realisticModeComparisonExplainsAggressiveLimits.lowerAggressiveItems.join(", ")} with reason=${realisticModeComparisonExplainsAggressiveLimits.aggressiveReason}`
+);
+
 const targetSelectorReset = runScenario(`
   ${resetAndHelpers}
   state.coachTargetMuscles = ["biceps", "triceps"];
