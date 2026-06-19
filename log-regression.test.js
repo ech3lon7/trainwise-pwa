@@ -160,9 +160,9 @@ assert(!appCode.includes('selectedExercise: "Push-up"'), "Expected Log startup n
 assert(!appCode.includes('showBanner("Unsaved draft restored."'), "Expected startup draft recovery not to show a top banner.");
 assert(appCode.includes("notifyMetricSaved"), "Expected metrics saves to use a dedicated bottom-only notification helper.");
 assert(!stylesCode.includes(".mobile-quick-toggle"), "Expected floating quick action button styling to be removed.");
-assert(indexCode.includes("v=1.5.28"), "Expected index shell references to use bumped app version.");
+assert(indexCode.includes("v=1.5.29"), "Expected index shell references to use bumped app version.");
 assert(!indexCode.includes('id="app" class="app-content" aria-live'), "Expected broad app aria-live to be removed in favor of targeted live regions.");
-assert(serviceWorkerCode.includes("trainwise-cache-v50"), "Expected service worker cache version bump.");
+assert(serviceWorkerCode.includes("trainwise-cache-v51"), "Expected service worker cache version bump.");
 
 const nutritionQuickTotals = runScenario(`
   ${reset}
@@ -1328,5 +1328,43 @@ const supabasePasswordExport = runScenario(`
 
 assert(!("supabasePassword" in supabasePasswordExport), "Expected saved Supabase password to be excluded from backup exports.");
 assert(!("supabaseRememberPassword" in supabasePasswordExport), "Expected Supabase remember flag to be excluded from backup exports.");
+
+const coachDebugReport = runScenario(`
+  ${reset}
+  state.settings.supabasePassword = "secret-password";
+  state.settings.supabaseRememberPassword = true;
+  state.settings.supabaseAnonKey = "anon-secret";
+  state.settings.supabaseSession = { access_token: "access-secret", refresh_token: "refresh-secret" };
+  state.workouts = [makeWorkout({ id: "submitted-bench", date: todayISO() })];
+  state.draftDate = todayISO();
+  state.workoutDraft = [{
+    draftId: "draft-bench",
+    editingWorkoutId: null,
+    exercise: "Bench Press",
+    targetMuscle: "chest",
+    notes: "unsaved",
+    setRows: [{ weight: 125, reps: 10, rir: 1, restSeconds: 120 }]
+  }];
+  var report = buildCoachDebugReport();
+  var serialized = JSON.stringify(report);
+  ({
+    app: report.app,
+    notBackup: report.notBackup,
+    hasCoachPlan: Boolean(report.coach.todayPlan),
+    hasMuscleAudit: report.coach.muscleAudit.length > 0,
+    hasSubmitted: report.submitted.workoutCount,
+    hasDraftOnly: report.draftOnly.entries.length,
+    hasSecret: serialized.includes("secret-password") || serialized.includes("anon-secret") || serialized.includes("access-secret") || serialized.includes("refresh-secret")
+  });
+`);
+
+assert.strictEqual(coachDebugReport.app, "TrainWise Coach Debug Report", `Expected Coach debug report app label, got ${coachDebugReport.app}`);
+assert.strictEqual(coachDebugReport.notBackup, true, "Expected Coach debug report to mark itself as non-backup.");
+assert(coachDebugReport.hasCoachPlan, "Expected Coach debug report to include today's plan.");
+assert(coachDebugReport.hasMuscleAudit, "Expected Coach debug report to include muscle audit.");
+assert.strictEqual(coachDebugReport.hasSubmitted, 1, `Expected Coach debug report to include submitted workout count, got ${coachDebugReport.hasSubmitted}`);
+assert.strictEqual(coachDebugReport.hasDraftOnly, 1, `Expected Coach debug report to include draft-only entries separately, got ${coachDebugReport.hasDraftOnly}`);
+assert(appCode.includes('data-action="export-coach-debug"'), "Expected Settings to expose a Coach debug export action.");
+assert.strictEqual(coachDebugReport.hasSecret, false, "Expected Coach debug report to exclude Supabase secrets and sessions.");
 
 console.log("log regression tests passed");

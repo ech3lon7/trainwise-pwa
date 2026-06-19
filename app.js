@@ -3,9 +3,10 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 2;
 const STORES = ["workouts", "metrics", "settings"];
-const APP_VERSION = "1.5.28";
+const APP_VERSION = "1.5.29";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 const DRAFT_RECOVERY_KEY = "trainwise-draft-recovery-v1";
+const COPIED_COACH_PLAN_KEY = "trainwise-copied-coach-plan-v1";
 let dbOpenPromise = null;
 let chartId = 0;
 let reloadingForUpdate = false;
@@ -1626,13 +1627,7 @@ function coachPendingWorkoutEntries() {
 }
 
 function coachWorkoutEntries() {
-  const pending = coachPendingWorkoutEntries();
-  if (!pending.length) return state.workouts;
-  const editedIds = new Set(pending.map((entry) => entry.editingWorkoutId).filter(Boolean));
-  return [
-    ...state.workouts.filter((entry) => !editedIds.has(entry.id)),
-    ...pending
-  ];
+  return state.workouts;
 }
 
 function coachWeeklyWorkouts(workouts = coachWorkoutEntries()) {
@@ -1670,13 +1665,53 @@ function comparableRepDrop(current, previous) {
   }, 0);
 }
 
-function exerciseUnderperformed(current, previous) {
+function exerciseProgressEvidence(current, priorHistory = []) {
+  const rows = setRowsFromWorkout(current).filter((row) => row.weight > 0 && row.reps > 0);
+  const priorRows = priorHistory.flatMap((workout) => setRowsFromWorkout(workout)).filter((row) => row.weight > 0 && row.reps > 0);
+  const latestE1rm = e1rm(current);
+  const priorBestE1rm = priorHistory.reduce((best, workout) => Math.max(best, e1rm(workout)), 0);
+  const latestTopSet = bestSet(current);
+  const priorTopSetScore = priorHistory.reduce((best, workout) => Math.max(best, bestSet(workout)?.score || 0), 0);
+  const bestRepsByWeight = new Map();
+  priorRows.forEach((row) => {
+    const key = recordWeightKey(row.weight);
+    bestRepsByWeight.set(key, Math.max(bestRepsByWeight.get(key) || 0, row.reps));
+  });
+  const priorMaxWeight = priorRows.reduce((max, row) => Math.max(max, row.weight), 0);
+  const repPrRows = rows.filter((row) => {
+    const priorReps = bestRepsByWeight.get(recordWeightKey(row.weight)) || 0;
+    return priorReps > 0 && row.reps > priorReps;
+  });
+  const weightPrRows = rows.filter((row) => row.weight > priorMaxWeight && row.reps >= 8);
+  const e1rmImproved = priorBestE1rm > 0 && latestE1rm > priorBestE1rm * 1.01;
+  const topSetPr = priorTopSetScore > 0 && latestTopSet && latestTopSet.score > priorTopSetScore * 1.005;
+  const reasons = [];
+  if (topSetPr) reasons.push("top set PR");
+  if (e1rmImproved) reasons.push("estimated 1RM improved");
+  if (repPrRows.length) reasons.push("rep PR at matched load");
+  if (weightPrRows.length) reasons.push("new 8+ rep load PR");
+  return {
+    progressed: reasons.length > 0,
+    reasons,
+    latestE1rm,
+    priorBestE1rm,
+    topSetPr: Boolean(topSetPr),
+    e1rmImproved,
+    repPrCount: repPrRows.length,
+    weightPrCount: weightPrRows.length
+  };
+}
+
+function exerciseUnderperformed(current, previous, options = {}) {
   if (!current || !previous) return false;
   const currentE1rm = e1rm(current);
   const previousE1rm = e1rm(previous);
   const e1rmDrop = previousE1rm > 0 && currentE1rm < previousE1rm * (1 - COACH_PERFORMANCE_DROP_THRESHOLD);
   const repDrops = comparableRepDrop(current, previous);
   const failureRir = (averageRir(current) ?? HYPERTROPHY.idealRirMin) <= 0;
+  if (options.progressEvidence?.progressed) {
+    return failureRir && repDrops >= 3 && e1rmDrop;
+  }
   return e1rmDrop || repDrops >= 2 || (failureRir && (e1rmDrop || repDrops > 0 || currentE1rm <= previousE1rm));
 }
 
@@ -1694,8 +1729,21 @@ function coachExercisePerformanceSignal(exercise, workouts = coachWorkoutEntries
   }
   const latest = history[0];
   const previous = history[1];
-  const latestUnder = exerciseUnderperformed(latest, previous);
-  const previousUnder = history.length >= 3 && exerciseUnderperformed(previous, history[2]);
+  const latestProgress = exerciseProgressEvidence(latest, history.slice(1));
+  if (latestProgress.progressed) {
+    return {
+      status: "progressing",
+      tone: "good",
+      history,
+      latest,
+      previous,
+      progressEvidence: latestProgress,
+      message: `${exercise.name} progressed last session (${latestProgress.reasons.join(", ")}); keep recovery-managed volume and use the next small overload target.`
+    };
+  }
+  const latestUnder = exerciseUnderperformed(latest, previous, { progressEvidence: latestProgress });
+  const previousProgress = history.length >= 3 ? exerciseProgressEvidence(previous, history.slice(2)) : null;
+  const previousUnder = history.length >= 3 && exerciseUnderperformed(previous, history[2], { progressEvidence: previousProgress });
   if (latestUnder && previousUnder) {
     return {
       status: "repeated-failure",
@@ -1703,6 +1751,7 @@ function coachExercisePerformanceSignal(exercise, workouts = coachWorkoutEntries
       history,
       latest,
       previous,
+      progressEvidence: latestProgress,
       message: `${exercise.name} has stalled across recent sessions; rotate or deload before adding more volume.`
     };
   }
@@ -1713,6 +1762,7 @@ function coachExercisePerformanceSignal(exercise, workouts = coachWorkoutEntries
       history,
       latest,
       previous,
+      progressEvidence: latestProgress,
       message: `${exercise.name} dipped last session; use a small load reduction and keep 1-2 RIR.`
     };
   }
@@ -1725,6 +1775,7 @@ function coachExercisePerformanceSignal(exercise, workouts = coachWorkoutEntries
       history,
       latest,
       previous,
+      progressEvidence: latestProgress,
       message: `${exercise.name} is progressing; use the next small overload target.`
     };
   }
@@ -1734,6 +1785,7 @@ function coachExercisePerformanceSignal(exercise, workouts = coachWorkoutEntries
     history,
     latest,
     previous,
+    progressEvidence: latestProgress,
     message: `${exercise.name} is steady; progress with a small rep or load target.`
   };
 }
@@ -3069,6 +3121,47 @@ function cloneCoachPlanSnapshot(plan) {
   return JSON.parse(JSON.stringify(plan || buildTodayPlan(selectedCoachTimeframeMinutes())));
 }
 
+function copiedCoachPlanSnapshot(plan) {
+  return {
+    ...cloneCoachPlanSnapshot(plan),
+    copiedDate: todayISO(),
+    copiedAt: new Date().toISOString(),
+    timeframeMinutes: selectedCoachTimeframeMinutes(),
+    globalGrowthMode: selectedCoachGlobalGrowthMode(),
+    growthModes: selectedCoachGrowthModes()
+  };
+}
+
+function persistCopiedCoachPlan(plan) {
+  if (!plan) {
+    safeLocalStorageRemove(COPIED_COACH_PLAN_KEY);
+    return;
+  }
+  safeLocalStorageSet(COPIED_COACH_PLAN_KEY, JSON.stringify(plan));
+}
+
+function activeCopiedCoachPlan() {
+  const copied = state.copiedCoachPlan;
+  if (!copied) return null;
+  if ((copied.copiedDate || todayISO()) !== todayISO()) return null;
+  return copied;
+}
+
+function restoreCopiedCoachPlan() {
+  let copied = null;
+  try {
+    copied = JSON.parse(safeLocalStorageGet(COPIED_COACH_PLAN_KEY) || "null");
+  } catch {
+    copied = null;
+  }
+  if (!copied || typeof copied !== "object") return;
+  if ((copied.copiedDate || "") !== todayISO()) {
+    safeLocalStorageRemove(COPIED_COACH_PLAN_KEY);
+    return;
+  }
+  state.copiedCoachPlan = copied;
+}
+
 function simulatedWorkoutFromPlanItem(item, index = 0) {
   const rows = plannedSetRowsFromPreviousSession(item.exercise, item.sets, item.planTarget);
   return {
@@ -3091,7 +3184,7 @@ function simulatedWorkoutFromPlanItem(item, index = 0) {
   };
 }
 
-function buildNextCoachPlanPreview(copiedPlan = state.copiedCoachPlan) {
+function buildNextCoachPlanPreview(copiedPlan = activeCopiedCoachPlan()) {
   const sourcePlan = copiedPlan || buildTodayPlan(selectedCoachTimeframeMinutes());
   const simulated = (sourcePlan.sessionPlan?.items || []).map(simulatedWorkoutFromPlanItem);
   const context = coachPlanningContext([...state.workouts, ...simulated]);
@@ -3118,7 +3211,8 @@ function buildNextCoachPlanPreview(copiedPlan = state.copiedCoachPlan) {
 function copyCoachPlanToLog(plan = buildTodayPlan(selectedCoachTimeframeMinutes())) {
   const items = plan.sessionPlan.items || [];
   if (!items.length) throw new Error("Coach needs a plan before it can copy to Log.");
-  state.copiedCoachPlan = cloneCoachPlanSnapshot(plan);
+  state.copiedCoachPlan = copiedCoachPlanSnapshot(plan);
+  persistCopiedCoachPlan(state.copiedCoachPlan);
   state.previewNextCoachPlan = false;
   state.workoutDraft = items.map((item) => ({
     draftId: uid(),
@@ -4358,8 +4452,8 @@ function renderCoachWhy(plan) {
 }
 
 function renderCopiedCoachPlan() {
-  if (!state.copiedCoachPlan) return "";
-  const copied = state.copiedCoachPlan;
+  const copied = activeCopiedCoachPlan();
+  if (!copied) return "";
   const itemCount = copied.sessionPlan?.items?.length || 0;
   const preview = state.previewNextCoachPlan ? buildNextCoachPlanPreview(copied) : null;
   return `
@@ -4655,6 +4749,11 @@ async function renderSettings() {
     ${renderSettingsPanel("Data safety", "backup status", `
       <p class="muted small">A quick confidence check before imports, cloud sync, or app updates.</p>
       ${dataSafetySummaryMarkup()}
+    `)}
+
+    ${renderSettingsPanel("Troubleshooting", "Coach debug", `
+      <p class="muted small">Export a safe diagnostic report when Coach advice looks wrong. It separates submitted workouts from unsaved drafts and never includes sync secrets.</p>
+      <button class="ghost-button full-button" type="button" data-action="export-coach-debug">Export Coach debug report</button>
     `)}
 
     ${renderSettingsPanel("Storage", "backup/import", `
@@ -5040,6 +5139,226 @@ function exportPayload() {
     workouts: state.workouts.filter((entry) => !isSampleEntry(entry)),
     metrics: canonicalMetricEntries(state.metrics.filter((entry) => !isSampleEntry(entry)))
   };
+}
+
+function debugViewportInfo() {
+  const root = document.documentElement || {};
+  const visual = window.visualViewport || {};
+  return {
+    width: Number(window.innerWidth || visual.width || root.clientWidth || 0),
+    height: Number(window.innerHeight || visual.height || root.clientHeight || 0),
+    scrollWidth: Number(root.scrollWidth || 0),
+    clientWidth: Number(root.clientWidth || 0)
+  };
+}
+
+function workoutDebugSummary(workout) {
+  const rows = setRowsFromWorkout(workout);
+  return {
+    id: workout.id || "",
+    date: workout.date || "",
+    exercise: workout.exercise || "",
+    exerciseId: workout.exerciseId || "",
+    primaryMuscles: workoutMeta(workout).primaryMuscles || [],
+    secondaryMuscles: workoutMeta(workout).secondaryMuscles || [],
+    sets: rows.length,
+    setRows: rows,
+    hardSets: hardSetCount(workout),
+    volume: workoutVolume(workout),
+    e1rm: e1rm(workout),
+    bestSet: bestSet(workout),
+    averageRir: averageRir(workout),
+    restSeconds: averageRestSeconds(workout),
+    order: Number.isFinite(Number(workout.order)) ? Number(workout.order) : null,
+    pendingDraft: Boolean(workout.pendingDraft),
+    editingWorkoutId: workout.editingWorkoutId || null,
+    notes: workout.notes || ""
+  };
+}
+
+function coachDebugPlanSummary(plan) {
+  const sessionPlan = plan.sessionPlan || {};
+  return {
+    mode: plan.mode,
+    title: plan.title,
+    subtitle: plan.subtitle,
+    totalMinutes: sessionPlan.totalMinutes || 0,
+    limitMinutes: sessionPlan.limitMinutes || selectedCoachTimeframeMinutes(),
+    targetFloorMinutes: sessionPlan.targetFloorMinutes || 0,
+    hardLimitMinutes: sessionPlan.hardLimitMinutes || 0,
+    restart: Boolean(sessionPlan.restart),
+    shortfallReason: sessionPlan.shortfallReason || "",
+    items: (sessionPlan.items || []).map((item) => ({
+      muscle: item.muscle?.label || "",
+      muscleId: item.muscle?.id || "",
+      exercise: item.exercise?.name || "",
+      exerciseId: item.exercise?.id || "",
+      sets: item.sets,
+      minutes: item.minutes,
+      phase: item.phase,
+      growthMode: item.growthMode,
+      reason: item.reason,
+      planTarget: item.planTarget ? {
+        kind: item.planTarget.kind,
+        label: item.planTarget.label,
+        detail: item.planTarget.detail,
+        tone: item.planTarget.tone,
+        message: item.planTarget.message || ""
+      } : null,
+      performanceSignal: item.performanceSignal ? {
+        status: item.performanceSignal.status,
+        tone: item.performanceSignal.tone,
+        message: item.performanceSignal.message,
+        progressEvidence: item.performanceSignal.progressEvidence || null,
+        latest: item.performanceSignal.latest ? workoutDebugSummary(item.performanceSignal.latest) : null,
+        previous: item.performanceSignal.previous ? workoutDebugSummary(item.performanceSignal.previous) : null
+      } : null
+    })),
+    missing: (sessionPlan.missing || []).map((muscle) => ({ id: muscle.id, label: muscle.label })),
+    deprioritized: (sessionPlan.deprioritized || []).map((item) => ({
+      muscle: item.muscle?.label || "",
+      muscleId: item.muscle?.id || "",
+      reason: item.reason
+    })),
+    performanceNotes: sessionPlan.performanceNotes || [],
+    why: plan.why || [],
+    explanation: plan.explanation || {},
+    notes: plan.notes || []
+  };
+}
+
+function coachDebugMuscleAudit(context = coachPlanningContext()) {
+  return context.rankedStats.map((stat, index) => ({
+    rank: index + 1,
+    id: stat.id,
+    label: stat.label,
+    sets: stat.sets,
+    sessions: stat.sessions,
+    deficit: stat.deficit,
+    readiness: stat.readiness,
+    reason: stat.reason,
+    daysSince: stat.daysSince,
+    primaryDaysSince: stat.primaryDaysSince,
+    secondaryDaysSince: stat.secondaryDaysSince,
+    growthMode: coachGrowthModeForMuscle(stat.id),
+    targetMuscle: isCoachTargetMuscle(stat.id),
+    floorGap: Math.max(0, HYPERTROPHY.minimumSets - stat.sets),
+    growthGap: Math.max(0, HYPERTROPHY.growthHigh - stat.sets),
+    planGap: planSetGap(stat, false, coachGrowthModeForMuscle(stat.id)),
+    hasPrimaryExercise: hasPrimaryExerciseForMuscle(stat.id)
+  }));
+}
+
+function coachDebugLibraryCoverage() {
+  const active = exerciseDatabase();
+  const archived = getCustomExercises({ includeArchived: true }).filter((exercise) => exercise.archivedAt);
+  return muscleGroups.map((muscle) => ({
+    id: muscle.id,
+    label: muscle.label,
+    activePrimary: active
+      .filter((exercise) => exercise.primaryMuscles.includes(muscle.id))
+      .map((exercise) => ({ id: exercise.id, name: exercise.name })),
+    archivedPrimary: archived
+      .filter((exercise) => exercise.primaryMuscles.includes(muscle.id))
+      .map((exercise) => ({ id: exercise.id, name: exercise.name, archivedAt: exercise.archivedAt }))
+  }));
+}
+
+function recentDebugWorkouts(days = 120) {
+  return workoutsNewestFirst(state.workouts.filter((entry) => !isSampleEntry(entry)))
+    .filter((entry) => {
+      const age = daysBetween(entry.date, todayISO());
+      return age === null || age <= days;
+    })
+    .map(workoutDebugSummary);
+}
+
+function recentDebugMetrics(days = 30) {
+  return canonicalMetricEntries(state.metrics.filter((entry) => !isSampleEntry(entry)))
+    .filter((entry) => {
+      const age = daysBetween(entry.date, todayISO());
+      return age === null || age <= days;
+    })
+    .sort((a, b) => b.date.localeCompare(a.date));
+}
+
+function buildCoachDebugReport() {
+  const planningContext = coachPlanningContext();
+  const todayPlan = buildTodayPlan(selectedCoachTimeframeMinutes());
+  const copiedPlan = activeCopiedCoachPlan();
+  const draftOnlyEntries = coachPendingWorkoutEntries().map(workoutDebugSummary);
+  return {
+    app: "TrainWise Coach Debug Report",
+    reportVersion: 1,
+    notBackup: true,
+    generatedAt: new Date().toISOString(),
+    appVersion: APP_VERSION,
+    runtime: {
+      today: todayISO(),
+      trainingWeekStart: isoFromLocalDate(currentTrainingWeekStart()),
+      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "",
+      activeTab: state.activeTab,
+      logMode: state.logMode,
+      strengthDate: state.draftDate,
+      metricDate: state.metricDate,
+      selectedExercise: state.selectedExercise,
+      viewport: debugViewportInfo()
+    },
+    settings: {
+      safe: exportSafeSettings(),
+      coach: {
+        timeframeMinutes: selectedCoachTimeframeMinutes(),
+        timeframeLabel: coachTimeframeLabel(),
+        globalGrowthMode: selectedCoachGlobalGrowthMode(),
+        targetMuscles: selectedCoachTargetMuscles(),
+        growthModes: selectedCoachGrowthModes(),
+        copiedPlanDate: copiedPlan?.copiedDate || ""
+      },
+      sync: {
+        configured: Boolean(state.settings.supabaseUrl),
+        email: state.settings.supabaseEmail || "",
+        status: supabaseStatus()
+      }
+    },
+    coach: {
+      todayPlan: coachDebugPlanSummary(todayPlan),
+      copiedPlan: copiedPlan ? coachDebugPlanSummary(copiedPlan) : null,
+      muscleAudit: coachDebugMuscleAudit(planningContext),
+      libraryCoverage: coachDebugLibraryCoverage()
+    },
+    submitted: {
+      workoutCount: state.workouts.filter((entry) => !isSampleEntry(entry)).length,
+      recentWorkouts: recentDebugWorkouts()
+    },
+    draftOnly: {
+      date: state.draftDate,
+      entries: draftOnlyEntries,
+      rawDrafts: (state.workoutDraft || []).map((draft) => ({
+        draftId: draft.draftId || "",
+        editingWorkoutId: draft.editingWorkoutId || null,
+        exercise: draft.exercise || "",
+        targetMuscle: draft.targetMuscle || "",
+        notes: draft.notes || "",
+        setRows: normalizeSetRows(draft.setRows)
+      }))
+    },
+    nutrition: {
+      summary: healthCoachSummary(),
+      recentMetrics: recentDebugMetrics()
+    }
+  };
+}
+
+async function downloadCoachDebugReport() {
+  const payload = buildCoachDebugReport();
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `trainwise-debug-${todayISO()}.json`;
+  a.click();
+  URL.revokeObjectURL(url);
+  announce("Coach debug report exported.", { tone: "good", detail: "Safe diagnostic file only; it is not a backup." });
 }
 
 function backupImportSummary(payload) {
@@ -5719,6 +6038,7 @@ async function handleAction(action, target) {
       announce("Coach plan copied to Log.", { tone: "good", detail: "Exercises and planned sets are ready as an unsaved draft." });
       await render({ animate: true });
     },
+    async "export-coach-debug"() { await downloadCoachDebugReport(); },
     async "preview-next-coach-plan"() {
       state.previewNextCoachPlan = true;
       await render();
@@ -5726,6 +6046,7 @@ async function handleAction(action, target) {
     async "clear-copied-coach-plan"() {
       state.copiedCoachPlan = null;
       state.previewNextCoachPlan = false;
+      persistCopiedCoachPlan(null);
       await render();
     },
     async "dismiss-record-trophy"() {
@@ -6444,6 +6765,7 @@ async function init() {
   }
 
   restoreDraftRecovery();
+  restoreCopiedCoachPlan();
 
   if (navigator.storage?.persist) {
     navigator.storage.persist().catch(() => {});

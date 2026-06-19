@@ -297,7 +297,7 @@ const weeklyExerciseFairnessCap = runScenario(`
 assert.strictEqual(weeklyExerciseFairnessCap.chosen, "Hammer Curl", `Expected weekly use cap to rotate away from repeated Bicep Curl, got ${weeklyExerciseFairnessCap.chosen}`);
 assert.strictEqual(weeklyExerciseFairnessCap.curlMemory, 2, `Expected Curl weekly use count to be 2, got ${weeklyExerciseFairnessCap.curlMemory}`);
 
-const activeDraftUpdatesCoachPlan = runScenario(`
+const activeDraftDoesNotUpdateCoachPlan = runScenario(`
   ${resetAndHelpers}
   var biceps = muscleGroups.find((muscle) => muscle.id === "biceps");
   state.workouts = [makeWorkout(biceps, 2, 8)];
@@ -314,11 +314,14 @@ const activeDraftUpdatesCoachPlan = runScenario(`
     ]
   }];
   var bicepsStat = rankedCoachMuscles().find((muscle) => muscle.id === "biceps");
-  ({ sets: bicepsStat.sets, sessions: bicepsStat.sessions });
+  var coachEntries = coachWorkoutEntries();
+  ({ sets: bicepsStat.sets, sessions: bicepsStat.sessions, coachEntryCount: coachEntries.length, hasPending: coachEntries.some((entry) => entry.pendingDraft) });
 `);
 
-assert.strictEqual(activeDraftUpdatesCoachPlan.sets, 10, `Expected Coach to count active log draft as pending biceps work, got ${activeDraftUpdatesCoachPlan.sets}`);
-assert.strictEqual(activeDraftUpdatesCoachPlan.sessions, 2, `Expected pending draft date to count as a Coach touch, got ${activeDraftUpdatesCoachPlan.sessions}`);
+assert.strictEqual(activeDraftDoesNotUpdateCoachPlan.sets, 8, `Expected Coach to ignore active Log draft until lock-in, got ${activeDraftDoesNotUpdateCoachPlan.sets}`);
+assert.strictEqual(activeDraftDoesNotUpdateCoachPlan.sessions, 1, `Expected active draft not to count as a Coach touch, got ${activeDraftDoesNotUpdateCoachPlan.sessions}`);
+assert.strictEqual(activeDraftDoesNotUpdateCoachPlan.coachEntryCount, 1, `Expected Coach entries to use submitted workouts only, got ${activeDraftDoesNotUpdateCoachPlan.coachEntryCount}`);
+assert.strictEqual(activeDraftDoesNotUpdateCoachPlan.hasPending, false, "Expected Coach entries not to include pending draft rows.");
 
 const repeatedFailureRotatesExercise = runScenario(`
   ${resetAndHelpers}
@@ -358,6 +361,57 @@ const repeatedFailureRotatesExercise = runScenario(`
 
 assert.strictEqual(repeatedFailureRotatesExercise.exercise, "Incline Dumbbell Press", `Expected repeated bench failure to rotate to incline, got ${repeatedFailureRotatesExercise.exercise}`);
 assert((repeatedFailureRotatesExercise.note + repeatedFailureRotatesExercise.why).includes("deload") || (repeatedFailureRotatesExercise.note + repeatedFailureRotatesExercise.why).includes("stalled"), `Expected repeated failure explanation, got ${repeatedFailureRotatesExercise.note} ${repeatedFailureRotatesExercise.why}`);
+
+const topSetPrAvoidsFalseFailure = runScenario(`
+  ${resetAndHelpers}
+  state.settings.customExercises = [
+    { id: "bench", name: "Flat Bench Press", primaryMuscles: ["chest"], secondaryMuscles: ["triceps", "shoulders"], equipment: "barbell", reps: "8-12", rest: "120-180 sec", cue: "Bench.", userCreated: true }
+  ];
+  var chest = muscleGroups.find((muscle) => muscle.id === "chest");
+  state.workouts = [
+    {
+      ...makeWorkout(chest, 2, 3, {
+      id: "bench-pr",
+      exercise: "Flat Bench Press",
+      exerciseId: "bench",
+      primaryMuscles: ["chest"],
+      secondaryMuscles: ["triceps", "shoulders"],
+      restSeconds: 150
+      }),
+      reps: 10,
+      weight: 155,
+      setRows: [
+        { weight: 155, reps: 10, rir: 1, restSeconds: 150 },
+        { weight: 135, reps: 9, rir: 1, restSeconds: 150 },
+        { weight: 125, reps: 8, rir: 2, restSeconds: 150 }
+      ]
+    },
+    {
+      ...makeWorkout(chest, 5, 3, {
+      id: "bench-prior",
+      exercise: "Flat Bench Press",
+      exerciseId: "bench",
+      primaryMuscles: ["chest"],
+      secondaryMuscles: ["triceps", "shoulders"],
+      restSeconds: 150
+      }),
+      reps: 10,
+      weight: 145,
+      setRows: [
+        { weight: 145, reps: 10, rir: 1, restSeconds: 150 },
+        { weight: 135, reps: 11, rir: 1, restSeconds: 150 },
+        { weight: 125, reps: 10, rir: 2, restSeconds: 150 }
+      ]
+    }
+  ];
+  var signal = coachExercisePerformanceSignal(resolveExerciseMeta("Flat Bench Press"));
+  var target = coachPlanTargetForExercise(resolveExerciseMeta("Flat Bench Press"), signal);
+  ({ status: signal.status, message: signal.message, targetKind: target.kind, targetLabel: target.label });
+`);
+
+assert.strictEqual(topSetPrAvoidsFalseFailure.status, "progressing", `Expected top-set PR with normal backoff drop to count as progressing, got ${topSetPrAvoidsFalseFailure.status}: ${topSetPrAvoidsFalseFailure.message}`);
+assert.notStrictEqual(topSetPrAvoidsFalseFailure.targetKind, "reset", `Expected top-set PR not to produce reset target, got ${topSetPrAvoidsFalseFailure.targetLabel}`);
+assert.notStrictEqual(topSetPrAvoidsFalseFailure.targetKind, "deload", `Expected top-set PR not to produce deload target, got ${topSetPrAvoidsFalseFailure.targetLabel}`);
 
 const planIncludesProgressionTarget = runScenario(`
   ${resetAndHelpers}
@@ -1159,5 +1213,27 @@ const pendingBodyweightDraft = runScenario(`
 assert.strictEqual(pendingBodyweightDraft.count, 1, `Expected unsaved bodyweight draft to count as pending Coach work, got ${pendingBodyweightDraft.count}`);
 assert.strictEqual(pendingBodyweightDraft.sets, 2, `Expected pending bodyweight draft sets to count, got ${pendingBodyweightDraft.sets}`);
 assert.strictEqual(pendingBodyweightDraft.weight, 0, `Expected pending bodyweight draft to allow zero load, got ${pendingBodyweightDraft.weight}`);
+
+const copiedPlanSameDayRetention = runScenario(`
+  ${resetAndHelpers}
+  var copiedStorage = {};
+  localStorage.getItem = (key) => copiedStorage[key] || null;
+  localStorage.setItem = (key, value) => { copiedStorage[key] = value; };
+  localStorage.removeItem = (key) => { delete copiedStorage[key]; };
+  var plan = buildTodayPlan(60);
+  copyCoachPlanToLog(plan);
+  var sameDay = activeCopiedCoachPlan();
+  sameDay.copiedDate = "2026-06-16";
+  var wrongDay = activeCopiedCoachPlan();
+  ({
+    sameDayItems: sameDay?.sessionPlan?.items?.length || 0,
+    wrongDayVisible: Boolean(wrongDay),
+    storagePayload: JSON.parse(safeLocalStorageGet(COPIED_COACH_PLAN_KEY) || "null")
+  });
+`);
+
+assert(copiedPlanSameDayRetention.sameDayItems > 0, "Expected copied Coach plan to remain visible on the copied date.");
+assert.strictEqual(copiedPlanSameDayRetention.wrongDayVisible, false, "Expected copied Coach plan to hide when its copied date no longer matches today.");
+assert.strictEqual(copiedPlanSameDayRetention.storagePayload.copiedDate, "2026-06-17", "Expected copied Coach plan to persist with the same-day date key.");
 
 console.log("coach regression tests passed");
