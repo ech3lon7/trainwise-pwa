@@ -3,7 +3,7 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 2;
 const STORES = ["workouts", "metrics", "settings"];
-const APP_VERSION = "1.5.30";
+const APP_VERSION = "1.5.31";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 const DRAFT_RECOVERY_KEY = "trainwise-draft-recovery-v1";
 const COPIED_COACH_PLAN_KEY = "trainwise-copied-coach-plan-v1";
@@ -5238,6 +5238,49 @@ function coachDebugPlanSummary(plan) {
   };
 }
 
+function coachDebugModeComparison() {
+  const originalMode = state.coachGlobalGrowthMode;
+  const originalGrowthModes = state.coachGrowthModes && typeof state.coachGrowthModes === "object"
+    ? { ...state.coachGrowthModes }
+    : {};
+  try {
+    return Object.fromEntries(COACH_GROWTH_MODE_OPTIONS.map((option) => {
+      state.coachGlobalGrowthMode = option.id;
+      state.coachGrowthModes = {};
+      const plan = buildTodayPlan(selectedCoachTimeframeMinutes());
+      const summary = coachDebugPlanSummary(plan);
+      return [option.id, {
+        mode: option.id,
+        label: option.label,
+        totalMinutes: summary.totalMinutes,
+        limitMinutes: summary.limitMinutes,
+        totalSets: summary.items.reduce((sum, item) => sum + (Number(item.sets) || 0), 0),
+        itemCount: summary.items.length,
+        items: summary.items.map((item) => ({
+          muscle: item.muscle,
+          muscleId: item.muscleId,
+          exercise: item.exercise,
+          exerciseId: item.exerciseId,
+          sets: item.sets,
+          minutes: item.minutes,
+          phase: item.phase,
+          reason: item.reason,
+          planTarget: item.planTarget,
+          performanceStatus: item.performanceSignal?.status || ""
+        })),
+        missing: summary.missing,
+        deprioritized: summary.deprioritized,
+        shortfallReason: summary.shortfallReason,
+        why: summary.why,
+        notes: summary.notes
+      }];
+    }));
+  } finally {
+    state.coachGlobalGrowthMode = originalMode;
+    state.coachGrowthModes = originalGrowthModes;
+  }
+}
+
 function coachDebugMuscleAudit(context = coachPlanningContext()) {
   return context.rankedStats.map((stat, index) => ({
     rank: index + 1,
@@ -5334,6 +5377,7 @@ function buildCoachDebugReport() {
     coach: {
       todayPlan: coachDebugPlanSummary(todayPlan),
       copiedPlan: copiedPlan ? coachDebugPlanSummary(copiedPlan) : null,
+      modeComparison: coachDebugModeComparison(),
       muscleAudit: coachDebugMuscleAudit(planningContext),
       libraryCoverage: coachDebugLibraryCoverage()
     },

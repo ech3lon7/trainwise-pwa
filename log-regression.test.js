@@ -160,9 +160,9 @@ assert(!appCode.includes('selectedExercise: "Push-up"'), "Expected Log startup n
 assert(!appCode.includes('showBanner("Unsaved draft restored."'), "Expected startup draft recovery not to show a top banner.");
 assert(appCode.includes("notifyMetricSaved"), "Expected metrics saves to use a dedicated bottom-only notification helper.");
 assert(!stylesCode.includes(".mobile-quick-toggle"), "Expected floating quick action button styling to be removed.");
-assert(indexCode.includes("v=1.5.30"), "Expected index shell references to use bumped app version.");
+assert(indexCode.includes("v=1.5.31"), "Expected index shell references to use bumped app version.");
 assert(!indexCode.includes('id="app" class="app-content" aria-live'), "Expected broad app aria-live to be removed in favor of targeted live regions.");
-assert(serviceWorkerCode.includes("trainwise-cache-v52"), "Expected service worker cache version bump.");
+assert(serviceWorkerCode.includes("trainwise-cache-v53"), "Expected service worker cache version bump.");
 
 const nutritionQuickTotals = runScenario(`
   ${reset}
@@ -1380,6 +1380,11 @@ const coachDebugReport = runScenario(`
     notBackup: report.notBackup,
     hasCoachPlan: Boolean(report.coach.todayPlan),
     hasMuscleAudit: report.coach.muscleAudit.length > 0,
+    modeKeys: Object.keys(report.coach.modeComparison || {}),
+    modeItemCounts: Object.fromEntries(Object.entries(report.coach.modeComparison || {}).map(([mode, plan]) => [mode, plan.items.length])),
+    modeSetTotals: Object.fromEntries(Object.entries(report.coach.modeComparison || {}).map(([mode, plan]) => [mode, plan.totalSets])),
+    modeMinutes: Object.fromEntries(Object.entries(report.coach.modeComparison || {}).map(([mode, plan]) => [mode, plan.totalMinutes])),
+    restoredMode: state.coachGlobalGrowthMode,
     hasSubmitted: report.submitted.workoutCount,
     hasDraftOnly: report.draftOnly.entries.length,
     hasSecret: serialized.includes("secret-password") || serialized.includes("anon-secret") || serialized.includes("access-secret") || serialized.includes("refresh-secret")
@@ -1390,6 +1395,11 @@ assert.strictEqual(coachDebugReport.app, "TrainWise Coach Debug Report", `Expect
 assert.strictEqual(coachDebugReport.notBackup, true, "Expected Coach debug report to mark itself as non-backup.");
 assert(coachDebugReport.hasCoachPlan, "Expected Coach debug report to include today's plan.");
 assert(coachDebugReport.hasMuscleAudit, "Expected Coach debug report to include muscle audit.");
+assert.deepEqual(coachDebugReport.modeKeys, ["soft", "medium", "aggressive"], `Expected Coach debug report to compare all three modes, got ${coachDebugReport.modeKeys.join(", ")}`);
+assert(Object.values(coachDebugReport.modeItemCounts).every((count) => Number.isFinite(count)), `Expected every mode comparison to include item counts, got ${JSON.stringify(coachDebugReport.modeItemCounts)}`);
+assert(Object.values(coachDebugReport.modeSetTotals).every((count) => Number.isFinite(count)), `Expected every mode comparison to include total sets, got ${JSON.stringify(coachDebugReport.modeSetTotals)}`);
+assert(Object.values(coachDebugReport.modeMinutes).every((count) => Number.isFinite(count)), `Expected every mode comparison to include minutes, got ${JSON.stringify(coachDebugReport.modeMinutes)}`);
+assert.strictEqual(coachDebugReport.restoredMode, "medium", `Expected debug mode comparison not to mutate selected Coach mode, got ${coachDebugReport.restoredMode}`);
 assert.strictEqual(coachDebugReport.hasSubmitted, 1, `Expected Coach debug report to include submitted workout count, got ${coachDebugReport.hasSubmitted}`);
 assert.strictEqual(coachDebugReport.hasDraftOnly, 1, `Expected Coach debug report to include draft-only entries separately, got ${coachDebugReport.hasDraftOnly}`);
 assert(appCode.includes('data-action="export-coach-debug"'), "Expected Settings to expose a Coach debug export action.");
