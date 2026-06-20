@@ -3,7 +3,7 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 2;
 const STORES = ["workouts", "metrics", "settings"];
-const APP_VERSION = "1.5.33";
+const APP_VERSION = "1.5.34";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 const DRAFT_RECOVERY_KEY = "trainwise-draft-recovery-v1";
 const COPIED_COACH_PLAN_KEY = "trainwise-copied-coach-plan-v1";
@@ -2248,6 +2248,43 @@ function mediumComparisonGrowthModes(growthModes = {}) {
   ]));
 }
 
+function lowerCoachGrowthMode(mode) {
+  const rank = coachGrowthModeRank(mode);
+  const lower = COACH_GROWTH_MODE_OPTIONS
+    .filter((option) => option.rank < rank)
+    .sort((a, b) => b.rank - a.rank)[0];
+  return lower?.id || "";
+}
+
+function targetModeContractSetFloors(limitMinutes = SESSION_LIMIT_MINUTES, options = {}) {
+  const targetMuscles = Array.isArray(options.targetMuscles) ? options.targetMuscles : selectedCoachTargetMuscles();
+  if (!targetMuscles.length) return {};
+  const growthModes = options.growthModes && typeof options.growthModes === "object" ? options.growthModes : selectedCoachGrowthModes(targetMuscles);
+  const globalGrowthMode = COACH_GROWTH_MODE_OPTIONS.some((option) => option.id === options.globalGrowthMode)
+    ? options.globalGrowthMode
+    : selectedCoachGlobalGrowthMode();
+  const floors = {};
+
+  for (const muscleId of targetMuscles) {
+    let mode = lowerCoachGrowthMode(growthModes[muscleId] || globalGrowthMode);
+    while (mode) {
+      const baselinePlan = buildSessionPlan(limitMinutes, {
+        restart: options.restart || false,
+        targetMuscles,
+        globalGrowthMode,
+        growthModes: { ...growthModes, [muscleId]: mode },
+        context: options.context,
+        skipTargetModeContracts: true
+      });
+      const baselineItem = baselinePlan.items.find((item) => item.muscle.id === muscleId);
+      if (baselineItem?.sets) floors[muscleId] = Math.max(floors[muscleId] || 0, baselineItem.sets);
+      mode = lowerCoachGrowthMode(mode);
+    }
+  }
+
+  return floors;
+}
+
 function sessionShortfallReason({ totalMinutes, cappedLimit, targetFloor, allStats, items, missing }) {
   if (totalMinutes >= targetFloor) return "";
   const base = `Estimated ${totalMinutes}/${cappedLimit} min`;
@@ -2296,6 +2333,7 @@ function buildSessionPlan(limitMinutes = SESSION_LIMIT_MINUTES, options = {}) {
   const missing = [];
   const missingIds = new Set();
   const performanceNotes = [];
+  const contractNotes = [];
   const performanceNoteKeys = new Set();
   let totalMinutes = 0;
   const usedExercises = new Set();
@@ -2423,6 +2461,69 @@ function buildSessionPlan(limitMinutes = SESSION_LIMIT_MINUTES, options = {}) {
     }
   };
 
+  const freeNonTargetMinutesForTarget = (neededMinutes, protectedMuscleId) => {
+    while (totalMinutes + neededMinutes > hardLimit) {
+      const candidate = items
+        .map((item, index) => ({ item, index }))
+        .filter(({ item }) => (
+          item.muscle.id !== protectedMuscleId
+          && !isCoachTargetMuscle(item.muscle.id, targetMuscles)
+          && item.sets > 0
+          && item.muscle.sets + item.sets - 1 >= HYPERTROPHY.minimumSets
+        ))
+        .sort((a, b) => (
+          coachGrowthModeRank(a.item.growthMode) - coachGrowthModeRank(b.item.growthMode)
+        ) || (plannedSetGap(a.item, false) - plannedSetGap(b.item, false)) || (b.item.sets - a.item.sets))[0];
+      if (!candidate) return false;
+
+      const previousMinutes = candidate.item.minutes;
+      if (candidate.item.sets > 1) {
+        candidate.item.sets -= 1;
+        candidate.item.minutes = plannedExerciseMinutes(candidate.item);
+        const freedMinutes = previousMinutes - candidate.item.minutes;
+        if (freedMinutes <= 0) return false;
+        totalMinutes -= freedMinutes;
+      } else {
+        totalMinutes -= previousMinutes;
+        usedExercises.delete(candidate.item.exercise.id);
+        items.splice(candidate.index, 1);
+      }
+    }
+    return true;
+  };
+
+  const enforceTargetModeContracts = () => {
+    if (options.skipTargetModeContracts || !targetMuscles.length) return false;
+    let changed = false;
+    const setFloors = targetModeContractSetFloors(cappedLimit, {
+      restart,
+      targetMuscles,
+      globalGrowthMode,
+      growthModes,
+      context: planningContext
+    });
+    for (const [muscleId, minimumSets] of Object.entries(setFloors)) {
+      const item = items.find((candidate) => candidate.muscle.id === muscleId);
+      if (!item || item.sets >= minimumSets) continue;
+      const label = item.muscle.label;
+      const modeLabel = coachGrowthModeLabel(item.growthMode);
+      while (item.sets < minimumSets) {
+        const nextMinutes = plannedExerciseMinutes(item, item.sets + 1);
+        const extraMinutes = nextMinutes - item.minutes;
+        if (totalMinutes + extraMinutes > hardLimit && !freeNonTargetMinutesForTarget(extraMinutes, muscleId)) break;
+        if (totalMinutes + extraMinutes > hardLimit) break;
+        item.sets += 1;
+        item.minutes = nextMinutes;
+        totalMinutes += extraMinutes;
+        changed = true;
+      }
+      if (item.sets < minimumSets) {
+        contractNotes.push(`${label} ${modeLabel} target held at ${item.sets}/${minimumSets} sets because protected floor work, recovery guardrails, or the selected timeframe blocked more volume.`);
+      }
+    }
+    return changed;
+  };
+
   if (globalGrowthMode === "aggressive" || items.some((item) => item.growthMode === "aggressive")) {
     addSetsToExisting({ floorGrowthMode: "medium" });
   }
@@ -2451,6 +2552,10 @@ function buildSessionPlan(limitMinutes = SESSION_LIMIT_MINUTES, options = {}) {
     addSetsToExisting({ allowHighVolume: !restart });
   }
 
+  if (enforceTargetModeContracts()) {
+    addSetsToExisting({ allowHighVolume: !restart });
+  }
+
   const shortfallReason = sessionShortfallReason({ totalMinutes, cappedLimit, targetFloor, allStats, items, missing });
 
   const plannedIds = new Set(items.map((item) => item.muscle.id));
@@ -2463,6 +2568,7 @@ function buildSessionPlan(limitMinutes = SESSION_LIMIT_MINUTES, options = {}) {
     missing,
     deprioritized,
     performanceNotes,
+    contractNotes,
     totalMinutes,
     limitMinutes: cappedLimit,
     targetFloorMinutes: targetFloor,
@@ -2538,6 +2644,10 @@ function buildTodayPlan(limitMinutes = selectedCoachTimeframeMinutes()) {
   if (aggressiveLimitReason) {
     notes.push(aggressiveLimitReason);
     why.push(aggressiveLimitReason);
+  }
+  if (sessionPlan.contractNotes?.length) {
+    notes.push(...sessionPlan.contractNotes);
+    why.push(...sessionPlan.contractNotes.slice(0, 2));
   }
   if (sessionPlan.performanceNotes?.length) {
     notes.push(...sessionPlan.performanceNotes);
@@ -5295,6 +5405,7 @@ function coachDebugPlanSummary(plan) {
     hardLimitMinutes: sessionPlan.hardLimitMinutes || 0,
     restart: Boolean(sessionPlan.restart),
     shortfallReason: sessionPlan.shortfallReason || "",
+    contractNotes: sessionPlan.contractNotes || [],
     items: (sessionPlan.items || []).map((item) => ({
       muscle: item.muscle?.label || "",
       muscleId: item.muscle?.id || "",
@@ -5339,10 +5450,11 @@ function coachDebugModeComparison() {
   const originalGrowthModes = state.coachGrowthModes && typeof state.coachGrowthModes === "object"
     ? { ...state.coachGrowthModes }
     : {};
+  const targetGrowthModes = selectedCoachGrowthModes(selectedCoachTargetMuscles());
   try {
     const comparisons = Object.fromEntries(COACH_GROWTH_MODE_OPTIONS.map((option) => {
       state.coachGlobalGrowthMode = option.id;
-      state.coachGrowthModes = {};
+      state.coachGrowthModes = { ...targetGrowthModes };
       const plan = buildTodayPlan(selectedCoachTimeframeMinutes());
       const summary = coachDebugPlanSummary(plan);
       return [option.id, {
@@ -5360,12 +5472,15 @@ function coachDebugModeComparison() {
           sets: item.sets,
           minutes: item.minutes,
           phase: item.phase,
+          growthMode: item.growthMode,
           reason: item.reason,
           planTarget: item.planTarget,
           performanceStatus: item.performanceSignal?.status || ""
         })),
         missing: summary.missing,
         deprioritized: summary.deprioritized,
+        performanceNotes: summary.performanceNotes,
+        contractNotes: summary.contractNotes,
         shortfallReason: summary.shortfallReason,
         why: summary.why,
         notes: summary.notes

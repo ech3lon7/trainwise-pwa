@@ -802,6 +802,65 @@ assert.strictEqual(perMuscleGrowthModes.quadsMode, "soft", `Expected Quads to us
 assert(perMuscleGrowthModes.chestProjected > perMuscleGrowthModes.quadsProjected, `Expected aggressive Chest to receive more upper-zone volume than soft Quads, got chest=${perMuscleGrowthModes.chestProjected} quads=${perMuscleGrowthModes.quadsProjected}`);
 assert(perMuscleGrowthModes.why.includes("Chest Aggressive override") && perMuscleGrowthModes.why.includes("Quads Soft override"), `Expected Why this? to include per-muscle overrides, got ${perMuscleGrowthModes.why}`);
 
+const targetModeContractsStayMonotonic = runScenario(`
+  ${resetAndHelpers}
+  state.coachTargetMuscles = ["chest"];
+  state.coachGlobalGrowthMode = "medium";
+  state.workouts = [
+    makeWorkout(muscleGroups.find((muscle) => muscle.id === "chest"), 2, 10, { restSeconds: 120 }),
+    makeWorkout(muscleGroups.find((muscle) => muscle.id === "back"), 2, 12, { restSeconds: 90 }),
+    makeWorkout(muscleGroups.find((muscle) => muscle.id === "quads"), 2, 10, { restSeconds: 90 }),
+    makeWorkout(muscleGroups.find((muscle) => muscle.id === "abs"), 2, 15, { restSeconds: 75 }),
+    makeWorkout(muscleGroups.find((muscle) => muscle.id === "triceps"), 2, 13, { restSeconds: 75 }),
+    makeWorkout(muscleGroups.find((muscle) => muscle.id === "shoulders"), 1, 18, { restSeconds: 90 }),
+    makeWorkout(muscleGroups.find((muscle) => muscle.id === "glutes"), 1, 18, { restSeconds: 90 }),
+    makeWorkout(muscleGroups.find((muscle) => muscle.id === "calves"), 1, 18, { restSeconds: 75 }),
+    makeWorkout(muscleGroups.find((muscle) => muscle.id === "biceps"), 1, 19, { restSeconds: 75 }),
+    makeWorkout(muscleGroups.find((muscle) => muscle.id === "hamstrings"), 1, 20, { restSeconds: 90 })
+  ];
+  state.coachGrowthModes = { chest: "soft" };
+  var soft = buildTodayPlan(60).sessionPlan.items.find((item) => item.muscle.id === "chest");
+  state.coachGrowthModes = { chest: "medium" };
+  var medium = buildTodayPlan(60).sessionPlan.items.find((item) => item.muscle.id === "chest");
+  state.coachGrowthModes = { chest: "aggressive" };
+  var aggressivePlan = buildTodayPlan(60);
+  var aggressive = aggressivePlan.sessionPlan.items.find((item) => item.muscle.id === "chest");
+  ({
+    softSets: soft?.sets || 0,
+    mediumSets: medium?.sets || 0,
+    aggressiveSets: aggressive?.sets || 0,
+    aggressiveMode: aggressive?.growthMode,
+    contractNotes: aggressivePlan.sessionPlan.contractNotes || [],
+    why: aggressivePlan.why.join(" ")
+  });
+`);
+
+assert(targetModeContractsStayMonotonic.mediumSets >= targetModeContractsStayMonotonic.softSets, `Expected targeted Medium Chest to keep or exceed Soft sets, got soft=${targetModeContractsStayMonotonic.softSets}, medium=${targetModeContractsStayMonotonic.mediumSets}`);
+assert(targetModeContractsStayMonotonic.aggressiveSets >= targetModeContractsStayMonotonic.mediumSets, `Expected targeted Aggressive Chest to keep or exceed Medium sets, got medium=${targetModeContractsStayMonotonic.mediumSets}, aggressive=${targetModeContractsStayMonotonic.aggressiveSets}, notes=${targetModeContractsStayMonotonic.contractNotes.join(" ")}`);
+assert.strictEqual(targetModeContractsStayMonotonic.aggressiveMode, "aggressive", `Expected Chest to keep the aggressive override, got ${targetModeContractsStayMonotonic.aggressiveMode}`);
+
+const targetModeContractsSurviveDebugComparison = runScenario(`
+  ${resetAndHelpers}
+  state.coachTargetMuscles = ["chest"];
+  state.coachGlobalGrowthMode = "medium";
+  state.coachGrowthModes = { chest: "aggressive" };
+  state.workouts = muscleGroups.map((muscle) => makeWorkout(muscle, 2, muscle.id === "chest" ? 14 : 20));
+  var comparison = coachDebugModeComparison();
+  var chestModes = Object.fromEntries(Object.entries(comparison).map(([mode, plan]) => [
+    mode,
+    plan.items.find((item) => item.muscleId === "chest")?.growthMode || ""
+  ]));
+  ({
+    selectedMode: state.coachGlobalGrowthMode,
+    selectedOverride: state.coachGrowthModes.chest,
+    chestModes
+  });
+`);
+
+assert.deepEqual(targetModeContractsSurviveDebugComparison.chestModes, { soft: "aggressive", medium: "aggressive", aggressive: "aggressive" }, `Expected Coach debug mode comparison to preserve selected target overrides, got ${JSON.stringify(targetModeContractsSurviveDebugComparison.chestModes)}`);
+assert.strictEqual(targetModeContractsSurviveDebugComparison.selectedMode, "medium", `Expected debug mode comparison not to mutate global mode, got ${targetModeContractsSurviveDebugComparison.selectedMode}`);
+assert.strictEqual(targetModeContractsSurviveDebugComparison.selectedOverride, "aggressive", `Expected debug mode comparison not to clear target override, got ${targetModeContractsSurviveDebugComparison.selectedOverride}`);
+
 const targetScrollRestore = runScenario(`
   var originalQuerySelector = document.querySelector;
   var scroller = { scrollLeft: 0 };
