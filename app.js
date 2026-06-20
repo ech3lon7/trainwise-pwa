@@ -3,7 +3,7 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 2;
 const STORES = ["workouts", "metrics", "settings"];
-const APP_VERSION = "1.5.32";
+const APP_VERSION = "1.5.33";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 const DRAFT_RECOVERY_KEY = "trainwise-draft-recovery-v1";
 const COPIED_COACH_PLAN_KEY = "trainwise-copied-coach-plan-v1";
@@ -338,15 +338,19 @@ function clearBanner() {
 
 function showLogDraftNotice() {
   if (state.activeTab !== "log") return;
-  state.logDraftNotice = {
-    id: uid(),
-    message: "Draft saved locally.",
-    detail: "Restore it if the Log screen gets cleared before lock-in."
-  };
+  clearLogDraftNotice();
+  showDraftSavedToast();
 }
 
 function clearLogDraftNotice() {
   state.logDraftNotice = null;
+}
+
+function showDraftSavedToast() {
+  const now = Date.now();
+  if (now - (showDraftSavedToast.lastShownAt || 0) < 2200) return;
+  showDraftSavedToast.lastShownAt = now;
+  toast("Draft saved.", { duration: 1400 });
 }
 
 function setUndoAction(label, payload) {
@@ -1521,6 +1525,17 @@ function saveDraftRecovery(reason = "draft") {
 
 function clearDraftRecovery() {
   safeLocalStorageRemove(DRAFT_RECOVERY_KEY);
+}
+
+function savedStrengthDraftRecovery() {
+  let recovery = null;
+  try {
+    recovery = JSON.parse(safeLocalStorageGet(DRAFT_RECOVERY_KEY) || "null");
+  } catch {
+    recovery = null;
+  }
+  if (!recovery?.strength?.workoutDraft?.length) return null;
+  return recovery.strength;
 }
 
 function clearDraftRecoveryScope(scope) {
@@ -3996,11 +4011,22 @@ function exerciseDraftTable(draft, index, total) {
 }
 
 function emptyStrengthLogMarkup(canAddExerciseTable = false) {
+  const savedDraft = savedStrengthDraftRecovery();
+  const restoreMarkup = savedDraft ? `
+      <div class="empty-restore-row">
+        <div>
+          <strong>Unsaved strength draft</strong>
+          <small>${escapeHtml(savedDraft.date || "Saved locally")}</small>
+        </div>
+        <button class="ghost-mini" type="button" data-action="restore-draft">Restore</button>
+      </div>
+    ` : "";
   return `
     <section class="empty log-empty-state">
       <h3>Add an exercise to start logging strength.</h3>
       <p class="muted small">${canAddExerciseTable ? "Add a library exercise, load a template, or copy Coach's plan before logging sets." : "Create a library exercise, load a template, or copy Coach's plan before logging sets."}</p>
       <button class="primary-button" type="button" data-action="${canAddExerciseTable ? "add-exercise-table" : "quick-add-exercise"}">Add exercise</button>
+      ${restoreMarkup}
     </section>
   `;
 }
@@ -4623,20 +4649,7 @@ function renderAppBanner() {
 }
 
 function renderLogDraftNotice() {
-  if (state.activeTab !== "log" || !state.logDraftNotice) return "";
-  const notice = state.logDraftNotice;
-  return `
-    <section class="log-draft-notice" role="status" aria-live="polite">
-      <div>
-        <strong>${escapeHtml(notice.message)}</strong>
-        <p>${escapeHtml(notice.detail)}</p>
-      </div>
-      <div class="log-draft-notice-actions">
-        <button class="ghost-mini" type="button" data-action="restore-draft">Restore</button>
-        <button class="icon-button" type="button" data-action="dismiss-log-draft-notice" aria-label="Dismiss draft saved message">x</button>
-      </div>
-    </section>
-  `;
+  return "";
 }
 
 function syncLogDraftNoticeDom() {

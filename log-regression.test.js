@@ -146,7 +146,7 @@ assert(stylesCode.includes(".data-safety-grid"), "Expected data safety summary s
 assert(stylesCode.includes(".widget-preference-list"), "Expected Today widget preference styling.");
 assert(stylesCode.includes(".collapsible-panel"), "Expected secondary settings/notes panels to be collapsible.");
 assert(stylesCode.includes(".settings-panel.collapsible-panel"), "Expected Settings panels to use collapsible panel styling.");
-assert(stylesCode.includes(".log-draft-notice strong"), "Expected compact Log draft notice text styling.");
+assert(stylesCode.includes(".empty-restore-row"), "Expected inline Log empty-state restore styling.");
 assert(appCode.includes("muscle-audit-panel"), "Expected long Coach muscle set audit to be collapsible.");
 assert(appCode.includes("scrollTopButtonShouldShow"), "Expected scroll-to-top threshold helper.");
 assert(appCode.includes("scrollTopButtonTopOffset"), "Expected scroll-to-top viewport positioning helper.");
@@ -160,9 +160,9 @@ assert(!appCode.includes('selectedExercise: "Push-up"'), "Expected Log startup n
 assert(!appCode.includes('showBanner("Unsaved draft restored."'), "Expected startup draft recovery not to show a top banner.");
 assert(appCode.includes("notifyMetricSaved"), "Expected metrics saves to use a dedicated bottom-only notification helper.");
 assert(!stylesCode.includes(".mobile-quick-toggle"), "Expected floating quick action button styling to be removed.");
-assert(indexCode.includes("v=1.5.32"), "Expected index shell references to use bumped app version.");
+assert(indexCode.includes("v=1.5.33"), "Expected index shell references to use bumped app version.");
 assert(!indexCode.includes('id="app" class="app-content" aria-live'), "Expected broad app aria-live to be removed in favor of targeted live regions.");
-assert(serviceWorkerCode.includes("trainwise-cache-v54"), "Expected service worker cache version bump.");
+assert(serviceWorkerCode.includes("trainwise-cache-v55"), "Expected service worker cache version bump.");
 
 const nutritionQuickTotals = runScenario(`
   ${reset}
@@ -487,6 +487,25 @@ assert.strictEqual(metricsBottomOnlyNotification.saved.banner, null, "Expected m
 assert.strictEqual(metricsBottomOnlyNotification.saved.toastCalls[0].message, "Metrics saved.", "Expected metric save to use bottom toast copy.");
 assert.strictEqual(metricsBottomOnlyNotification.saved.toastCalls[0].options.duration, 2000, "Expected metric save toast to last two seconds.");
 assert.strictEqual(metricsBottomOnlyNotification.updated.toastCalls[0].message, "Metrics updated.", "Expected metric update to use bottom toast copy.");
+
+const draftSaveUsesToastOnly = runScenario(`
+  ${reset}
+  state.activeTab = "log";
+  state.logDraftNotice = null;
+  showDraftSavedToast.lastShownAt = 0;
+  var toastCalls = [];
+  var originalToast = toast;
+  toast = (message, options = {}) => { toastCalls.push({ message, options }); };
+  showLogDraftNotice();
+  var result = { notice: state.logDraftNotice, toastCalls, markup: renderLogDraftNotice() };
+  toast = originalToast;
+  result;
+`);
+
+assert.strictEqual(draftSaveUsesToastOnly.notice, null, "Expected draft-save feedback not to create persistent notice state.");
+assert.strictEqual(draftSaveUsesToastOnly.toastCalls[0].message, "Draft saved.", "Expected draft-save feedback to use a compact bottom toast.");
+assert.strictEqual(draftSaveUsesToastOnly.toastCalls[0].options.duration, 1400, "Expected draft-save toast to stay brief.");
+assert.strictEqual(draftSaveUsesToastOnly.markup, "", "Expected draft-save overlay markup to stay absent.");
 
 const setRecords = runScenario(`
   ${reset}
@@ -1181,7 +1200,17 @@ const mobileQolMarkup = runScenario(`
   ${reset}
   state.activeTab = "log";
   state.appBanner = { message: "Workout locked in.", tone: "good", detail: "Undo is available.", action: "undo-last-action", actionLabel: "Undo" };
-  state.logDraftNotice = { message: "Draft saved locally.", detail: "Restore it." };
+  var storage = {};
+  localStorage.getItem = (key) => storage[key] || null;
+  localStorage.setItem = (key, value) => { storage[key] = value; };
+  localStorage.removeItem = (key) => { delete storage[key]; };
+  safeLocalStorageSet(DRAFT_RECOVERY_KEY, JSON.stringify({
+    version: APP_VERSION,
+    savedAt: "2026-06-16T12:00:00.000Z",
+    strength: { date: "2026-06-16", workoutDraft: [{ exercise: "Bench Press", setRows: [{ weight: 100, reps: 10 }] }] },
+    metric: null,
+    exercise: null
+  }));
   state.pendingImport = {
     source: "test-backup.json",
     summary: { workouts: 2, metrics: 1, customExercises: 3, newestDate: "2026-06-15" }
@@ -1191,6 +1220,7 @@ const mobileQolMarkup = runScenario(`
   ({
     banner: renderAppBanner(),
     logNotice: renderLogDraftNotice(),
+    emptyLog: emptyStrengthLogMarkup(true),
     hiddenNotice: (state.activeTab = "exercises", renderLogDraftNotice()),
     modal: renderImportPreview(),
     widgets: selectedDashboardWidgets(),
@@ -1202,8 +1232,9 @@ const mobileQolMarkup = runScenario(`
 
 assert(!mobileQolMarkup.banner.includes("Draft saved locally."), "Expected draft-save message to stay out of the top app banner.");
 assert(mobileQolMarkup.banner.includes("Workout locked in."), "Expected normal app banner messages to remain supported.");
-assert(mobileQolMarkup.logNotice.includes("Draft saved locally."), "Expected Log draft notice to render the draft-save message.");
-assert(mobileQolMarkup.logNotice.includes('data-action="restore-draft"'), "Expected Log draft notice to include restore action.");
+assert.strictEqual(mobileQolMarkup.logNotice, "", "Expected draft-save overlay markup to stay absent.");
+assert(mobileQolMarkup.emptyLog.includes("Unsaved strength draft"), "Expected empty Log state to surface recoverable strength drafts inline.");
+assert(mobileQolMarkup.emptyLog.includes('data-action="restore-draft"'), "Expected empty Log state to include restore action.");
 assert.strictEqual(mobileQolMarkup.hiddenNotice, "", "Expected Log draft notice to stay hidden outside the Log tab.");
 assert(mobileQolMarkup.modal.includes("Review backup import"), "Expected import preview dialog.");
 assert(mobileQolMarkup.modal.includes("2</strong> workouts"), "Expected import preview workout count.");
