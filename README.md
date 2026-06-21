@@ -19,7 +19,7 @@ TrainWise is a free, static, offline-first hypertrophy workout and nutrition PWA
 
 The app is minimum-first and home-basics focused.
 
-- Hypertrophy volume uses hard sets in a rolling 7-day window.
+- Hypertrophy volume uses hard sets in a local Monday-start training week.
 - The first target is 10 hard sets per muscle per week.
 - The growth zone is 12-20 hard sets per muscle per week.
 - Muscles should usually be trained at least 2 times per week.

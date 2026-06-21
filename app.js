@@ -3,12 +3,15 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 2;
 const STORES = ["workouts", "metrics", "settings"];
-const APP_VERSION = "1.5.18";
+const APP_VERSION = "1.5.37";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
+const DRAFT_RECOVERY_KEY = "trainwise-draft-recovery-v1";
+const COPIED_COACH_PLAN_KEY = "trainwise-copied-coach-plan-v1";
 let dbOpenPromise = null;
 let chartId = 0;
 let reloadingForUpdate = false;
 let renderToken = 0;
+let scrollTopTimer = null;
 const SESSION_LIMIT_MINUTES = 60;
 const COACH_TIME_TOLERANCE_MINUTES = 3;
 const COACH_TIMEFRAME_OPTIONS = [
@@ -29,6 +32,15 @@ const NUTRITION_MEALS = [
   { id: "dinner", label: "Dinner" },
   { id: "snacks", label: "Snacks" }
 ];
+const TODAY_WIDGET_OPTIONS = [
+  { id: "nextLift", label: "Next lift" },
+  { id: "lowestSets", label: "Lowest set counts" },
+  { id: "health", label: "Health coach" },
+  { id: "weeklySets", label: "Weekly hard sets" },
+  { id: "bodyWeight", label: "Body weight" },
+  { id: "protein", label: "Protein" }
+];
+const DEFAULT_TODAY_WIDGETS = TODAY_WIDGET_OPTIONS.map((option) => option.id);
 
 const HYPERTROPHY = {
   minimumSets: 10,
@@ -41,6 +53,12 @@ const HYPERTROPHY = {
   proteinFloorGPerKg: 1.6,
   proteinUpperGPerKg: 2.2
 };
+
+const COACH_GROWTH_MODE_OPTIONS = [
+  { id: "soft", label: "Soft", targetSets: 16, allowHighVolume: false, startSets: 2, rank: 0 },
+  { id: "medium", label: "Medium", targetSets: HYPERTROPHY.growthHigh, allowHighVolume: false, startSets: 3, rank: 1 },
+  { id: "aggressive", label: "Aggressive", targetSets: HYPERTROPHY.highVolumeFillMax, allowHighVolume: true, startSets: 4, rank: 2 }
+];
 
 const muscleGroups = [
   { id: "chest", label: "Chest" },
@@ -103,7 +121,7 @@ const state = {
   db: null,
   activeTab: "dashboard",
   logMode: "strength",
-  selectedExercise: "Push-up",
+  selectedExercise: "",
   selectedMuscle: "chest",
   editingExerciseId: null,
   exerciseSearch: "",
@@ -111,6 +129,7 @@ const state = {
   exerciseSort: "recent",
   exerciseFormDraft: null,
   exerciseFormErrors: {},
+  metricFormDraft: null,
   openExerciseActionMenu: null,
   editingWorkoutId: null,
   openExerciseMenu: null,
@@ -122,8 +141,18 @@ const state = {
   historySearch: "",
   historyDate: "",
   coachTimeframeMinutes: SESSION_LIMIT_MINUTES,
+  coachGlobalGrowthMode: "medium",
   coachTargetMuscles: [],
+  coachGrowthModes: {},
+  copiedCoachPlan: null,
+  previewNextCoachPlan: false,
+  settingsOpenPanels: [],
   draggingDraftId: null,
+  dragPendingDraftId: null,
+  appBanner: null,
+  logDraftNotice: null,
+  undoAction: null,
+  pendingImport: null,
   dismissedRecordTrophies: new Set(),
   templateQueue: [],
   draftDate: todayISO(),
@@ -185,6 +214,37 @@ function formatShortDate(value) {
   return date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
+function formatDateTime(value) {
+  if (!value) return "Never";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "Never";
+  return date.toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+}
+
+function shiftISODate(value, deltaDays) {
+  const date = parseLocalDate(value || todayISO());
+  if (Number.isNaN(date.getTime())) return todayISO();
+  date.setDate(date.getDate() + deltaDays);
+  return isoFromLocalDate(date);
+}
+
+function renderDateControl({ id, name = "", label = "Date", value = todayISO(), className = "", inputClass = "", clearable = false, required = true } = {}) {
+  const safeId = escapeHtml(id);
+  const safeValue = escapeHtml(value || todayISO());
+  return `
+    <div class="field date-control-field ${escapeHtml(className)}">
+      <label for="${safeId}">${escapeHtml(label)}</label>
+      <div class="date-control">
+        <button class="date-step-button" type="button" data-action="date-step" data-date-input="${safeId}" data-date-delta="-1" aria-label="Previous day">&lsaquo;</button>
+        <input id="${safeId}" class="${escapeHtml(inputClass)}" ${name ? `name="${escapeHtml(name)}"` : ""} type="date" ${required ? "required" : ""} value="${safeValue}" data-shared-date-input>
+        <button class="date-step-button" type="button" data-action="date-step" data-date-input="${safeId}" data-date-delta="1" aria-label="Next day">&rsaquo;</button>
+        <button class="ghost-button date-today-button" type="button" data-action="date-today" data-date-input="${safeId}">Today</button>
+        ${clearable ? `<button class="ghost-button date-clear-button" type="button" data-action="date-clear" data-date-input="${safeId}">Clear</button>` : ""}
+      </div>
+    </div>
+  `;
+}
+
 function parseNum(value) {
   const num = Number(value);
   return Number.isFinite(num) ? num : 0;
@@ -232,11 +292,122 @@ function normalizeName(value) {
   return String(value || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
 }
 
-function toast(message) {
+function toast(message, options = {}) {
   els.toast.textContent = message;
   els.toast.classList.add("show");
   window.clearTimeout(toast.timer);
-  toast.timer = window.setTimeout(() => els.toast.classList.remove("show"), 2600);
+  toast.timer = window.setTimeout(() => els.toast.classList.remove("show"), options.duration || 2600);
+}
+
+function showBanner(message, options = {}) {
+  state.appBanner = {
+    id: uid(),
+    message,
+    tone: options.tone || "info",
+    action: options.action || "",
+    actionLabel: options.actionLabel || "",
+    detail: options.detail || ""
+  };
+}
+
+function announce(message, options = {}) {
+  showBanner(message, options);
+  toast(message);
+}
+
+function notifyMetricSaved(existing) {
+  toast(existing ? "Metrics updated." : "Metrics saved.", { duration: 2000 });
+}
+
+function scrollTopButtonShouldShow(scrollY = 0, scrollHeight = 0, clientHeight = 0) {
+  if (!scrollHeight || !clientHeight || scrollHeight <= clientHeight * 1.5) return false;
+  const scrollable = Math.max(scrollHeight - clientHeight, 1);
+  return scrollY / scrollable > 0.55;
+}
+
+function scrollTopButtonTopOffset(scrollY = 0, viewport = null, innerHeightValue = 0, tabbarHeight = 76, buttonSize = 42, containingBlockOffset = 0) {
+  const safeGap = 12;
+  const visualLift = 22;
+  const visibleTop = viewport?.offsetTop || 0;
+  const visibleHeight = viewport?.height || innerHeightValue;
+  return Math.max(0, scrollY + visibleTop + visibleHeight - tabbarHeight - safeGap - buttonSize - visualLift - containingBlockOffset);
+}
+
+function clearBanner() {
+  state.appBanner = null;
+}
+
+function showLogDraftNotice() {
+  if (state.activeTab !== "log") return;
+  clearLogDraftNotice();
+  showDraftSavedToast();
+}
+
+function clearLogDraftNotice() {
+  state.logDraftNotice = null;
+}
+
+function showDraftSavedToast() {
+  const now = Date.now();
+  if (now - (showDraftSavedToast.lastShownAt || 0) < 2200) return;
+  showDraftSavedToast.lastShownAt = now;
+  toast("Draft saved.", { duration: 1400 });
+}
+
+function setUndoAction(label, payload) {
+  state.undoAction = {
+    id: uid(),
+    label,
+    payload,
+    createdAt: new Date().toISOString()
+  };
+}
+
+function clearUndoAction() {
+  state.undoAction = null;
+}
+
+function safeLocalStorageGet(key) {
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function safeLocalStorageSet(key, value) {
+  try {
+    localStorage.setItem(key, value);
+  } catch {}
+}
+
+function safeLocalStorageRemove(key) {
+  try {
+    localStorage.removeItem(key);
+  } catch {}
+}
+
+function selectedDashboardWidgets() {
+  const valid = new Set(TODAY_WIDGET_OPTIONS.map((option) => option.id));
+  const saved = Array.isArray(state.settings.dashboardWidgets) ? state.settings.dashboardWidgets : DEFAULT_TODAY_WIDGETS;
+  const filtered = saved.filter((id, index, items) => valid.has(id) && items.indexOf(id) === index);
+  return filtered.length ? filtered : [...DEFAULT_TODAY_WIDGETS];
+}
+
+function dashboardWidgetOrder() {
+  const valid = new Set(TODAY_WIDGET_OPTIONS.map((option) => option.id));
+  const saved = Array.isArray(state.settings.dashboardWidgetOrder) ? state.settings.dashboardWidgetOrder : DEFAULT_TODAY_WIDGETS;
+  const ordered = saved.filter((id, index, items) => valid.has(id) && items.indexOf(id) === index);
+  const missing = DEFAULT_TODAY_WIDGETS.filter((id) => !ordered.includes(id));
+  return [...ordered, ...missing];
+}
+
+async function saveDashboardWidgets(enabled, order = dashboardWidgetOrder()) {
+  const valid = new Set(TODAY_WIDGET_OPTIONS.map((option) => option.id));
+  const nextEnabled = enabled.filter((id, index, items) => valid.has(id) && items.indexOf(id) === index);
+  const nextOrder = order.filter((id, index, items) => valid.has(id) && items.indexOf(id) === index);
+  await saveSetting("dashboardWidgets", nextEnabled.length ? nextEnabled : [...DEFAULT_TODAY_WIDGETS]);
+  await saveSetting("dashboardWidgetOrder", nextOrder.length ? nextOrder : [...DEFAULT_TODAY_WIDGETS]);
 }
 
 function sleep(ms) {
@@ -581,8 +752,8 @@ function exerciseRemovalMode(exerciseOrName) {
 function exerciseCoverageStats() {
   const active = getCustomExercises();
   return muscleGroups.map((muscle) => {
-    const count = active.filter((exercise) => (exercise.primaryMuscles || []).includes(muscle.id)).length;
-    return { ...muscle, count, missing: count === 0 };
+    const exercises = active.filter((exercise) => (exercise.primaryMuscles || []).includes(muscle.id));
+    return { ...muscle, exercises, count: exercises.length, missing: exercises.length === 0 };
   });
 }
 
@@ -1086,6 +1257,26 @@ function metricEntryFromFormData(data = {}, existing = null) {
   };
 }
 
+function metricDraftFromForm(form = document.getElementById("metric-form")) {
+  if (!form || typeof FormData === "undefined") return null;
+  const data = Object.fromEntries(new FormData(form));
+  const date = data.date || state.metricDate || todayISO();
+  const hasInput = parseNum(data.bodyWeight) > 0
+    || parseNum(data.calories) > 0
+    || parseNum(data.protein) > 0
+    || String(data.notes || "").trim()
+    || nutritionMealsHaveData(nutritionMealsFromData(data));
+  return hasInput ? { date, data, updatedAt: new Date().toISOString() } : null;
+}
+
+function metricEntryForForm(date = state.metricDate || todayISO()) {
+  const saved = metricForDate(date);
+  if (state.metricFormDraft?.date === date) {
+    return metricEntryFromFormData(state.metricFormDraft.data, saved);
+  }
+  return saved || { date, bodyWeight: 0, calories: 0, protein: 0, meals: emptyNutritionMeals(), notes: "" };
+}
+
 function getAverage(field, days) {
   const start = recentDays(days);
   const values = canonicalMetricEntries()
@@ -1288,6 +1479,131 @@ function draftHasMeaningfulWorkoutInput(draft) {
   ));
 }
 
+function hasMeaningfulStrengthDraft() {
+  return Array.isArray(state.workoutDraft) && state.workoutDraft.some(draftHasMeaningfulWorkoutInput);
+}
+
+function exerciseFormDraftFromForm(form = document.getElementById("exercise-form")) {
+  if (!form || typeof FormData === "undefined") return null;
+  const values = exerciseFormValuesFromInput(new FormData(form));
+  const hasInput = values.name
+    || values.equipment
+    || values.reps
+    || values.rest
+    || values.cue
+    || (values.secondaryMuscles || []).length
+    || values.primaryMuscle !== "chest";
+  return hasInput ? values : null;
+}
+
+function draftRecoveryPayload(reason = "draft") {
+  return {
+    version: APP_VERSION,
+    reason,
+    savedAt: new Date().toISOString(),
+    strength: hasMeaningfulStrengthDraft()
+      ? {
+          date: state.draftDate,
+          selectedExercise: state.selectedExercise,
+          draftTargetMuscle: state.draftTargetMuscle,
+          workoutDraft: state.workoutDraft
+        }
+      : null,
+    metric: state.metricFormDraft || metricDraftFromForm(),
+    exercise: state.exerciseFormDraft || exerciseFormDraftFromForm()
+  };
+}
+
+function saveDraftRecovery(reason = "draft") {
+  const payload = draftRecoveryPayload(reason);
+  if (!payload.strength && !payload.metric && !payload.exercise) {
+    safeLocalStorageRemove(DRAFT_RECOVERY_KEY);
+    return false;
+  }
+  safeLocalStorageSet(DRAFT_RECOVERY_KEY, JSON.stringify(payload));
+  return true;
+}
+
+function clearDraftRecovery() {
+  safeLocalStorageRemove(DRAFT_RECOVERY_KEY);
+}
+
+function savedStrengthDraftRecovery() {
+  let recovery = null;
+  try {
+    recovery = JSON.parse(safeLocalStorageGet(DRAFT_RECOVERY_KEY) || "null");
+  } catch {
+    recovery = null;
+  }
+  if (!recovery?.strength?.workoutDraft?.length) return null;
+  return recovery.strength;
+}
+
+function clearDraftRecoveryScope(scope) {
+  let recovery = null;
+  try {
+    recovery = JSON.parse(safeLocalStorageGet(DRAFT_RECOVERY_KEY) || "null");
+  } catch {
+    recovery = null;
+  }
+  if (!recovery || typeof recovery !== "object") return;
+  if (scope === "strength") recovery.strength = null;
+  if (scope === "metric") recovery.metric = null;
+  if (scope === "exercise") recovery.exercise = null;
+  if (!recovery.strength && !recovery.metric && !recovery.exercise) {
+    clearDraftRecovery();
+    return;
+  }
+  recovery.savedAt = new Date().toISOString();
+  safeLocalStorageSet(DRAFT_RECOVERY_KEY, JSON.stringify(recovery));
+}
+
+function restoreDraftRecovery(payload = null) {
+  let recovery = payload;
+  if (!recovery) {
+    try {
+      recovery = JSON.parse(safeLocalStorageGet(DRAFT_RECOVERY_KEY) || "null");
+    } catch {
+      recovery = null;
+    }
+  }
+  if (!recovery || typeof recovery !== "object") return false;
+  if (recovery.strength?.workoutDraft?.length) {
+    state.draftDate = recovery.strength.date || todayISO();
+    state.selectedExercise = recovery.strength.selectedExercise || state.selectedExercise;
+    state.draftTargetMuscle = recovery.strength.draftTargetMuscle || state.draftTargetMuscle;
+    state.workoutDraft = recovery.strength.workoutDraft.map((draft) => ({
+      ...draft,
+      draftId: draft.draftId || uid(),
+      setRows: normalizeSetRows(draft.setRows)
+    }));
+    syncLegacyDraftFromFirst();
+  }
+  if (recovery.metric?.data) {
+    state.metricFormDraft = recovery.metric;
+    state.metricDate = recovery.metric.date || state.metricDate || todayISO();
+  }
+  if (recovery.exercise) {
+    state.exerciseFormDraft = recovery.exercise;
+    state.exerciseFormErrors = {};
+  }
+  return true;
+}
+
+function loadMetricDateDraft(date = todayISO()) {
+  state.metricDate = date || todayISO();
+  state.metricFormDraft = null;
+  clearLogDraftNotice();
+}
+
+function preserveVisibleDraft(reason = "navigation") {
+  const active = state.activeTab;
+  if (active === "log" && state.logMode === "strength") readDraftFromForm();
+  if (active === "log" && state.logMode === "metrics") state.metricFormDraft = metricDraftFromForm();
+  if (active === "exercises") state.exerciseFormDraft = exerciseFormDraftFromForm() || state.exerciseFormDraft;
+  saveDraftRecovery(reason);
+}
+
 function coachPendingWorkoutEntries() {
   const date = state.draftDate || todayISO();
   const draftDate = parseLocalDate(date);
@@ -1327,13 +1643,7 @@ function coachPendingWorkoutEntries() {
 }
 
 function coachWorkoutEntries() {
-  const pending = coachPendingWorkoutEntries();
-  if (!pending.length) return state.workouts;
-  const editedIds = new Set(pending.map((entry) => entry.editingWorkoutId).filter(Boolean));
-  return [
-    ...state.workouts.filter((entry) => !editedIds.has(entry.id)),
-    ...pending
-  ];
+  return state.workouts;
 }
 
 function coachWeeklyWorkouts(workouts = coachWorkoutEntries()) {
@@ -1371,13 +1681,53 @@ function comparableRepDrop(current, previous) {
   }, 0);
 }
 
-function exerciseUnderperformed(current, previous) {
+function exerciseProgressEvidence(current, priorHistory = []) {
+  const rows = setRowsFromWorkout(current).filter((row) => row.weight > 0 && row.reps > 0);
+  const priorRows = priorHistory.flatMap((workout) => setRowsFromWorkout(workout)).filter((row) => row.weight > 0 && row.reps > 0);
+  const latestE1rm = e1rm(current);
+  const priorBestE1rm = priorHistory.reduce((best, workout) => Math.max(best, e1rm(workout)), 0);
+  const latestTopSet = bestSet(current);
+  const priorTopSetScore = priorHistory.reduce((best, workout) => Math.max(best, bestSet(workout)?.score || 0), 0);
+  const bestRepsByWeight = new Map();
+  priorRows.forEach((row) => {
+    const key = recordWeightKey(row.weight);
+    bestRepsByWeight.set(key, Math.max(bestRepsByWeight.get(key) || 0, row.reps));
+  });
+  const priorMaxWeight = priorRows.reduce((max, row) => Math.max(max, row.weight), 0);
+  const repPrRows = rows.filter((row) => {
+    const priorReps = bestRepsByWeight.get(recordWeightKey(row.weight)) || 0;
+    return priorReps > 0 && row.reps > priorReps;
+  });
+  const weightPrRows = rows.filter((row) => row.weight > priorMaxWeight && row.reps >= 8);
+  const e1rmImproved = priorBestE1rm > 0 && latestE1rm > priorBestE1rm * 1.01;
+  const topSetPr = priorTopSetScore > 0 && latestTopSet && latestTopSet.score > priorTopSetScore * 1.005;
+  const reasons = [];
+  if (topSetPr) reasons.push("top set PR");
+  if (e1rmImproved) reasons.push("estimated 1RM improved");
+  if (repPrRows.length) reasons.push("rep PR at matched load");
+  if (weightPrRows.length) reasons.push("new 8+ rep load PR");
+  return {
+    progressed: reasons.length > 0,
+    reasons,
+    latestE1rm,
+    priorBestE1rm,
+    topSetPr: Boolean(topSetPr),
+    e1rmImproved,
+    repPrCount: repPrRows.length,
+    weightPrCount: weightPrRows.length
+  };
+}
+
+function exerciseUnderperformed(current, previous, options = {}) {
   if (!current || !previous) return false;
   const currentE1rm = e1rm(current);
   const previousE1rm = e1rm(previous);
   const e1rmDrop = previousE1rm > 0 && currentE1rm < previousE1rm * (1 - COACH_PERFORMANCE_DROP_THRESHOLD);
   const repDrops = comparableRepDrop(current, previous);
   const failureRir = (averageRir(current) ?? HYPERTROPHY.idealRirMin) <= 0;
+  if (options.progressEvidence?.progressed) {
+    return failureRir && repDrops >= 3 && e1rmDrop;
+  }
   return e1rmDrop || repDrops >= 2 || (failureRir && (e1rmDrop || repDrops > 0 || currentE1rm <= previousE1rm));
 }
 
@@ -1395,8 +1745,21 @@ function coachExercisePerformanceSignal(exercise, workouts = coachWorkoutEntries
   }
   const latest = history[0];
   const previous = history[1];
-  const latestUnder = exerciseUnderperformed(latest, previous);
-  const previousUnder = history.length >= 3 && exerciseUnderperformed(previous, history[2]);
+  const latestProgress = exerciseProgressEvidence(latest, history.slice(1));
+  if (latestProgress.progressed) {
+    return {
+      status: "progressing",
+      tone: "good",
+      history,
+      latest,
+      previous,
+      progressEvidence: latestProgress,
+      message: `${exercise.name} progressed last session (${latestProgress.reasons.join(", ")}); keep recovery-managed volume and use the next small overload target.`
+    };
+  }
+  const latestUnder = exerciseUnderperformed(latest, previous, { progressEvidence: latestProgress });
+  const previousProgress = history.length >= 3 ? exerciseProgressEvidence(previous, history.slice(2)) : null;
+  const previousUnder = history.length >= 3 && exerciseUnderperformed(previous, history[2], { progressEvidence: previousProgress });
   if (latestUnder && previousUnder) {
     return {
       status: "repeated-failure",
@@ -1404,6 +1767,7 @@ function coachExercisePerformanceSignal(exercise, workouts = coachWorkoutEntries
       history,
       latest,
       previous,
+      progressEvidence: latestProgress,
       message: `${exercise.name} has stalled across recent sessions; rotate or deload before adding more volume.`
     };
   }
@@ -1414,6 +1778,7 @@ function coachExercisePerformanceSignal(exercise, workouts = coachWorkoutEntries
       history,
       latest,
       previous,
+      progressEvidence: latestProgress,
       message: `${exercise.name} dipped last session; use a small load reduction and keep 1-2 RIR.`
     };
   }
@@ -1426,6 +1791,7 @@ function coachExercisePerformanceSignal(exercise, workouts = coachWorkoutEntries
       history,
       latest,
       previous,
+      progressEvidence: latestProgress,
       message: `${exercise.name} is progressing; use the next small overload target.`
     };
   }
@@ -1435,6 +1801,7 @@ function coachExercisePerformanceSignal(exercise, workouts = coachWorkoutEntries
     history,
     latest,
     previous,
+    progressEvidence: latestProgress,
     message: `${exercise.name} is steady; progress with a small rep or load target.`
   };
 }
@@ -1510,6 +1877,13 @@ function isMuscleAvailableForPlanning(target) {
 function muscleDateGapReason(target) {
   const when = target.primaryDaysSince === 0 ? "today" : "yesterday";
   return `${target.label} was directly trained ${when}; Coach uses a 2-day gap by date before direct work returns.`;
+}
+
+function coachTargetSelectionWarning(muscleId, context = coachPlanningContext()) {
+  const target = context.rankedStats.find((stat) => stat.id === muscleId);
+  if (!target || isMuscleAvailableForPlanning(target)) return "";
+  const when = target.primaryDaysSince === 0 ? "today" : "yesterday";
+  return `${target.label} was directly trained ${when}. Coach will protect recovery and skip direct ${target.label} work today.`;
 }
 
 function scoreExerciseForMuscle(exercise, muscleId, options = {}) {
@@ -1699,24 +2073,36 @@ function plannedOptimumGap(item) {
   return Math.max(0, HYPERTROPHY.growthHigh - (item.muscle.sets + item.sets));
 }
 
-function planSetCeilingForTarget(target, allowHighVolume = false) {
-  if (target.sets < HYPERTROPHY.minimumSets) return HYPERTROPHY.minimumSets;
-  return allowHighVolume ? HYPERTROPHY.highVolumeFillMax : HYPERTROPHY.growthHigh;
+function planSetCeilingForTarget(target, allowHighVolume = false, growthMode = coachGrowthModeForMuscle(target.id)) {
+  const option = coachGrowthModeOption(growthMode);
+  if (target.sets < HYPERTROPHY.minimumSets && option.id === "soft") return HYPERTROPHY.minimumSets;
+  return allowHighVolume && option.allowHighVolume ? HYPERTROPHY.highVolumeFillMax : option.targetSets;
 }
 
-function planSetGap(target, allowHighVolume = false) {
-  return Math.max(0, Math.ceil(planSetCeilingForTarget(target, allowHighVolume) - target.sets));
+function planSetGap(target, allowHighVolume = false, growthMode = coachGrowthModeForMuscle(target.id)) {
+  return Math.max(0, Math.ceil(planSetCeilingForTarget(target, allowHighVolume, growthMode) - target.sets));
 }
 
-function plannedSetGap(item, allowHighVolume = false) {
-  return Math.max(0, Math.ceil(planSetCeilingForTarget(item.muscle, allowHighVolume) - (item.muscle.sets + item.sets)));
+function plannedSetGap(item, allowHighVolume = false, growthMode = item.growthMode) {
+  return Math.max(0, Math.ceil(planSetCeilingForTarget(item.muscle, allowHighVolume, growthMode) - (item.muscle.sets + item.sets)));
 }
 
 function planPriorityReason(item) {
+  if (item.phase === "target-extra") {
+    const modeLabel = item.growthMode ? `${coachGrowthModeLabel(item.growthMode)} target: ` : "";
+    const parts = [
+      `${modeLabel}${item.muscle.label} is ${fmt(item.muscle.sets, 1)}/${HYPERTROPHY.growthHigh}+; adding selected extra volume`,
+      `${item.muscle.sessions}/2 touches`
+    ];
+    if (item.muscle.daysSince !== null) parts.push(`last hit ${item.muscle.daysSince}d ago`);
+    return parts.join(" - ");
+  }
   const highVolume = item.phase === "high-volume";
-  const targetSets = planSetCeilingForTarget(item.muscle, highVolume);
+  const targetSets = planSetCeilingForTarget(item.muscle, highVolume, item.growthMode);
+  const modeLabel = item.growthMode ? `${coachGrowthModeLabel(item.growthMode)} mode: ` : "";
+  const targetLabel = item.muscle.sets < HYPERTROPHY.minimumSets ? "weekly floor" : "upper growth target";
   const parts = [
-    `${highVolume ? "High-volume filler: " : ""}${item.muscle.label} is ${fmt(item.muscle.sets, 1)}/${targetSets} hard sets`,
+    `${highVolume ? "High-volume filler: " : modeLabel}${item.muscle.label} is ${fmt(item.muscle.sets, 1)}/${targetSets} ${targetLabel}`,
     `${item.muscle.sessions}/2 touches`
   ];
   if (item.muscle.daysSince !== null) parts.push(`last hit ${item.muscle.daysSince}d ago`);
@@ -1737,6 +2123,35 @@ function selectedCoachTargetMuscles() {
 
 function isCoachTargetMuscle(muscleId, targetMuscles = selectedCoachTargetMuscles()) {
   return targetMuscles.includes(muscleId);
+}
+
+function selectedCoachGlobalGrowthMode() {
+  const raw = state.coachGlobalGrowthMode;
+  return COACH_GROWTH_MODE_OPTIONS.some((option) => option.id === raw) ? raw : "medium";
+}
+
+function coachGrowthModeForMuscle(muscleId, globalMode = selectedCoachGlobalGrowthMode()) {
+  const raw = state.coachGrowthModes && typeof state.coachGrowthModes === "object" ? state.coachGrowthModes[muscleId] : "";
+  return COACH_GROWTH_MODE_OPTIONS.some((option) => option.id === raw) ? raw : globalMode;
+}
+
+function coachGrowthModeOption(mode) {
+  return COACH_GROWTH_MODE_OPTIONS.find((option) => option.id === mode) || COACH_GROWTH_MODE_OPTIONS[0];
+}
+
+function coachGrowthModeLabel(mode) {
+  return coachGrowthModeOption(mode).label;
+}
+
+function coachGrowthModeRank(mode) {
+  return coachGrowthModeOption(mode).rank || 0;
+}
+
+function selectedCoachGrowthModes(targetMuscles = selectedCoachTargetMuscles()) {
+  const modes = state.coachGrowthModes && typeof state.coachGrowthModes === "object" ? state.coachGrowthModes : {};
+  return Object.fromEntries(targetMuscles
+    .filter((muscleId) => COACH_GROWTH_MODE_OPTIONS.some((option) => option.id === modes[muscleId]))
+    .map((muscleId) => [muscleId, modes[muscleId]]));
 }
 
 function coachTimeframeLabel(minutes = selectedCoachTimeframeMinutes()) {
@@ -1768,17 +2183,131 @@ function plannedExerciseMinutes(item, sets = item.sets) {
   return estimateExerciseMinutes(item.exercise, sets);
 }
 
-function initialSetsForPlanTarget(target, caps, allowHighVolume = false) {
-  const gap = planSetGap(target, allowHighVolume);
-  if (!gap) return 0;
-  return Math.max(1, Math.min(caps.minSets, caps.maxSets, gap));
+function coachModePlanningBehavior(growthMode, caps, isTarget = false) {
+  const option = coachGrowthModeOption(growthMode);
+  const mode = option.id;
+  const maxSets = mode === "soft"
+    ? Math.max(caps.minSets, caps.maxSets - 2)
+    : mode === "aggressive"
+      ? caps.maxSets + (isTarget ? 3 : 2)
+      : caps.maxSets;
+  return {
+    ...option,
+    maxSets,
+    startSets: Math.max(caps.minSets, option.startSets || caps.minSets),
+    fillRank: option.rank || 0
+  };
 }
 
-function maxSetsForPlanTarget(target, caps, fillToTime = false, allowHighVolume = false) {
-  const targetGap = planSetGap(target, allowHighVolume);
+function maxSetsForMode(caps, growthMode, isTarget = false) {
+  const mode = coachModePlanningBehavior(growthMode, caps, isTarget);
+  return mode.maxSets;
+}
+
+function modeAdjustedGrowthMode(item, floorGrowthMode = "") {
+  return floorGrowthMode && item.growthMode === "aggressive" ? floorGrowthMode : item.growthMode;
+}
+
+function totalPlanSets(plan) {
+  return (plan?.items || []).reduce((sum, item) => sum + (Number(item.sets) || 0), 0);
+}
+
+function planItemsReducedFromBaseline(plan, baselinePlan) {
+  const baselineByMuscle = new Map((baselinePlan?.items || []).map((item) => [item.muscle.id, item]));
+  return (plan?.items || []).filter((item) => {
+    const baseline = baselineByMuscle.get(item.muscle.id);
+    return baseline && item.sets < baseline.sets;
+  });
+}
+
+function aggressivePlanLimitingReason(plan, baselinePlan) {
+  if (!plan || !baselinePlan) return "";
+  const lowerItems = planItemsReducedFromBaseline(plan, baselinePlan);
+  if (totalPlanSets(plan) > totalPlanSets(baselinePlan) && !lowerItems.length) return "";
+  if (plan.totalMinutes >= plan.hardLimitMinutes || baselinePlan.totalMinutes >= baselinePlan.hardLimitMinutes) {
+    return "Aggressive held at Medium-level volume because the selected timeframe is already filled.";
+  }
+  if (plan.performanceNotes?.length) {
+    return "Aggressive held at Medium-level volume because performance or deload safeguards are active.";
+  }
+  if (plan.missing?.length) {
+    return "Aggressive held at Medium-level volume because library-safe coverage is missing.";
+  }
+  if (plan.deprioritized?.length || baselinePlan.deprioritized?.length) {
+    return "Aggressive held at Medium-level volume because remaining useful muscles are inside the 2-day recovery gap.";
+  }
+  const atCeiling = (plan.items || []).length && plan.items.every((item) => plannedSetGap(item, item.phase === "high-volume") <= 0);
+  if (atCeiling) {
+    return "Aggressive held at Medium-level volume because planned muscles are already near the upper growth zone.";
+  }
+  return "Aggressive held at Medium-level volume because current guardrails leave no recoverable extra volume.";
+}
+
+function initialSetsForPlanTarget(target, caps, allowHighVolume = false, growthMode = coachGrowthModeForMuscle(target.id)) {
+  const gap = planSetGap(target, allowHighVolume, growthMode);
+  if (!gap) return 0;
+  const behavior = coachModePlanningBehavior(growthMode, caps);
+  return Math.max(1, Math.min(behavior.maxSets, gap, behavior.startSets));
+}
+
+function maxSetsForPlanTarget(target, caps, fillToTime = false, allowHighVolume = false, growthMode = coachGrowthModeForMuscle(target.id), isTarget = false) {
+  const targetGap = planSetGap(target, allowHighVolume, growthMode);
+  const modeMaxSets = maxSetsForMode(caps, growthMode, isTarget);
   if (!targetGap) return 0;
-  if (fillToTime) return Math.max(1, Math.min(caps.maxSets, targetGap));
-  return Math.max(1, Math.min(caps.maxSets, Math.max(1, Math.ceil(target.deficit))));
+  if (fillToTime) return Math.max(1, Math.min(modeMaxSets, targetGap));
+  return Math.max(1, Math.min(modeMaxSets, Math.max(1, Math.ceil(target.deficit))));
+}
+
+function targetReserveSetCount(target, growthMode, limitMinutes = selectedCoachTimeframeMinutes()) {
+  const mode = coachGrowthModeOption(growthMode).id;
+  const base = mode === "soft" ? 2 : mode === "aggressive" ? 4 : 3;
+  const timed = limitMinutes <= 40 ? Math.min(base, 2) : limitMinutes >= 75 && mode === "aggressive" ? 5 : base;
+  const highVolumeRoom = Math.max(0, Math.floor(HYPERTROPHY.highVolumeFillMax - target.sets));
+  return Math.min(timed, highVolumeRoom);
+}
+
+function mediumComparisonGrowthModes(growthModes = {}) {
+  return Object.fromEntries(Object.entries(growthModes).map(([muscleId, mode]) => [
+    muscleId,
+    mode === "aggressive" ? "medium" : mode
+  ]));
+}
+
+function lowerCoachGrowthMode(mode) {
+  const rank = coachGrowthModeRank(mode);
+  const lower = COACH_GROWTH_MODE_OPTIONS
+    .filter((option) => option.rank < rank)
+    .sort((a, b) => b.rank - a.rank)[0];
+  return lower?.id || "";
+}
+
+function targetModeContractSetFloors(limitMinutes = SESSION_LIMIT_MINUTES, options = {}) {
+  const targetMuscles = Array.isArray(options.targetMuscles) ? options.targetMuscles : selectedCoachTargetMuscles();
+  if (!targetMuscles.length) return {};
+  const growthModes = options.growthModes && typeof options.growthModes === "object" ? options.growthModes : selectedCoachGrowthModes(targetMuscles);
+  const globalGrowthMode = COACH_GROWTH_MODE_OPTIONS.some((option) => option.id === options.globalGrowthMode)
+    ? options.globalGrowthMode
+    : selectedCoachGlobalGrowthMode();
+  const floors = {};
+
+  for (const muscleId of targetMuscles) {
+    let mode = lowerCoachGrowthMode(growthModes[muscleId] || globalGrowthMode);
+    while (mode) {
+      const baselinePlan = buildSessionPlan(limitMinutes, {
+        restart: options.restart || false,
+        targetMuscles,
+        globalGrowthMode,
+        growthModes: { ...growthModes, [muscleId]: mode },
+        context: options.context,
+        skipTargetModeContracts: true
+      });
+      const baselineItem = baselinePlan.items.find((item) => item.muscle.id === muscleId);
+      if (baselineItem?.sets) floors[muscleId] = Math.max(floors[muscleId] || 0, baselineItem.sets);
+      mode = lowerCoachGrowthMode(mode);
+    }
+  }
+
+  return floors;
 }
 
 function sessionShortfallReason({ totalMinutes, cappedLimit, targetFloor, allStats, items, missing }) {
@@ -1786,7 +2315,7 @@ function sessionShortfallReason({ totalMinutes, cappedLimit, targetFloor, allSta
   const base = `Estimated ${totalMinutes}/${cappedLimit} min`;
   const plannedIds = new Set(items.map((item) => item.muscle.id));
   const libraryBlocked = allStats.some((target) => (
-    target.sets < HYPERTROPHY.highVolumeFillMax
+    planSetGap(target, false) > 0
     && !plannedIds.has(target.id)
     && !hasPrimaryExerciseForMuscle(target.id)
   ));
@@ -1794,7 +2323,7 @@ function sessionShortfallReason({ totalMinutes, cappedLimit, targetFloor, allSta
     return `${base} because library-safe coverage is missing or no library-safe remaining work fits.`;
   }
   const recoveryBlocked = allStats.some((target) => (
-    target.sets < HYPERTROPHY.growthHigh
+    planSetGap(target, false) > 0
     && !plannedIds.has(target.id)
     && hasPrimaryExerciseForMuscle(target.id)
     && !isMuscleAvailableForPlanning(target)
@@ -1808,19 +2337,28 @@ function sessionShortfallReason({ totalMinutes, cappedLimit, targetFloor, allSta
 function buildSessionPlan(limitMinutes = SESSION_LIMIT_MINUTES, options = {}) {
   const restart = options.restart || false;
   const targetMuscles = Array.isArray(options.targetMuscles) ? options.targetMuscles : selectedCoachTargetMuscles();
+  const growthModes = options.growthModes && typeof options.growthModes === "object" ? options.growthModes : selectedCoachGrowthModes(targetMuscles);
+  const globalGrowthMode = COACH_GROWTH_MODE_OPTIONS.some((option) => option.id === options.globalGrowthMode)
+    ? options.globalGrowthMode
+    : selectedCoachGlobalGrowthMode();
   const cappedLimit = Math.min(75, Math.max(30, Number(limitMinutes) || SESSION_LIMIT_MINUTES));
   const targetFloor = Math.max(0, cappedLimit - COACH_TIME_TOLERANCE_MINUTES);
   const hardLimit = cappedLimit + COACH_TIME_TOLERANCE_MINUTES;
   const caps = sessionPlanCaps(cappedLimit, restart);
+  const muscleCap = Math.max(COACH_DAILY_MUSCLE_CAP, caps.maxItems);
   const planningContext = options.context || coachPlanningContext();
   const coachWorkouts = planningContext.workouts;
   const allStats = planningContext.rankedStats;
   const stats = allStats.filter((stat) => stat.sets < HYPERTROPHY.minimumSets);
-  const optimumCandidates = allStats.filter((stat) => stat.sets < HYPERTROPHY.growthHigh);
+  const growthModeFor = (muscleId) => growthModes[muscleId] || globalGrowthMode;
+  const isAggressiveTarget = (target) => growthModeFor(target.id) === "aggressive";
+  const allowsHighVolumeTarget = (target) => isAggressiveTarget(target) && target.readiness !== "high";
+  const optimumCandidates = allStats.filter((stat) => planSetGap(stat, false, growthModeFor(stat.id)) > 0);
   const items = [];
   const missing = [];
   const missingIds = new Set();
   const performanceNotes = [];
+  const contractNotes = [];
   const performanceNoteKeys = new Set();
   let totalMinutes = 0;
   const usedExercises = new Set();
@@ -1834,9 +2372,10 @@ function buildSessionPlan(limitMinutes = SESSION_LIMIT_MINUTES, options = {}) {
 
   const addTargetToPlan = (target, addOptions = {}) => {
     const trackMissing = addOptions.trackMissing !== false;
-    const allowHighVolume = addOptions.allowHighVolume === true;
+    const growthMode = addOptions.growthMode || growthModeFor(target.id);
+    const allowHighVolume = addOptions.allowHighVolume === true && coachGrowthModeOption(growthMode).allowHighVolume;
     const phase = addOptions.phase || (target.sets < HYPERTROPHY.minimumSets ? "floor" : "optimum");
-    if (!items.some((item) => item.muscle.id === target.id) && new Set(items.map((item) => item.muscle.id)).size >= COACH_DAILY_MUSCLE_CAP) {
+    if (!items.some((item) => item.muscle.id === target.id) && new Set(items.map((item) => item.muscle.id)).size >= muscleCap) {
       return false;
     }
     const candidateSignals = exerciseDatabase()
@@ -1856,7 +2395,10 @@ function buildSessionPlan(limitMinutes = SESSION_LIMIT_MINUTES, options = {}) {
     const performanceSignal = coachExercisePerformanceSignal(exercise, coachWorkouts);
     const planTarget = coachPlanTargetForExercise(exercise, performanceSignal);
     addPerformanceNote(performanceSignal);
-    let sets = initialSetsForPlanTarget(target, caps, allowHighVolume);
+    let sets = Number.isFinite(addOptions.setCount)
+      ? Math.max(1, addOptions.setCount)
+      : initialSetsForPlanTarget(target, caps, allowHighVolume, growthMode);
+    if (Number.isFinite(addOptions.setCap)) sets = Math.min(sets, Math.max(1, addOptions.setCap));
     if (planTarget.kind === "deload") sets = Math.max(1, sets - 1);
     if (!sets) return false;
     let minutes = estimateExerciseMinutes(exercise, sets);
@@ -1865,7 +2407,7 @@ function buildSessionPlan(limitMinutes = SESSION_LIMIT_MINUTES, options = {}) {
       minutes = estimateExerciseMinutes(exercise, sets);
     }
     if (totalMinutes + minutes > hardLimit) return false;
-    items.push({ muscle: target, exercise, sets, minutes, reason: "", phase, planTarget, performanceSignal });
+    items.push({ muscle: target, exercise, sets, minutes, reason: "", phase, planTarget, performanceSignal, growthMode });
     usedExercises.add(exercise.id);
     totalMinutes += minutes;
     return true;
@@ -1879,19 +2421,65 @@ function buildSessionPlan(limitMinutes = SESSION_LIMIT_MINUTES, options = {}) {
     if (items.length >= caps.maxItems) break;
   }
 
-  if (!restart && (optimumCandidates.length || targetMuscles.length)) {
-    const supplementalTargets = allStats.filter((target) => (
-      target.sets < HYPERTROPHY.growthHigh
+  if (!restart && targetMuscles.length) {
+    const targetSupplemental = allStats.filter((target) => (
+      isCoachTargetMuscle(target.id, targetMuscles)
+      && planSetGap(target, false, growthModeFor(target.id)) > 0
+      && target.sets < HYPERTROPHY.growthHigh
       && !items.some((item) => item.muscle.id === target.id)
       && isMuscleAvailableForPlanning(target)
     )).sort((a, b) => (
-      Number(isCoachTargetMuscle(b.id, targetMuscles)) - Number(isCoachTargetMuscle(a.id, targetMuscles))
-    ) || (optimumSetGap(b) - optimumSetGap(a)) || coachMusclePrioritySort(a, b));
+      (planSetGap(b, false, growthModeFor(b.id)) - planSetGap(a, false, growthModeFor(a.id)))
+      || (coachGrowthModeRank(growthModeFor(b.id)) - coachGrowthModeRank(growthModeFor(a.id)))
+      || coachMusclePrioritySort(a, b)
+    ));
+
+    for (const target of targetSupplemental) {
+      if (items.length >= caps.maxItems) break;
+      addTargetToPlan(target, { phase: "optimum", trackMissing: stats.length === 0, growthMode: growthModeFor(target.id) });
+    }
+
+    const targetReserve = allStats.filter((target) => (
+      isCoachTargetMuscle(target.id, targetMuscles)
+      && !items.some((item) => item.muscle.id === target.id)
+      && isMuscleAvailableForPlanning(target)
+      && target.sets < HYPERTROPHY.highVolumeFillMax
+    )).sort((a, b) => (
+      (coachGrowthModeRank(growthModeFor(b.id)) - coachGrowthModeRank(growthModeFor(a.id)))
+      || (a.sets - b.sets)
+      || coachMusclePrioritySort(a, b)
+    ));
+
+    for (const target of targetReserve) {
+      if (items.length >= caps.maxItems) break;
+      const growthMode = growthModeFor(target.id);
+      const setCount = targetReserveSetCount(target, growthMode, cappedLimit);
+      if (!setCount) continue;
+      addTargetToPlan(target, {
+        phase: "target-extra",
+        trackMissing: stats.length === 0,
+        growthMode,
+        allowHighVolume: true,
+        setCount
+      });
+    }
+  }
+
+  if (!restart && (optimumCandidates.length || targetMuscles.length)) {
+    const supplementalTargets = allStats.filter((target) => (
+      planSetGap(target, false, growthModeFor(target.id)) > 0
+      && target.sets < HYPERTROPHY.growthHigh
+      && !isCoachTargetMuscle(target.id, targetMuscles)
+      && !items.some((item) => item.muscle.id === target.id)
+      && isMuscleAvailableForPlanning(target)
+    )).sort((a, b) => (
+      (optimumSetGap(b) - optimumSetGap(a)) || coachMusclePrioritySort(a, b)
+    ));
     const freshSupplemental = balancedCoverageTargets(supplementalTargets);
 
     for (const target of freshSupplemental) {
       if (totalMinutes >= targetFloor || items.length >= caps.maxItems) break;
-      addTargetToPlan(target, { phase: "optimum", trackMissing: stats.length === 0 });
+      addTargetToPlan(target, { phase: "optimum", trackMissing: stats.length === 0, growthMode: growthModeFor(target.id) });
     }
   }
 
@@ -1911,20 +2499,28 @@ function buildSessionPlan(limitMinutes = SESSION_LIMIT_MINUTES, options = {}) {
 
   const addSetsToExisting = (fillOptions = {}) => {
     const allowHighVolume = fillOptions.allowHighVolume === true;
+    const floorGrowthMode = fillOptions.floorGrowthMode || "";
     let changed = true;
     while (changed) {
       changed = false;
       const eligible = items
-        .filter((item) => item.sets < maxSetsForPlanTarget(
-          item.muscle,
-          caps,
-          allowHighVolume || (!restart && (optimumCandidates.length > 0 || targetMuscles.length > 0)),
-          allowHighVolume
-        ))
+        .map((item) => {
+          const effectiveGrowthMode = modeAdjustedGrowthMode(item, floorGrowthMode);
+          const maxSets = maxSetsForPlanTarget(
+            item.muscle,
+            caps,
+            allowHighVolume || (!restart && (optimumCandidates.length > 0 || targetMuscles.length > 0)),
+            allowHighVolume,
+            effectiveGrowthMode,
+            isCoachTargetMuscle(item.muscle.id, targetMuscles)
+          );
+          return { item, effectiveGrowthMode, maxSets };
+        })
+        .filter(({ item, maxSets }) => item.sets < maxSets)
         .sort((a, b) => (
-          Number(isCoachTargetMuscle(b.muscle.id, targetMuscles)) - Number(isCoachTargetMuscle(a.muscle.id, targetMuscles))
-        ) || (plannedSetGap(b, allowHighVolume) - plannedSetGap(a, allowHighVolume)) || (plannedOptimumGap(b) - plannedOptimumGap(a)) || (b.muscle.deficit - a.muscle.deficit) || (a.sets - b.sets) || (plannedExerciseMinutes(a, a.sets + 1) - plannedExerciseMinutes(b, b.sets + 1)));
-      for (const item of eligible) {
+          Number(isCoachTargetMuscle(b.item.muscle.id, targetMuscles)) - Number(isCoachTargetMuscle(a.item.muscle.id, targetMuscles))
+        ) || (coachGrowthModeRank(b.item.growthMode) - coachGrowthModeRank(a.item.growthMode)) || (plannedSetGap(b.item, allowHighVolume, b.effectiveGrowthMode) - plannedSetGap(a.item, allowHighVolume, a.effectiveGrowthMode)) || (plannedOptimumGap(b.item) - plannedOptimumGap(a.item)) || (b.item.muscle.deficit - a.item.muscle.deficit) || (a.item.sets - b.item.sets) || (plannedExerciseMinutes(a.item, a.item.sets + 1) - plannedExerciseMinutes(b.item, b.item.sets + 1)));
+      for (const { item } of eligible) {
         const nextMinutes = plannedExerciseMinutes(item, item.sets + 1);
         const extraMinutes = nextMinutes - item.minutes;
         if (totalMinutes + extraMinutes > hardLimit) continue;
@@ -1938,24 +2534,98 @@ function buildSessionPlan(limitMinutes = SESSION_LIMIT_MINUTES, options = {}) {
     }
   };
 
+  const freeNonTargetMinutesForTarget = (neededMinutes, protectedMuscleId) => {
+    while (totalMinutes + neededMinutes > hardLimit) {
+      const candidate = items
+        .map((item, index) => ({ item, index }))
+        .filter(({ item }) => (
+          item.muscle.id !== protectedMuscleId
+          && !isCoachTargetMuscle(item.muscle.id, targetMuscles)
+          && item.sets > 0
+          && item.muscle.sets + item.sets - 1 >= HYPERTROPHY.minimumSets
+        ))
+        .sort((a, b) => (
+          coachGrowthModeRank(a.item.growthMode) - coachGrowthModeRank(b.item.growthMode)
+        ) || (plannedSetGap(a.item, false) - plannedSetGap(b.item, false)) || (b.item.sets - a.item.sets))[0];
+      if (!candidate) return false;
+
+      const previousMinutes = candidate.item.minutes;
+      if (candidate.item.sets > 1) {
+        candidate.item.sets -= 1;
+        candidate.item.minutes = plannedExerciseMinutes(candidate.item);
+        const freedMinutes = previousMinutes - candidate.item.minutes;
+        if (freedMinutes <= 0) return false;
+        totalMinutes -= freedMinutes;
+      } else {
+        totalMinutes -= previousMinutes;
+        usedExercises.delete(candidate.item.exercise.id);
+        items.splice(candidate.index, 1);
+      }
+    }
+    return true;
+  };
+
+  const enforceTargetModeContracts = () => {
+    if (options.skipTargetModeContracts || !targetMuscles.length) return false;
+    let changed = false;
+    const setFloors = targetModeContractSetFloors(cappedLimit, {
+      restart,
+      targetMuscles,
+      globalGrowthMode,
+      growthModes,
+      context: planningContext
+    });
+    for (const [muscleId, minimumSets] of Object.entries(setFloors)) {
+      const item = items.find((candidate) => candidate.muscle.id === muscleId);
+      if (!item || item.sets >= minimumSets) continue;
+      const label = item.muscle.label;
+      const modeLabel = coachGrowthModeLabel(item.growthMode);
+      while (item.sets < minimumSets) {
+        const nextMinutes = plannedExerciseMinutes(item, item.sets + 1);
+        const extraMinutes = nextMinutes - item.minutes;
+        if (totalMinutes + extraMinutes > hardLimit && !freeNonTargetMinutesForTarget(extraMinutes, muscleId)) break;
+        if (totalMinutes + extraMinutes > hardLimit) break;
+        item.sets += 1;
+        item.minutes = nextMinutes;
+        totalMinutes += extraMinutes;
+        changed = true;
+      }
+      if (item.sets < minimumSets) {
+        contractNotes.push(`${label} ${modeLabel} target held at ${item.sets}/${minimumSets} sets because protected floor work, recovery guardrails, or the selected timeframe blocked more volume.`);
+      }
+    }
+    return changed;
+  };
+
+  if (globalGrowthMode === "aggressive" || items.some((item) => item.growthMode === "aggressive")) {
+    addSetsToExisting({ floorGrowthMode: "medium" });
+  }
   addSetsToExisting();
 
   if (!restart && totalMinutes < targetFloor) {
+    if (globalGrowthMode === "aggressive") {
+      addSetsToExisting({ allowHighVolume: true });
+    }
     const highVolumeTargets = balancedCoverageTargets(allStats.filter((target) => (
       target.sets < HYPERTROPHY.highVolumeFillMax
       && !items.some((item) => item.muscle.id === target.id)
       && isMuscleAvailableForPlanning(target)
+      && allowsHighVolumeTarget(target)
     )).sort((a, b) => (
       Number(isCoachTargetMuscle(b.id, targetMuscles)) - Number(isCoachTargetMuscle(a.id, targetMuscles))
     ) || (a.sets - b.sets) || coachMusclePrioritySort(a, b)));
 
     for (const target of highVolumeTargets) {
       if (totalMinutes >= targetFloor || items.length >= caps.maxItems) break;
-      addTargetToPlan(target, { phase: "high-volume", allowHighVolume: true, trackMissing: false });
+      addTargetToPlan(target, { phase: "high-volume", allowHighVolume: true, trackMissing: false, growthMode: growthModeFor(target.id) });
     }
   }
 
   if (totalMinutes < targetFloor) {
+    addSetsToExisting({ allowHighVolume: !restart });
+  }
+
+  if (enforceTargetModeContracts()) {
     addSetsToExisting({ allowHighVolume: !restart });
   }
 
@@ -1965,12 +2635,33 @@ function buildSessionPlan(limitMinutes = SESSION_LIMIT_MINUTES, options = {}) {
   const deprioritized = stats
     .filter((target) => !isMuscleAvailableForPlanning(target) && !plannedIds.has(target.id))
     .map((target) => ({ muscle: target, reason: muscleDateGapReason(target) }));
+  const targetLimitations = targetMuscles
+    .map((muscleId) => allStats.find((stat) => stat.id === muscleId))
+    .filter(Boolean)
+    .filter((target) => !plannedIds.has(target.id) && !missingIds.has(target.id))
+    .map((target) => {
+      const mode = growthModeFor(target.id);
+      const targetSets = planSetCeilingForTarget(target, false, mode);
+      let reason;
+      if (!isMuscleAvailableForPlanning(target)) {
+        reason = `${target.label} target was held back because ${muscleDateGapReason(target)}`;
+      } else if (planSetGap(target, false, mode) <= 0) {
+        reason = `${target.label} target was limited by the selected timeframe or exercise slots after already reaching ${fmt(target.sets, 1)}/${targetSets}.`;
+      } else if (items.length >= caps.maxItems || totalMinutes >= hardLimit) {
+        reason = `${target.label} target was limited by the selected timeframe.`;
+      } else {
+        reason = `${target.label} target was limited after weekly floor work was protected.`;
+      }
+      return { muscle: target, reason };
+    });
 
   return {
     items: items.map((item) => ({ ...item, reason: planPriorityReason(item) })),
     missing,
     deprioritized,
+    targetLimitations,
     performanceNotes,
+    contractNotes,
     totalMinutes,
     limitMinutes: cappedLimit,
     targetFloorMinutes: targetFloor,
@@ -1987,8 +2678,20 @@ function buildTodayPlan(limitMinutes = selectedCoachTimeframeMinutes()) {
   const daysSinceWorkout = lastWorkout ? daysBetween(lastWorkout.date, todayISO()) : null;
   const restart = daysSinceWorkout === null || daysSinceWorkout >= 4;
   const targetMuscles = selectedCoachTargetMuscles();
+  const globalGrowthMode = selectedCoachGlobalGrowthMode();
+  const growthModes = selectedCoachGrowthModes(targetMuscles);
   const ranked = rankedCoachMuscles(planningContext);
-  const sessionPlan = buildSessionPlan(limitMinutes, { restart, targetMuscles, context: planningContext });
+  const sessionPlan = buildSessionPlan(limitMinutes, { restart, targetMuscles, globalGrowthMode, growthModes, context: planningContext });
+  const mediumComparisonPlan = globalGrowthMode === "aggressive" || Object.values(growthModes).includes("aggressive")
+    ? buildSessionPlan(limitMinutes, {
+      restart,
+      targetMuscles,
+      globalGrowthMode: globalGrowthMode === "aggressive" ? "medium" : globalGrowthMode,
+      growthModes: mediumComparisonGrowthModes(growthModes),
+      context: planningContext
+    })
+    : null;
+  const aggressiveLimitReason = aggressivePlanLimitingReason(sessionPlan, mediumComparisonPlan);
   const proteinAvg = getAverage("protein", 7);
   const protein = proteinTargets();
   const highVolume = ranked.filter((stat) => stat.sets > HYPERTROPHY.growthHigh);
@@ -2007,12 +2710,23 @@ function buildTodayPlan(limitMinutes = selectedCoachTimeframeMinutes()) {
       : `${daysSinceWorkout} days since your last lift, so volume is capped for a restart.`);
   }
   if (sessionPlan.items.length) {
+    selectedReasons.push(`${coachGrowthModeLabel(globalGrowthMode)} plan intensity.`);
     selectedReasons.push(...sessionPlan.items.map((item) => item.reason));
     if (targetMuscles.length) {
-      const targetLabels = muscleGroups.filter((muscle) => targetMuscles.includes(muscle.id)).map((muscle) => muscle.label);
-      selectedReasons.unshift(`Target focus: ${targetLabels.join(", ")} after weekly floors are covered.`);
+      const targetLabels = muscleGroups
+        .filter((muscle) => targetMuscles.includes(muscle.id))
+        .map((muscle) => growthModes[muscle.id]
+          ? `${muscle.label} ${coachGrowthModeLabel(growthModes[muscle.id])}`
+          : `${muscle.label} ${coachGrowthModeLabel(globalGrowthMode)}`);
+      selectedReasons.unshift(`Targets selected: ${targetLabels.join(", ")}. Soft targets get conservative priority after weekly floors.`);
     }
     why.push(...selectedReasons.slice(0, 3));
+  }
+  if (sessionPlan.targetLimitations?.length) {
+    const targetLimitReasons = sessionPlan.targetLimitations.map((item) => item.reason);
+    skippedReasons.push(...targetLimitReasons);
+    notes.push(...targetLimitReasons);
+    why.push(...targetLimitReasons.slice(0, 2));
   }
   if (sessionPlan.deprioritized.length) {
     skippedReasons.push(...sessionPlan.deprioritized.map((item) => `${item.reason} Coach picked another gap first.`));
@@ -2025,6 +2739,14 @@ function buildTodayPlan(limitMinutes = selectedCoachTimeframeMinutes()) {
   if (sessionPlan.shortfallReason) {
     notes.push(sessionPlan.shortfallReason);
     why.push(sessionPlan.shortfallReason);
+  }
+  if (aggressiveLimitReason) {
+    notes.push(aggressiveLimitReason);
+    why.push(aggressiveLimitReason);
+  }
+  if (sessionPlan.contractNotes?.length) {
+    notes.push(...sessionPlan.contractNotes);
+    why.push(...sessionPlan.contractNotes.slice(0, 2));
   }
   if (sessionPlan.performanceNotes?.length) {
     notes.push(...sessionPlan.performanceNotes);
@@ -2203,7 +2925,7 @@ function lineChart(points, color = "#35d58c", unit = "") {
   }))));
 
   return `
-    <div class="chart interactive-chart" data-points="${payload}" data-unit="${escapeHtml(unit)}">
+    <div class="chart interactive-chart" data-points="${payload}" data-unit="${escapeHtml(unit)}" tabindex="0" aria-label="Interactive chart. Tap or press to inspect the nearest point.">
       <div class="chart-stage">
         <svg viewBox="0 0 100 100" preserveAspectRatio="none" role="img" aria-label="Interactive trend chart">
           <defs>
@@ -2221,7 +2943,7 @@ function lineChart(points, color = "#35d58c", unit = "") {
         </svg>
         <div class="chart-marker" style="left:${last.x}%; top:${last.y}%"></div>
       </div>
-      <p class="chart-readout">${escapeHtml(chartReadout(last, unit))}</p>
+      <p class="chart-readout" aria-live="polite">${escapeHtml(chartReadout(last, unit))}</p>
       <p class="muted small">${escapeHtml(first.label)} to ${escapeHtml(last.label)}</p>
     </div>
   `;
@@ -2361,6 +3083,56 @@ function renderDashboard() {
   const todayPlan = buildTodayPlan();
   const action = actionFromSessionPlan(todayPlan);
   const firstExercise = todayPlan.sessionPlan.items[0]?.exercise;
+  const widgetMarkup = {
+    nextLift: `
+      <section class="section card coach-action dashboard-widget" data-dashboard-widget="nextLift">
+        <span class="badge">Next best lift</span>
+        <h3>${escapeHtml(action.title)}</h3>
+        <p>${escapeHtml(action.body)}</p>
+        ${firstExercise ? `<p class="muted small">Rest ${escapeHtml(firstExercise.rest)}. ${escapeHtml(firstExercise.cue)}</p>` : ""}
+      </section>
+    `,
+    lowestSets: `
+      <details class="section card dashboard-widget collapsible-panel dashboard-lowestSets-panel" data-dashboard-widget="lowestSets" open>
+        <summary><span>Lowest set counts</span><small>${underTarget.length ? `${underTarget.length} under target` : "covered"}</small></summary>
+        <div class="list">
+          ${underTarget.length ? underTarget.map((stat) => `
+            <div class="list-item simple">
+              <strong>${escapeHtml(stat.label)}</strong>
+              <span class="muted small">${fmt(stat.sets, 1)}/${HYPERTROPHY.minimumSets} hard sets - ${stat.sessions}/2 touches</span>
+            </div>
+          `).join("") : `<div class="empty">All tracked muscles have reached the weekly floor.</div>`}
+        </div>
+      </details>
+    `,
+    health: `
+      <details class="section card coach-action dashboard-widget collapsible-panel dashboard-health-panel" data-dashboard-widget="health" open>
+        <summary><span>Health coach</span><small>${escapeHtml(health.goalLabel)}</small></summary>
+        <span class="badge">Health coach</span>
+        <h3>${escapeHtml(health.goalLabel)} nutrition check</h3>
+        <p>${escapeHtml(health.recommendation)}</p>
+        ${healthCoachStatMarkup(health)}
+      </details>
+    `,
+    weeklySets: `
+      <details class="section chart-panel dashboard-widget collapsible-panel dashboard-weeklySets-panel" data-dashboard-widget="weeklySets" open>
+        <summary><span>This week's hard sets</span><small>Monday-start week - ${fmt(weeklyVolume)} lb load</small></summary>
+        ${muscleProgressMarkup(stats, true)}
+      </details>
+    `,
+    bodyWeight: `
+      <details class="section chart-panel dashboard-widget collapsible-panel dashboard-bodyWeight-panel" data-dashboard-widget="bodyWeight" open>
+        <summary><span>Body weight</span><small>${bodyWeight ? "logged" : "preview"}</small></summary>
+        ${lineChart(seriesFromMetrics("bodyWeight").length ? seriesFromMetrics("bodyWeight") : previewSeries("bodyWeight"), "#f2d06b", " lb")}
+      </details>
+    `,
+    protein: `
+      <details class="section chart-panel dashboard-widget collapsible-panel dashboard-protein-panel" data-dashboard-widget="protein" open>
+        <summary><span>Protein</span><small>${proteinAvg ? `${fmt(proteinAvg)}g avg` : "preview"}</small></summary>
+        ${lineChart(seriesFromMetrics("protein").length ? seriesFromMetrics("protein") : previewSeries("protein"), "#ff6b5f", "g")}
+      </details>
+    `
+  };
 
   return `
     <section class="hero">
@@ -2374,49 +3146,7 @@ function renderDashboard() {
         <div class="stat"><span class="label">Protein floor</span><span class="value accent-coral">${protein.floor ? fmt(protein.floor) : "--"}</span><span class="hint">g/day minimum</span></div>
       </div>
     </section>
-
-    <section class="section grid two">
-      <div class="card coach-action">
-        <span class="badge">Next best lift</span>
-        <h3>${escapeHtml(action.title)}</h3>
-        <p>${escapeHtml(action.body)}</p>
-        ${firstExercise ? `<p class="muted small">Rest ${escapeHtml(firstExercise.rest)}. ${escapeHtml(firstExercise.cue)}</p>` : ""}
-      </div>
-      <div class="card">
-        <h3>Lowest set counts</h3>
-        <div class="list">
-          ${underTarget.length ? underTarget.map((stat) => `
-            <div class="list-item simple">
-              <strong>${escapeHtml(stat.label)}</strong>
-              <span class="muted small">${fmt(stat.sets, 1)}/${HYPERTROPHY.minimumSets} hard sets - ${stat.sessions}/2 touches</span>
-            </div>
-          `).join("") : `<div class="empty">All tracked muscles have reached the weekly floor.</div>`}
-        </div>
-      </div>
-    </section>
-
-    <section class="section card coach-action">
-      <span class="badge">Health coach</span>
-      <h3>${escapeHtml(health.goalLabel)} nutrition check</h3>
-      <p>${escapeHtml(health.recommendation)}</p>
-      ${healthCoachStatMarkup(health)}
-    </section>
-
-    <section class="section chart-panel">
-      <div class="chart-header"><h3>This week's hard sets</h3><span class="muted small">${fmt(weeklyVolume)} lb total load logged</span></div>
-      ${muscleProgressMarkup(stats, true)}
-    </section>
-
-    <section class="section grid two">
-      <div class="chart-panel">
-        <div class="chart-header"><h3>Body weight</h3><span class="muted small">${bodyWeight ? "logged" : "preview"}</span></div>
-        ${lineChart(seriesFromMetrics("bodyWeight").length ? seriesFromMetrics("bodyWeight") : previewSeries("bodyWeight"), "#f2d06b", " lb")}
-      </div>
-      <div class="chart-panel">
-        <div class="chart-header"><h3>Protein</h3><span class="muted small">${proteinAvg ? `${fmt(proteinAvg)}g avg` : "preview"}</span></div>
-        ${lineChart(seriesFromMetrics("protein").length ? seriesFromMetrics("protein") : previewSeries("protein"), "#ff6b5f", "g")}
-      </div>
-    </section>
+    ${selectedDashboardWidgets().map((id) => widgetMarkup[id] || "").join("")}
   `;
 }
 
@@ -2432,6 +3162,8 @@ function listWorkout(entry) {
       </div>
       <div class="row-actions">
         <button class="ghost-mini" type="button" data-action="edit-workout" data-id="${escapeHtml(entry.id)}">Edit</button>
+        <button class="ghost-mini" type="button" data-action="open-exercise-trend" data-exercise="${escapeHtml(entry.exercise)}">Trend</button>
+        <button class="ghost-mini" type="button" data-action="open-exercise-history-global" data-exercise="${escapeHtml(entry.exercise)}">History</button>
         <button class="delete-small" type="button" aria-label="Delete workout" data-action="delete-workout" data-id="${escapeHtml(entry.id)}">x</button>
       </div>
     </div>
@@ -2557,11 +3289,12 @@ function draftExerciseFromState() {
 }
 
 function defaultDraftExercise(exerciseName = state.selectedExercise) {
-  const meta = resolveExerciseMeta(exerciseName, state.draftTargetMuscle);
+  const fallback = exerciseName || defaultLogExerciseName();
+  const meta = resolveExerciseMeta(fallback, state.draftTargetMuscle);
   return {
     draftId: uid(),
     editingWorkoutId: null,
-    exercise: exerciseName,
+    exercise: fallback,
     targetMuscle: meta.primaryMuscles[0] || "chest",
     notes: "",
     setRows: defaultSetRows()
@@ -2570,18 +3303,34 @@ function defaultDraftExercise(exerciseName = state.selectedExercise) {
 
 function ensureWorkoutDraft() {
   if (!Array.isArray(state.workoutDraft) || !state.workoutDraft.length) {
-    state.workoutDraft = [defaultDraftExercise(state.selectedExercise)];
+    const exercise = state.selectedExercise || defaultLogExerciseName();
+    state.workoutDraft = exercise ? [defaultDraftExercise(exercise)] : [];
   }
   return state.workoutDraft;
 }
 
 function syncLegacyDraftFromFirst() {
-  const first = ensureWorkoutDraft()[0];
+  const first = Array.isArray(state.workoutDraft) ? state.workoutDraft[0] : null;
+  if (!first) {
+    state.selectedExercise = "";
+    state.draftTargetMuscle = "chest";
+    state.draftNotes = "";
+    state.setRows = [];
+    state.editingWorkoutId = null;
+    return;
+  }
   state.selectedExercise = first.exercise;
   state.draftTargetMuscle = first.targetMuscle;
   state.draftNotes = first.notes || "";
   state.setRows = normalizeSetRows(first.setRows);
   state.editingWorkoutId = first.editingWorkoutId || null;
+}
+
+function removeExerciseDraftTable(draftId) {
+  const drafts = Array.isArray(state.workoutDraft) ? state.workoutDraft : [];
+  state.workoutDraft = drafts.filter((draft) => draft.draftId !== draftId);
+  syncLegacyDraftFromFirst();
+  saveDraftRecovery("strength-remove");
 }
 
 function readWorkoutDraftFromForm() {
@@ -2675,15 +3424,109 @@ function plannedSetRowsFromPreviousSession(exercise, setCount, planTarget = null
   });
 }
 
+function cloneCoachPlanSnapshot(plan) {
+  return JSON.parse(JSON.stringify(plan || buildTodayPlan(selectedCoachTimeframeMinutes())));
+}
+
+function copiedCoachPlanSnapshot(plan) {
+  return {
+    ...cloneCoachPlanSnapshot(plan),
+    copiedDate: todayISO(),
+    copiedAt: new Date().toISOString(),
+    timeframeMinutes: selectedCoachTimeframeMinutes(),
+    globalGrowthMode: selectedCoachGlobalGrowthMode(),
+    growthModes: selectedCoachGrowthModes()
+  };
+}
+
+function persistCopiedCoachPlan(plan) {
+  if (!plan) {
+    safeLocalStorageRemove(COPIED_COACH_PLAN_KEY);
+    return;
+  }
+  safeLocalStorageSet(COPIED_COACH_PLAN_KEY, JSON.stringify(plan));
+}
+
+function activeCopiedCoachPlan() {
+  const copied = state.copiedCoachPlan;
+  if (!copied) return null;
+  if ((copied.copiedDate || todayISO()) !== todayISO()) return null;
+  return copied;
+}
+
+function restoreCopiedCoachPlan() {
+  let copied = null;
+  try {
+    copied = JSON.parse(safeLocalStorageGet(COPIED_COACH_PLAN_KEY) || "null");
+  } catch {
+    copied = null;
+  }
+  if (!copied || typeof copied !== "object") return;
+  if ((copied.copiedDate || "") !== todayISO()) {
+    safeLocalStorageRemove(COPIED_COACH_PLAN_KEY);
+    return;
+  }
+  state.copiedCoachPlan = copied;
+}
+
+function simulatedWorkoutFromPlanItem(item, index = 0) {
+  const rows = plannedSetRowsFromPreviousSession(item.exercise, item.sets, item.planTarget);
+  return {
+    id: `coach-sim-${item.exercise.id || item.exercise.name}-${index}`,
+    date: todayISO(),
+    exercise: item.exercise.name,
+    exerciseId: item.exercise.id || null,
+    primaryMuscles: item.exercise.primaryMuscles || [item.muscle.id],
+    secondaryMuscles: item.exercise.secondaryMuscles || [],
+    setRows: rows,
+    sets: rows.length,
+    reps: rows[0]?.reps || 0,
+    weight: rows[0]?.weight || 0,
+    rir: rows[0]?.rir ?? 2,
+    restSeconds: rows[0]?.restSeconds ?? null,
+    notes: `Simulated Coach preview for ${item.muscle.label}.`,
+    order: index,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+}
+
+function buildNextCoachPlanPreview(copiedPlan = activeCopiedCoachPlan()) {
+  const sourcePlan = copiedPlan || buildTodayPlan(selectedCoachTimeframeMinutes());
+  const simulated = (sourcePlan.sessionPlan?.items || []).map(simulatedWorkoutFromPlanItem);
+  const context = coachPlanningContext([...state.workouts, ...simulated]);
+  const restart = false;
+  const targetMuscles = selectedCoachTargetMuscles();
+  const globalGrowthMode = selectedCoachGlobalGrowthMode();
+  const growthModes = selectedCoachGrowthModes(targetMuscles);
+  const sessionPlan = buildSessionPlan(selectedCoachTimeframeMinutes(), { restart, targetMuscles, globalGrowthMode, growthModes, context });
+  return {
+    notice: "This is only the next plan if you complete the current copied plan.",
+    plan: {
+      ...buildTodayPlan(selectedCoachTimeframeMinutes()),
+      mode: sessionPlan.items.length ? "session" : "recovery",
+      title: "Next plan preview",
+      subtitle: "Projected from the copied plan being completed.",
+      sessionPlan,
+      why: sessionPlan.items.map((item) => item.reason),
+      explanation: { selected: sessionPlan.items.map((item) => item.reason), skipped: [], missing: [], notes: ["This preview does not save workouts."] },
+      notes: ["This preview does not save workouts."]
+    }
+  };
+}
+
 function copyCoachPlanToLog(plan = buildTodayPlan(selectedCoachTimeframeMinutes())) {
   const items = plan.sessionPlan.items || [];
   if (!items.length) throw new Error("Coach needs a plan before it can copy to Log.");
+  state.copiedCoachPlan = copiedCoachPlanSnapshot(plan);
+  persistCopiedCoachPlan(state.copiedCoachPlan);
+  state.previewNextCoachPlan = false;
   state.workoutDraft = items.map((item) => ({
     draftId: uid(),
     editingWorkoutId: null,
     exercise: item.exercise.name,
     targetMuscle: item.muscle.id,
-    notes: `Coach plan: ${item.reason}${item.planTarget ? ` ${item.planTarget.label}.` : ""}`,
+    notes: `Coach plan: ${item.reason}${item.growthMode ? ` ${coachGrowthModeLabel(item.growthMode)} mode.` : ""}${item.planTarget ? ` ${item.planTarget.label}.` : ""}`,
     setRows: plannedSetRowsFromPreviousSession(item.exercise, item.sets, item.planTarget)
   }));
   state.templateQueue = state.workoutDraft.map((draft) => ({
@@ -2884,7 +3727,7 @@ function exerciseHistoryScreen(exerciseName) {
       ${sessions.length ? sessions.map((entry) => {
         const rows = setRowsFromWorkout(entry);
         return `
-          <details class="history-session-card">
+          <details class="history-session-card collapsible-panel">
             <summary>
               <strong>${escapeHtml(entry.date)}</strong>
               <span>${rows.length} sets - best ${bestSetLabel(entry)} - ${fmt(workoutVolume(entry))} lb load volume</span>
@@ -3082,6 +3925,8 @@ function exerciseCardActions(exercise, editable = false) {
     `
     : `
       <button class="ghost-mini" type="button" data-action="edit-exercise" data-id="${escapeHtml(exercise.id)}">Edit</button>
+      <button class="ghost-mini" type="button" data-action="open-exercise-trend" data-exercise="${escapeHtml(exercise.name)}">Trend</button>
+      <button class="ghost-mini" type="button" data-action="open-exercise-history-global" data-exercise="${escapeHtml(exercise.name)}">History</button>
       <button class="ghost-mini" type="button" data-action="archive-exercise" data-id="${escapeHtml(exercise.id)}">${removalMode === "archive" ? "Archive" : "Delete"}</button>
     `;
   const menuOpen = state.openExerciseActionMenu === exercise.id;
@@ -3115,27 +3960,45 @@ function exerciseCard(exercise, editable = false) {
 }
 
 function exerciseCoverageMarkup() {
+  const coveredCount = exerciseCoverageStats().filter((item) => !item.missing).length;
   return `
-    <section class="section chart-panel exercise-coverage-panel">
-      <div class="chart-header">
-        <h3>Primary coverage</h3>
-        <span class="muted small">${exerciseCoverageStats().filter((item) => !item.missing).length}/${muscleGroups.length} muscles covered</span>
-      </div>
-      <div class="exercise-coverage-grid">
+    <details class="section chart-panel collapsible-panel exercise-coverage-panel" open>
+      <summary><span>Primary coverage</span><small>${coveredCount}/${muscleGroups.length} muscles covered</small></summary>
+      <div class="exercise-coverage-list">
         ${exerciseCoverageStats().map((item) => `
-          <div class="coverage-chip ${item.missing ? "is-missing" : ""}">
-            <span><strong>${escapeHtml(item.label)}</strong><small>${item.count} primary</small></span>
-            ${item.missing ? `<button class="ghost-mini" type="button" data-action="exercise-add-primary" data-muscle-id="${item.id}">Add primary</button>` : ""}
-          </div>
+          <details class="coverage-row ${item.missing ? "is-missing" : ""}">
+            <summary>
+              <span class="coverage-row-title"><strong>${escapeHtml(item.label)}</strong><small>${item.missing ? "Missing primary exercise" : `${item.count} primary`}</small></span>
+            </summary>
+            ${item.missing ? `
+              <div class="coverage-empty-row">
+                <p class="muted small">Add a primary ${escapeHtml(item.label)} exercise so Coach can recommend it.</p>
+                <button class="ghost-mini" type="button" data-action="exercise-add-primary" data-muscle-id="${item.id}">Add primary</button>
+              </div>
+            ` : `
+              <div class="coverage-detail-list">
+                ${item.exercises.map((exercise) => {
+                  const usage = exerciseUsageStats(exercise);
+                  return `
+                    <div class="coverage-exercise-row">
+                      <strong>${escapeHtml(exercise.name)}</strong>
+                      <span class="muted micro">${usage.lastUsedAt ? `Last ${escapeHtml(formatShortDate(usage.lastUsedAt))}` : "Never used"} - ${usage.sessionCount} sessions</span>
+                    </div>
+                  `;
+                }).join("")}
+              </div>
+            `}
+          </details>
         `).join("")}
       </div>
-    </section>
+    </details>
   `;
 }
 
 function exerciseLibraryControlsMarkup() {
   return `
-    <section class="section form-panel exercise-library-controls">
+    <details class="section form-panel collapsible-panel exercise-library-controls" open>
+      <summary><span>Find exercises</span><small>search, filter, sort</small></summary>
       <div class="field exercise-search-field">
         <label for="exercise-search">Search exercises</label>
         <input id="exercise-search" data-exercise-search value="${escapeHtml(state.exerciseSearch)}" placeholder="Bench, row, curl">
@@ -3157,7 +4020,7 @@ function exerciseLibraryControlsMarkup() {
           </select>
         </div>
       </div>
-    </section>
+    </details>
   `;
 }
 
@@ -3183,8 +4046,8 @@ function renderExercises() {
 
     ${exerciseCoverageMarkup()}
 
-    <section class="section form-panel">
-      <h3>${editing ? "Edit exercise" : "Add exercise"}</h3>
+    <details class="section form-panel collapsible-panel exercise-form-panel" open>
+      <summary><span>${editing ? "Edit exercise" : "Add exercise"}</span><small>${editing ? escapeHtml(editing.name) : "custom movement"}</small></summary>
       <form id="exercise-form">
         <div class="field-row exercise-form-grid">
           <div class="field">
@@ -3226,29 +4089,23 @@ function renderExercises() {
           ${editing ? `<button class="ghost-button" type="button" data-action="cancel-exercise-edit">Cancel edit</button>` : `<button class="ghost-button" type="button" data-action="exercise-clear-form">Clear form</button>`}
         </div>
       </form>
-    </section>
+    </details>
 
     ${exerciseLibraryControlsMarkup()}
 
-    <section class="section chart-panel">
-      <div class="chart-header">
-        <h3>Your exercise database</h3>
-        <span class="muted small">${visibleExercises.length}/${getCustomExercises().length} active</span>
-      </div>
+    <details class="section chart-panel collapsible-panel exercise-database-panel" open>
+      <summary><span>Your exercise database</span><small>${visibleExercises.length}/${getCustomExercises().length} active</small></summary>
       <div class="exercise-list">
         ${visibleExercises.length ? visibleExercises.map((exercise) => exerciseCard(exercise, true)).join("") : `<div class="empty">No active exercises match this view.</div>`}
       </div>
-    </section>
+    </details>
 
-    <section class="section chart-panel">
-      <div class="chart-header">
-        <h3>Archived exercises</h3>
-        <span class="muted small">${archivedExercises.length} archived</span>
-      </div>
+    <details class="section chart-panel collapsible-panel archived-exercise-panel">
+      <summary><span>Archived exercises</span><small>${archivedExercises.length} archived</small></summary>
       <div class="exercise-list">
         ${archivedExercises.length ? archivedExercises.map((exercise) => exerciseCard(exercise, true)).join("") : `<div class="empty">Archived movements will appear here when you retire them.</div>`}
       </div>
-    </section>
+    </details>
   `;
 }
 
@@ -3305,7 +4162,7 @@ function exerciseDraftTable(draft, index, total) {
   const menuOpen = state.openExerciseMenu === draft.draftId;
   const recordStats = exerciseRecordStats(draft.exercise, draft.editingWorkoutId);
   return `
-    <section class="exercise-draft ${state.draggingDraftId === draft.draftId ? "is-dragging" : ""}" data-draft-id="${escapeHtml(draft.draftId)}" data-editing-workout-id="${escapeHtml(draft.editingWorkoutId || "")}">
+    <section class="exercise-draft ${state.draggingDraftId === draft.draftId ? "is-dragging" : ""} ${state.dragPendingDraftId === draft.draftId ? "is-drag-pending" : ""}" data-draft-id="${escapeHtml(draft.draftId)}" data-editing-workout-id="${escapeHtml(draft.editingWorkoutId || "")}">
       <div class="exercise-table-top">
         <div class="exercise-table-title">
           <button class="drag-handle" type="button" aria-label="Drag exercise table" data-drag-handle data-draft-id="${escapeHtml(draft.draftId)}">::</button>
@@ -3351,7 +4208,7 @@ function exerciseDraftTable(draft, index, total) {
       </div>
       <div class="log-actions exercise-table-actions">
         <button class="round-add" type="button" aria-label="Add set" data-action="add-set" data-draft-id="${escapeHtml(draft.draftId)}">+</button>
-        <button class="ghost-button" type="button" data-action="remove-exercise-table" data-draft-id="${escapeHtml(draft.draftId)}" ${total <= 1 ? "disabled" : ""}>Remove</button>
+        <button class="ghost-button" type="button" data-action="remove-exercise-table" data-draft-id="${escapeHtml(draft.draftId)}">Remove</button>
         ${index === total - 1 ? `<button class="add-exercise-icon-btn" type="button" data-action="add-exercise-table" aria-label="Add exercise"><img src="./assets/dumbbell.svg" alt="" width="36" height="36"></button>` : ""}
         <div class="reorder-arrows">
           <button type="button" aria-label="Move up" data-action="move-exercise-up" data-draft-id="${escapeHtml(draft.draftId)}" ${index === 0 ? "disabled" : ""}>&#9650;</button>
@@ -3362,14 +4219,36 @@ function exerciseDraftTable(draft, index, total) {
   `;
 }
 
+function emptyStrengthLogMarkup(canAddExerciseTable = false) {
+  const savedDraft = savedStrengthDraftRecovery();
+  const restoreMarkup = savedDraft ? `
+      <div class="empty-restore-row">
+        <div>
+          <strong>Unsaved strength draft</strong>
+          <small>${escapeHtml(savedDraft.date || "Saved locally")}</small>
+        </div>
+        <button class="ghost-mini" type="button" data-action="restore-draft">Restore</button>
+      </div>
+    ` : "";
+  return `
+    <section class="empty log-empty-state">
+      <h3>Add an exercise to start logging strength.</h3>
+      <p class="muted small">${canAddExerciseTable ? "Add a library exercise, load a template, or copy Coach's plan before logging sets." : "Create a library exercise, load a template, or copy Coach's plan before logging sets."}</p>
+      <button class="primary-button" type="button" data-action="${canAddExerciseTable ? "add-exercise-table" : "quick-add-exercise"}">Add exercise</button>
+      ${restoreMarkup}
+    </section>
+  `;
+}
+
 function renderLog() {
   const templates = getDayTemplates();
-  const draft = ensureWorkoutDraft();
+  const draft = Array.isArray(state.workoutDraft) ? state.workoutDraft : [];
+  const canAddExerciseTable = exerciseNames().length > 0;
   const lockLabel = draft.some((item) => item.editingWorkoutId) ? "Update workout" : "Lock in workout";
   if (state.logHistoryExercise) return exerciseHistoryScreen(state.logHistoryExercise);
   const metricDate = state.metricDate || todayISO();
   const metric = metricForDate(metricDate);
-  const metricFormEntry = metric || { date: metricDate, bodyWeight: 0, calories: 0, protein: 0, meals: emptyNutritionMeals(), notes: "" };
+  const metricFormEntry = metricEntryForForm(metricDate);
   const metricButtonLabel = metric ? "Update metrics" : "Save metrics";
 
   return `
@@ -3383,7 +4262,7 @@ function renderLog() {
         <form id="strength-form">
           <div class="log-top-actions">
             <button class="ghost-button" type="button" data-action="toggle-template-panel">Templates</button>
-            <button class="ghost-button" type="button" data-action="add-exercise-table">Add exercise</button>
+            <button class="ghost-button" type="button" data-action="${canAddExerciseTable ? "add-exercise-table" : "quick-add-exercise"}">Add exercise</button>
             ${draft.some((item) => item.editingWorkoutId) ? `<button class="ghost-button" type="button" data-action="new-log">Clear all logged info</button>` : ""}
           </div>
 
@@ -3406,28 +4285,21 @@ function renderLog() {
           ` : ""}
 
           <div class="field-row log-date-row">
-            <div class="field">
-              <label for="workout-date">Date</label>
-              <div style="display: flex; gap: 8px; align-items: end;">
-                <input id="workout-date" name="date" type="date" required value="${escapeHtml(state.draftDate || todayISO())}" style="flex: 1;">
-                ${state.draftDate && state.draftDate !== todayISO() ? `<button class="ghost-button" type="button" data-action="return-to-today" style="min-width: auto; white-space: nowrap;">Today</button>` : ""}
-              </div>
+            ${renderDateControl({ id: "workout-date", name: "date", label: "Date", value: state.draftDate || todayISO() })}
+          </div>
+
+          ${draft.length ? `
+            <div class="exercise-draft-list">
+              ${draft.map((item, index) => exerciseDraftTable(item, index, draft.length)).join("")}
             </div>
-          </div>
 
-          <div class="exercise-draft-list">
-            ${draft.map((item, index) => exerciseDraftTable(item, index, draft.length)).join("")}
-          </div>
-
-          <button class="primary-button lock-button" type="submit">${lockLabel}</button>
-          <p class="muted micro form-note">Most hypertrophy work should stop 1-3 reps before failure. Keep the whole workout inside roughly ${SESSION_LIMIT_MINUTES} minutes.</p>
+            <button class="primary-button lock-button" type="submit">${lockLabel}</button>
+            <p class="muted micro form-note">Most hypertrophy work should stop 1-3 reps before failure. Keep the whole workout inside roughly ${SESSION_LIMIT_MINUTES} minutes.</p>
+          ` : emptyStrengthLogMarkup(canAddExerciseTable)}
         </form>
       ` : `
         <form id="metric-form">
-          <div class="field">
-            <label for="metric-date">Date</label>
-            <input id="metric-date" name="date" type="date" required value="${escapeHtml(metricDate)}">
-          </div>
+          ${renderDateControl({ id: "metric-date", name: "date", label: "Date", value: metricDate })}
           ${nutritionTotalSummaryMarkup(metricFormEntry)}
           <div class="field-row metric-daily-row">
             <div class="field"><label for="bodyWeight">Body weight</label><input id="bodyWeight" name="bodyWeight" type="number" inputmode="decimal" min="0" step="0.1" value="${escapeHtml(metricFormEntry.bodyWeight || "")}" placeholder="lb"></div>
@@ -3491,39 +4363,43 @@ function renderHistoryModeSegment() {
 
 function renderHistoryExercisesMode(exercises) {
   return `
-    <section class="section form-panel history-filter-panel">
+    <details class="section form-panel collapsible-panel history-filter-panel" open>
+      <summary><span>Search exercises</span><small>${exercises.length} match${exercises.length === 1 ? "" : "es"}</small></summary>
       <div class="field history-search-field">
         <label for="history-search">Search exercises</label>
         <input id="history-search" class="search-input" data-history-search value="${escapeHtml(state.historySearch)}" placeholder="Bench press, row, squat">
       </div>
-    </section>
+    </details>
 
-    <section class="section history-exercise-grid">
-      ${exercises.length ? exercises.map((exercise) => {
-        const meta = resolveExerciseMeta(exercise);
-        const stats = exerciseStats(exercise);
-        const indicator = progressiveOverloadIndicator(exercise);
-        const volumeSeries = seriesFromWorkouts(exercise, workoutVolume);
-        return `
-          <button class="history-exercise-card" type="button" data-action="history-select-exercise" data-exercise="${escapeHtml(exercise)}">
-            <div class="history-card-top">
-              <div>
-                <strong>${escapeHtml(exercise)}</strong>
-                ${exerciseMuscleBadges(meta)}
+    <details class="section chart-panel collapsible-panel history-exercises-panel" open>
+      <summary><span>Exercise records</span><small>${exercises.length} exercise${exercises.length === 1 ? "" : "s"}</small></summary>
+      <div class="history-exercise-grid">
+        ${exercises.length ? exercises.map((exercise) => {
+          const meta = resolveExerciseMeta(exercise);
+          const stats = exerciseStats(exercise);
+          const indicator = progressiveOverloadIndicator(exercise);
+          const volumeSeries = seriesFromWorkouts(exercise, workoutVolume);
+          return `
+            <button class="history-exercise-card" type="button" data-action="history-select-exercise" data-exercise="${escapeHtml(exercise)}">
+              <div class="history-card-top">
+                <div>
+                  <strong>${escapeHtml(exercise)}</strong>
+                  ${exerciseMuscleBadges(meta)}
+                </div>
+                <span class="history-overload-indicator ${indicator.tone}" title="${escapeHtml(indicator.label)}">${indicator.symbol}</span>
               </div>
-              <span class="history-overload-indicator ${indicator.tone}" title="${escapeHtml(indicator.label)}">${indicator.symbol}</span>
-            </div>
-            ${miniSparkline(volumeSeries.slice(-8), "#9b8cff")}
-            <div class="history-stats-row">
-              <span class="history-stat"><strong>${stats.sessions}</strong><small>sessions</small></span>
-              <span class="history-stat"><strong>${fmt(stats.totalLoadVolume)}</strong><small>lb tonnage</small></span>
-              <span class="history-stat"><strong>${escapeHtml(bestSetLabel(stats.entries[stats.entries.length - 1] || {}))}</strong><small>latest best</small></span>
-            </div>
-            <div class="history-pr-badge">PR: ${stats.bestSet ? `${fmt(stats.bestSet.weight, 1)} x ${fmt(stats.bestSet.reps)} on ${escapeHtml(stats.bestSet.date)}` : "not yet"}</div>
-          </button>
-        `;
-      }).join("") : `<div class="empty">No exercise history matches that search.</div>`}
-    </section>
+              ${miniSparkline(volumeSeries.slice(-8), "#9b8cff")}
+              <div class="history-stats-row">
+                <span class="history-stat"><strong>${stats.sessions}</strong><small>sessions</small></span>
+                <span class="history-stat"><strong>${fmt(stats.totalLoadVolume)}</strong><small>lb tonnage</small></span>
+                <span class="history-stat"><strong>${escapeHtml(bestSetLabel(stats.entries[stats.entries.length - 1] || {}))}</strong><small>latest best</small></span>
+              </div>
+              <div class="history-pr-badge">PR: ${stats.bestSet ? `${fmt(stats.bestSet.weight, 1)} x ${fmt(stats.bestSet.reps)} on ${escapeHtml(stats.bestSet.date)}` : "not yet"}</div>
+            </button>
+          `;
+        }).join("") : `<div class="empty">No exercise history matches that search.</div>`}
+      </div>
+    </details>
   `;
 }
 
@@ -3532,7 +4408,8 @@ function renderHistoryDatesMode() {
   const selectedDate = effectiveHistoryDate(recentDates);
   const dateWorkouts = selectedDate ? workoutsForDate(selectedDate) : [];
   return `
-    <section class="section form-panel history-date-panel">
+    <details class="section form-panel collapsible-panel history-date-panel" open>
+      <summary><span>Browse by date</span><small>${selectedDate ? formatShortDate(selectedDate) : "no workouts"}</small></summary>
       ${recentDates.length ? `
         <div class="history-date-chip-row" aria-label="Recent workout dates">
           ${recentDates.map((date) => `
@@ -3543,11 +4420,7 @@ function renderHistoryDatesMode() {
         </div>
       ` : ""}
       <div class="history-date-controls">
-        <div class="field history-date-field">
-          <label for="history-date">Browse by date</label>
-          <input id="history-date" class="history-date-input" type="date" data-history-date value="${escapeHtml(selectedDate)}">
-        </div>
-        ${state.historyDate ? `<button class="ghost-button history-clear-button" type="button" data-action="clear-history-date">Clear date</button>` : ""}
+        ${renderDateControl({ id: "history-date", label: "Browse by date", value: selectedDate || todayISO(), className: "history-date-field", inputClass: "history-date-input", clearable: !!state.historyDate, required: false })}
       </div>
       ${selectedDate ? `
         <div class="history-date-results">
@@ -3559,7 +4432,7 @@ function renderHistoryDatesMode() {
           ` : `<div class="empty">No workouts logged on ${escapeHtml(selectedDate)}.</div>`}
         </div>
       ` : `<div class="empty">No workouts logged yet.</div>`}
-    </section>
+    </details>
   `;
 }
 
@@ -3600,51 +4473,57 @@ function renderHistoryDetail(exerciseName) {
       ${exerciseMuscleBadges(meta)}
     </section>
 
-    <section class="section grid four history-summary-grid">
-      <div class="stat"><span class="label">Sessions</span><strong class="value">${stats.sessions}</strong><span class="hint">${escapeHtml(stats.firstDate || "--")} to ${escapeHtml(stats.lastDate || "--")}</span></div>
-      <div class="stat"><span class="label">Load volume</span><strong class="value">${fmt(stats.totalLoadVolume)}</strong><span class="hint">lb total tonnage</span></div>
-      <div class="stat"><span class="label">Best set</span><strong class="value">${stats.bestSet ? `${fmt(stats.bestSet.weight, 1)} x ${fmt(stats.bestSet.reps)}` : "--"}</strong><span class="hint">${escapeHtml(stats.bestSet?.date || "No PR yet")}</span></div>
-      <div class="stat"><span class="label">Best session</span><strong class="value">${fmt(stats.bestLoadVolume)}</strong><span class="hint">${escapeHtml(stats.bestLoadVolumeDate || "No tonnage yet")}</span></div>
-    </section>
+    <details class="section chart-panel collapsible-panel history-summary-panel" open>
+      <summary><span>Exercise summary</span><small>${stats.sessions} session${stats.sessions === 1 ? "" : "s"}</small></summary>
+      <div class="grid four history-summary-grid">
+        <div class="stat"><span class="label">Sessions</span><strong class="value">${stats.sessions}</strong><span class="hint">${escapeHtml(stats.firstDate || "--")} to ${escapeHtml(stats.lastDate || "--")}</span></div>
+        <div class="stat"><span class="label">Load volume</span><strong class="value">${fmt(stats.totalLoadVolume)}</strong><span class="hint">lb total tonnage</span></div>
+        <div class="stat"><span class="label">Best set</span><strong class="value">${stats.bestSet ? `${fmt(stats.bestSet.weight, 1)} x ${fmt(stats.bestSet.reps)}` : "--"}</strong><span class="hint">${escapeHtml(stats.bestSet?.date || "No PR yet")}</span></div>
+        <div class="stat"><span class="label">Best session</span><strong class="value">${fmt(stats.bestLoadVolume)}</strong><span class="hint">${escapeHtml(stats.bestLoadVolumeDate || "No tonnage yet")}</span></div>
+      </div>
+    </details>
 
-    <section class="section grid two">
-      <div class="chart-panel">
-        <div class="chart-header"><h3>Load volume</h3><span class="muted small">sets x reps x load</span></div>
+    <section class="section grid two history-chart-grid">
+      <details class="chart-panel collapsible-panel history-load-panel" open>
+        <summary><span>Load volume</span><small>sets x reps x load</small></summary>
         ${lineChart(seriesFromWorkouts(exerciseName, workoutVolume), "#9b8cff", " lb")}
-      </div>
-      <div class="chart-panel">
-        <div class="chart-header"><h3>Estimated 1RM</h3><span class="muted small">best set estimate</span></div>
+      </details>
+      <details class="chart-panel collapsible-panel history-e1rm-panel" open>
+        <summary><span>Estimated 1RM</span><small>best set estimate</small></summary>
         ${lineChart(seriesFromWorkouts(exerciseName, e1rm), "#ff6b5f", " lb")}
-      </div>
+      </details>
     </section>
 
-    <section class="section history-session-list">
-      ${entries.length ? entries.map((entry) => {
-        const rows = setRowsFromWorkout(entry);
-        return `
-          <details class="history-session-card">
-            <summary>
-              <strong>${escapeHtml(entry.date)}</strong>
-              <span>${rows.length} sets - best ${bestSetLabel(entry)} - ${fmt(workoutVolume(entry))} lb load volume</span>
-            </summary>
-            <div class="history-set-grid">
-              ${rows.map((row, index) => `
-                <div class="history-set">
-                  <span>Set ${index + 1}</span>
-                  <strong>${fmt(row.weight)} lb x ${fmt(row.reps)}</strong>
-                  <small>${row.rir === null ? "--" : fmt(row.rir, 1)} RIR - Rest ${formatRest(row.restSeconds)}</small>
-                </div>
-              `).join("")}
-            </div>
-            <div class="row-actions">
-              <button class="ghost-mini" type="button" data-action="edit-workout" data-id="${escapeHtml(entry.id)}">Edit</button>
-              <button class="delete-small" type="button" aria-label="Delete workout" data-action="delete-workout" data-id="${escapeHtml(entry.id)}">x</button>
-            </div>
-            ${entry.notes ? `<p class="muted small">${escapeHtml(entry.notes)}</p>` : ""}
-          </details>
-        `;
-      }).join("") : `<div class="empty">No recorded sessions for this exercise yet.</div>`}
-    </section>
+    <details class="section chart-panel collapsible-panel history-sessions-panel" open>
+      <summary><span>Logged sessions</span><small>${entries.length} session${entries.length === 1 ? "" : "s"}</small></summary>
+      <div class="history-session-list">
+        ${entries.length ? entries.map((entry) => {
+          const rows = setRowsFromWorkout(entry);
+          return `
+            <details class="history-session-card collapsible-panel">
+              <summary>
+                <strong>${escapeHtml(entry.date)}</strong>
+                <span>${rows.length} sets - best ${bestSetLabel(entry)} - ${fmt(workoutVolume(entry))} lb load volume</span>
+              </summary>
+              <div class="history-set-grid">
+                ${rows.map((row, index) => `
+                  <div class="history-set">
+                    <span>Set ${index + 1}</span>
+                    <strong>${fmt(row.weight)} lb x ${fmt(row.reps)}</strong>
+                    <small>${row.rir === null ? "--" : fmt(row.rir, 1)} RIR - Rest ${formatRest(row.restSeconds)}</small>
+                  </div>
+                `).join("")}
+              </div>
+              <div class="row-actions">
+                <button class="ghost-mini" type="button" data-action="edit-workout" data-id="${escapeHtml(entry.id)}">Edit</button>
+                <button class="delete-small" type="button" aria-label="Delete workout" data-action="delete-workout" data-id="${escapeHtml(entry.id)}">x</button>
+              </div>
+              ${entry.notes ? `<p class="muted small">${escapeHtml(entry.notes)}</p>` : ""}
+            </details>
+          `;
+        }).join("") : `<div class="empty">No recorded sessions for this exercise yet.</div>`}
+      </div>
+    </details>
   `;
 }
 
@@ -3666,7 +4545,8 @@ function renderTrends() {
   const health = healthCoachSummary();
 
   return `
-    <section class="trend-section">
+    <details class="section trend-section collapsible-panel muscle-trends-panel" open>
+      <summary><span>Muscle trends</span><small>${escapeHtml(selectedMuscleLabel)}</small></summary>
       <div class="trend-section-header">
         <div>
           <h2>Muscle trends</h2>
@@ -3687,9 +4567,10 @@ function renderTrends() {
           ${lineChart(muscleVolumeSeries, "#35d58c", " lb")}
         </div>
       </div>
-    </section>
+    </details>
 
-    <section class="section trend-section">
+    <details class="section trend-section collapsible-panel exercise-performance-panel" open>
+      <summary><span>Exercise performance</span><small>${escapeHtml(selectedExercise || "No exercise")}</small></summary>
       <div class="trend-section-header">
         <div>
           <h2>Exercise performance</h2>
@@ -3710,9 +4591,10 @@ function renderTrends() {
           ${lineChart(e1rmSeries, "#ff6b5f", " lb")}
         </div>
       </div>
-    </section>
+    </details>
 
-    <section class="section trend-section">
+    <details class="section trend-section collapsible-panel health-trends-panel" open>
+      <summary><span>Health trends</span><small>${escapeHtml(health.goalLabel)}</small></summary>
       <div class="trend-section-header">
         <div>
           <h2>Health trends</h2>
@@ -3734,7 +4616,7 @@ function renderTrends() {
           ${lineChart(seriesFromMetrics("calories"), "#35d58c", "")}
         </div>
       </div>
-    </section>
+    </details>
   `;
 }
 
@@ -3742,7 +4624,8 @@ function renderTodayPlan(plan) {
   const items = plan.sessionPlan.items;
   const muscles = [...new Set(items.map((item) => item.muscle.label))];
   return `
-    <section class="section card coach-action featured-action today-plan-card">
+    <details class="section card coach-action featured-action today-plan-card collapsible-panel" open>
+      <summary><span>Today's Plan</span><small>${plan.sessionPlan.totalMinutes || "--"} min</small></summary>
       <span class="badge">${escapeHtml(plan.mode === "restart" ? "Restart plan" : plan.mode === "progression" ? "Progression" : plan.mode === "library-gap" ? "Library gap" : "Today's plan")}</span>
       <div class="today-plan-header">
         <div>
@@ -3759,6 +4642,11 @@ function renderTodayPlan(plan) {
                 <strong>${escapeHtml(item.exercise.name)}</strong>
                 <span>${escapeHtml(item.muscle.label)} - ${escapeHtml(item.exercise.reps)} reps - ${HYPERTROPHY.idealRirMin}-${HYPERTROPHY.idealRirMax} RIR</span>
                 ${item.planTarget ? `<span class="today-plan-target">${escapeHtml(item.planTarget.label)} - ${escapeHtml(item.planTarget.detail)}</span>` : ""}
+                <div class="mini-action-row">
+                  <button class="ghost-mini" type="button" data-action="log-exercise" data-exercise="${escapeHtml(item.exercise.name)}">Log</button>
+                  <button class="ghost-mini" type="button" data-action="open-exercise-trend" data-exercise="${escapeHtml(item.exercise.name)}">Trend</button>
+                  <button class="ghost-mini" type="button" data-action="open-exercise-history-global" data-exercise="${escapeHtml(item.exercise.name)}">History</button>
+                </div>
               </div>
               <span class="today-plan-dose">${item.sets} sets</span>
             </div>
@@ -3786,7 +4674,7 @@ function renderTodayPlan(plan) {
           Missing primary exercise: ${escapeHtml(plan.sessionPlan.missing.map((muscle) => muscle.label).join(", "))}.
         </div>
       ` : ""}
-    </section>
+    </details>
   `;
 }
 
@@ -3806,8 +4694,25 @@ function renderCoachTimeframeSelector() {
   `;
 }
 
+function renderCoachGrowthModeSelector() {
+  const selected = selectedCoachGlobalGrowthMode();
+  return `
+    <section class="section card coach-growth-card">
+      <div class="chart-header"><h3>Plan intensity</h3><span class="muted small">${escapeHtml(coachGrowthModeLabel(selected))}</span></div>
+      <div class="coach-growth-mode-options coach-global-growth-options" aria-label="Coach plan intensity">
+        ${COACH_GROWTH_MODE_OPTIONS.map((option) => `
+          <button class="growth-mode-chip ${option.id === selected ? "is-active" : ""}" type="button" data-action="coach-global-growth-mode" data-growth-mode="${escapeHtml(option.id)}" aria-pressed="${option.id === selected}">
+            ${escapeHtml(option.label)}
+          </button>
+        `).join("")}
+      </div>
+    </section>
+  `;
+}
+
 function renderCoachTargetSelector() {
   const selected = selectedCoachTargetMuscles();
+  const selectedMuscles = muscleGroups.filter((muscle) => selected.includes(muscle.id));
   return `
     <section class="section card coach-target-card">
       <div class="chart-header coach-target-header">
@@ -3827,6 +4732,25 @@ function renderCoachTargetSelector() {
           `;
         }).join("")}
       </div>
+      ${selectedMuscles.length ? `
+        <div class="coach-growth-mode-list">
+          ${selectedMuscles.map((muscle) => {
+            const mode = coachGrowthModeForMuscle(muscle.id);
+            return `
+              <div class="coach-growth-mode-row">
+                <span>${escapeHtml(muscle.label)}</span>
+                <div class="coach-growth-mode-options" aria-label="${escapeHtml(`${muscle.label} growth mode`)}">
+                  ${COACH_GROWTH_MODE_OPTIONS.map((option) => `
+                    <button class="growth-mode-chip ${mode === option.id ? "is-active" : ""}" type="button" data-action="coach-growth-mode" data-muscle-id="${escapeHtml(muscle.id)}" data-growth-mode="${escapeHtml(option.id)}" aria-pressed="${mode === option.id}">
+                      ${escapeHtml(option.label)}
+                    </button>
+                  `).join("")}
+                </div>
+              </div>
+            `;
+          }).join("")}
+        </div>
+      ` : ""}
     </section>
   `;
 }
@@ -3840,8 +4764,8 @@ function renderCoachWhy(plan) {
     { title: "Other checks", items: explanation.notes || plan.notes || [] }
   ].filter((section) => section.items.length);
   return `
-    <section class="section card coach-why-card">
-      <div class="chart-header"><h3>Why this?</h3><span class="muted small">readiness + gaps</span></div>
+    <details class="section card coach-why-card collapsible-panel" open>
+      <summary><span>Why this?</span><small>readiness + gaps</small></summary>
       ${sections.length ? `
         <div class="coach-why-list">
           ${sections.map((section) => `
@@ -3852,6 +4776,48 @@ function renderCoachWhy(plan) {
           `).join("")}
         </div>
       ` : `<div class="empty compact-empty">No priority issues right now.</div>`}
+    </details>
+  `;
+}
+
+function renderCopiedCoachPlan() {
+  const copied = activeCopiedCoachPlan();
+  if (!copied) {
+    return `
+      <section class="section card coach-copied-plan-card compact-empty">
+        <div class="chart-header">
+          <h3>Next plan preview</h3>
+          <span class="muted small">locked</span>
+        </div>
+        <p class="muted small">Copy today's plan to preview the next one.</p>
+      </section>
+    `;
+  }
+  const itemCount = copied.sessionPlan?.items?.length || 0;
+  const preview = state.previewNextCoachPlan ? buildNextCoachPlanPreview(copied) : null;
+  return `
+    <section class="section card coach-copied-plan-card">
+      <div class="chart-header">
+        <h3>Copied plan</h3>
+        <span class="muted small">${itemCount} lift${itemCount === 1 ? "" : "s"}</span>
+      </div>
+      <p class="muted small">${escapeHtml(copied.title || "Coach plan")} copied to Log. Return here to keep context while logging.</p>
+      <div class="grid two">
+        <button class="ghost-button" type="button" data-action="preview-next-coach-plan">Preview next plan</button>
+        <button class="ghost-button" type="button" data-action="clear-copied-coach-plan">Clear copied plan</button>
+      </div>
+      ${preview ? `
+        <div class="coach-next-preview">
+          <strong>Next plan preview</strong>
+          <p>${escapeHtml(preview.notice)}</p>
+          ${preview.plan.sessionPlan.items.length ? preview.plan.sessionPlan.items.map((item) => `
+            <div class="today-plan-item">
+              <span><strong>${escapeHtml(item.exercise.name)}</strong> ${escapeHtml(item.muscle.label)} - ${escapeHtml(coachGrowthModeLabel(item.growthMode || "soft"))}</span>
+              <span class="set-pill">${fmt(item.sets)} sets</span>
+            </div>
+          `).join("") : `<div class="empty compact-empty">No next session is needed if the copied plan fills current gaps.</div>`}
+        </div>
+      ` : ""}
     </section>
   `;
 }
@@ -3868,17 +4834,131 @@ function renderCoach() {
       </div>
     </section>
     ${renderCoachTimeframeSelector()}
+    ${renderCoachGrowthModeSelector()}
     ${renderCoachTargetSelector()}
+    ${renderCopiedCoachPlan()}
     ${renderTodayPlan(todayPlan)}
     ${renderCoachWhy(todayPlan)}
-    <section class="section chart-panel">
-      <div class="chart-header"><h3>Muscle set audit</h3><span class="muted small">10 set floor, 12-20 growth zone</span></div>
+    <details class="section chart-panel collapsible-panel muscle-audit-panel" open>
+      <summary><span>Muscle set audit</span><small>10 set floor, 12-20 growth zone</small></summary>
       ${muscleProgressMarkup(coachMuscleSetStats())}
-    </section>
-    <section class="section grid">
-      <div class="chart-header coach-notes-header"><h3>Coach notes</h3><span class="muted small">secondary checks</span></div>
+    </details>
+    <details class="section chart-panel collapsible-panel coach-notes-panel">
+      <summary><span>Coach notes</span><small>secondary checks</small></summary>
       ${recs.map((rec) => `<div class="coach-card ${rec.tone}"><strong>${escapeHtml(rec.title)}</strong><p>${escapeHtml(rec.body)}</p></div>`).join("")}
+    </details>
+  `;
+}
+
+function renderAppBanner() {
+  if (!state.appBanner) return "";
+  const banner = state.appBanner;
+  return `
+    <section class="app-banner ${escapeHtml(banner.tone)}" role="status" aria-live="polite">
+      <div>
+        <strong>${escapeHtml(banner.message)}</strong>
+        ${banner.detail ? `<p>${escapeHtml(banner.detail)}</p>` : ""}
+      </div>
+      <div class="app-banner-actions">
+        ${banner.action && banner.actionLabel ? `<button class="ghost-mini" type="button" data-action="${escapeHtml(banner.action)}">${escapeHtml(banner.actionLabel)}</button>` : ""}
+        <button class="icon-button" type="button" data-action="dismiss-banner" aria-label="Dismiss message">x</button>
+      </div>
     </section>
+  `;
+}
+
+function renderLogDraftNotice() {
+  return "";
+}
+
+function syncLogDraftNoticeDom() {
+  const existing = document.querySelector(".log-draft-notice");
+  const markup = renderLogDraftNotice();
+  if (!markup) {
+    existing?.remove();
+    return;
+  }
+  if (existing) {
+    existing.outerHTML = markup;
+    return;
+  }
+  els.app.insertAdjacentHTML("afterbegin", markup);
+}
+
+function renderScrollTopButton() {
+  return `
+    <button class="scroll-top-button" type="button" data-action="scroll-top" aria-label="Back to top">
+      ↑
+    </button>
+  `;
+}
+
+function hideScrollTopButton() {
+  window.clearTimeout(scrollTopTimer);
+  scrollTopTimer = null;
+  document.querySelector(".scroll-top-button")?.classList.remove("is-visible");
+}
+
+function updateScrollTopButton() {
+  const button = document.querySelector(".scroll-top-button");
+  if (!button) return;
+  const doc = document.documentElement;
+  const scrollY = window.scrollY || doc.scrollTop || 0;
+  const tabbar = document.querySelector(".tabbar");
+  const tabbarHeight = tabbar ? tabbar.getBoundingClientRect().height : 76;
+  const buttonSize = button.getBoundingClientRect().height || 42;
+  const offsetParent = button.offsetParent;
+  const parentOffset = offsetParent ? scrollY + offsetParent.getBoundingClientRect().top : 0;
+  const topOffset = scrollTopButtonTopOffset(scrollY, window.visualViewport || null, window.innerHeight || doc.clientHeight || 0, tabbarHeight, buttonSize, parentOffset);
+  button.style.setProperty("--scroll-top-top", `${Math.round(topOffset)}px`);
+  const shouldShow = scrollTopButtonShouldShow(scrollY, doc.scrollHeight, doc.clientHeight);
+  if (!shouldShow) {
+    hideScrollTopButton();
+    return;
+  }
+  button.classList.add("is-visible");
+  window.clearTimeout(scrollTopTimer);
+  scrollTopTimer = window.setTimeout(() => {
+    button.classList.remove("is-visible");
+  }, 3000);
+}
+
+function renderImportPreview() {
+  const pending = state.pendingImport;
+  if (!pending) return "";
+  const summary = pending.summary || {};
+  return `
+    <section class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="import-preview-title">
+      <div class="modal-panel import-preview-panel">
+        <h2 id="import-preview-title">Review backup import</h2>
+        <p class="muted small">${escapeHtml(pending.source || pending.fileName || "Backup file")} will replace local workout and nutrition data.</p>
+        <div class="action-grid import-preview-grid">
+          <span><strong>${fmt(summary.workouts || 0)}</strong> workouts</span>
+          <span><strong>${fmt(summary.metrics || 0)}</strong> nutrition logs</span>
+          <span><strong>${fmt(summary.customExercises || 0)}</strong> exercises</span>
+          <span><strong>${escapeHtml(summary.newestDate || "--")}</strong> newest date</span>
+        </div>
+        <div class="grid two">
+          <button class="primary-button" type="button" data-action="confirm-import">Replace local data</button>
+          <button class="ghost-button" type="button" data-action="cancel-import">Cancel</button>
+        </div>
+      </div>
+    </section>
+  `;
+}
+
+function renderAppChrome() {
+  return `${renderAppBanner()}${renderImportPreview()}${renderLogDraftNotice()}`;
+}
+
+function dataSafetySummaryMarkup() {
+  return `
+    <div class="data-safety-grid">
+      <span><strong>${escapeHtml(formatDateTime(state.settings.lastBackupAt))}</strong><small>last local backup</small></span>
+      <span><strong>${escapeHtml(formatDateTime(state.settings.lastCloudPushAt))}</strong><small>last cloud push</small></span>
+      <span><strong>${escapeHtml(formatDateTime(state.settings.lastCloudPullAt))}</strong><small>last cloud pull</small></span>
+      <span><strong>v${escapeHtml(APP_VERSION)}</strong><small>installed shell</small></span>
+    </div>
   `;
 }
 
@@ -3932,13 +5012,73 @@ function renderNutritionGoalSelector() {
   `;
 }
 
+function renderDashboardWidgetSelector() {
+  const enabled = selectedDashboardWidgets();
+  const order = dashboardWidgetOrder();
+  return `
+    <div class="widget-preference-list">
+      ${order.map((id, index) => {
+        const option = TODAY_WIDGET_OPTIONS.find((item) => item.id === id);
+        if (!option) return "";
+        const active = enabled.includes(id);
+        return `
+          <div class="widget-preference-row ${active ? "is-active" : ""}">
+            <button class="pill widget-toggle ${active ? "is-active" : ""}" type="button" data-action="toggle-dashboard-widget" data-widget-id="${escapeHtml(id)}" aria-pressed="${active}">
+              ${active ? "Shown" : "Hidden"}
+            </button>
+            <strong>${escapeHtml(option.label)}</strong>
+            <div class="reorder-arrows compact-reorder">
+              <button type="button" aria-label="Move ${escapeHtml(option.label)} up" data-action="move-dashboard-widget" data-widget-id="${escapeHtml(id)}" data-widget-direction="-1" ${index === 0 ? "disabled" : ""}>&#9650;</button>
+              <button type="button" aria-label="Move ${escapeHtml(option.label)} down" data-action="move-dashboard-widget" data-widget-id="${escapeHtml(id)}" data-widget-direction="1" ${index === order.length - 1 ? "disabled" : ""}>&#9660;</button>
+            </div>
+          </div>
+        `;
+      }).join("")}
+    </div>
+  `;
+}
+
+function settingsPanelIdFromTitle(title) {
+  return String(title || "panel")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "") || "panel";
+}
+
+function isSettingsPanelOpen(panelId) {
+  return Array.isArray(state.settingsOpenPanels) && state.settingsOpenPanels.includes(panelId);
+}
+
+function setSettingsPanelOpen(panelId, open) {
+  if (!panelId) return;
+  if (!Array.isArray(state.settingsOpenPanels)) state.settingsOpenPanels = [];
+  const panels = new Set(state.settingsOpenPanels);
+  if (open) panels.add(panelId);
+  else panels.delete(panelId);
+  state.settingsOpenPanels = [...panels];
+}
+
+function forceSettingsPanelOpen(panelId) {
+  setSettingsPanelOpen(panelId, true);
+}
+
+function renderSettingsPanel(title, detail, body, options = {}) {
+  const panelId = options.id || settingsPanelIdFromTitle(title);
+  const open = options.open || isSettingsPanelOpen(panelId);
+  return `
+    <details class="section settings-panel collapsible-panel" data-settings-panel="${escapeHtml(panelId)}" ${open ? "open" : ""}>
+      <summary><span>${escapeHtml(title)}</span><small>${escapeHtml(detail)}</small></summary>
+      ${body}
+    </details>
+  `;
+}
+
 async function renderSettings() {
   const estimate = await storageEstimateMarkup();
   const sampleWorkouts = state.workouts.filter(isSampleEntry).length;
   const sampleMetrics = state.metrics.filter(isSampleEntry).length;
   return `
-    <section class="settings-panel">
-      <h2>Hypertrophy defaults</h2>
+    ${renderSettingsPanel("Hypertrophy defaults", "training rules", `
       <div class="settings-list">
         <span>Weekly floor <strong>${HYPERTROPHY.minimumSets} hard sets/muscle</strong></span>
         <span>Growth zone <strong>${HYPERTROPHY.growthLow}-${HYPERTROPHY.growthHigh} sets</strong></span>
@@ -3946,44 +5086,54 @@ async function renderSettings() {
         <span>Protein floor <strong>${HYPERTROPHY.proteinFloorGPerKg} g/kg/day</strong></span>
       </div>
       <p class="muted small">This is training guidance for personal tracking, not medical advice.</p>
-    </section>
+    `, { id: "hypertrophy-defaults" })}
 
-    <section class="section settings-panel">
-      <h2>Nutrition goal</h2>
+    ${renderSettingsPanel("Nutrition goal", nutritionGoalLabel(selectedNutritionGoal()), `
       <p class="muted small">Coach uses this to interpret calories and body-weight trend.</p>
       ${renderNutritionGoalSelector()}
-    </section>
+    `, { id: "nutrition-goal" })}
 
-    <section class="section settings-panel">
-      <h2>Sample chart data</h2>
-      <p class="muted small">${sampleWorkouts + sampleMetrics ? `${sampleWorkouts} sample lifts and ${sampleMetrics} sample metrics are loaded.` : "Load demo logs to test every chart and recommendation without touching your real backups."}</p>
-      <div class="grid two">
-        <button class="primary-button" type="button" data-action="load-sample-data">Load sample data</button>
-        <button class="ghost-button" type="button" data-action="remove-sample-data">Remove sample data</button>
-      </div>
-    </section>
+    ${renderSettingsPanel("Today widgets", `${selectedDashboardWidgets().length} shown`, `
+      <p class="muted small">Choose what appears below the Today summary and put the most useful cards first.</p>
+      ${renderDashboardWidgetSelector()}
+    `, { id: "today-widgets" })}
 
-    <section class="section settings-panel">
-      <h2>Storage</h2>
+    ${renderSettingsPanel("Data safety", "backup status", `
+      <p class="muted small">A quick confidence check before imports, cloud sync, or app updates.</p>
+      ${dataSafetySummaryMarkup()}
+    `, { id: "data-safety" })}
+
+    ${renderSettingsPanel("Troubleshooting", "Coach debug", `
+      <p class="muted small">Export a safe diagnostic report when Coach advice looks wrong. It separates submitted workouts from unsaved drafts and never includes sync secrets.</p>
+      <button class="ghost-button full-button" type="button" data-action="export-coach-debug">Export Coach debug report</button>
+    `, { id: "troubleshooting" })}
+
+    ${renderSettingsPanel("Storage", "backup/import", `
       ${estimate}
       <div class="grid two">
         <button class="primary-button" type="button" data-action="export-data">Export backup</button>
         <button class="ghost-button" type="button" data-action="import-click">Import backup</button>
       </div>
       <input class="hidden" id="import-file" type="file" accept="application/json">
-    </section>
+    `, { id: "storage" })}
 
-    <section class="section settings-panel">
-      <h2>App update</h2>
+    ${renderSettingsPanel("Sample chart data", sampleWorkouts + sampleMetrics ? `${sampleWorkouts} lifts/metrics loaded` : "optional", `
+      <p class="muted small">${sampleWorkouts + sampleMetrics ? `${sampleWorkouts} sample lifts and ${sampleMetrics} sample metrics are loaded.` : "Load demo logs to test every chart and recommendation without touching your real backups."}</p>
+      <div class="grid two">
+        <button class="primary-button" type="button" data-action="load-sample-data">Load sample data</button>
+        <button class="ghost-button" type="button" data-action="remove-sample-data">Remove sample data</button>
+      </div>
+    `, { id: "sample-chart-data" })}
+
+    ${renderSettingsPanel("App update", `v${APP_VERSION}`, `
       <div class="settings-list">
         <span>Installed shell <strong>v${APP_VERSION}</strong></span>
       </div>
       <p class="muted small">Refresh the app shell if iPhone Safari keeps showing an older screen. This clears cached app files only; workouts and metrics stay in browser storage.</p>
       <button class="ghost-button full-button" type="button" data-action="refresh-app-shell">Refresh app shell</button>
-    </section>
+    `, { id: "app-update" })}
 
-    <section class="section settings-panel">
-      <h2>Supabase sync</h2>
+    ${renderSettingsPanel("Supabase sync", supabaseStatus(), `
       <p class="muted small">Status: ${escapeHtml(supabaseStatus())}</p>
       <div class="field">
         <label for="supabaseUrl">Project URL</label>
@@ -4013,21 +5163,27 @@ async function renderSettings() {
         <button class="ghost-button" type="button" data-action="push-supabase">Push backup</button>
         <button class="ghost-button" type="button" data-action="pull-supabase">Pull latest</button>
       </div>
-    </section>
+    `, { id: "supabase-sync" })}
 
-    <section class="section settings-panel">
-      <h2>Danger zone</h2>
+    ${renderSettingsPanel("Danger zone", "destructive", `
       <p class="muted small">Export a backup before clearing data.</p>
       <button class="danger-button" type="button" data-action="clear-all">Clear local data</button>
-    </section>
+    `, { id: "danger-zone" })}
   `;
 }
 
 function applyStaggerAnimations() {
-  const animated = els.app.querySelectorAll(".card, .chart-panel, .stat, .coach-card, .exercise-definition, .exercise-draft, .history-exercise-card, .history-session-card, .form-panel, .settings-panel");
+  const animated = els.app.querySelectorAll(".card, .chart-panel, .stat, .coach-card, .exercise-definition, .exercise-draft, .coverage-row, .history-exercise-card, .history-session-card, .form-panel, .settings-panel");
   animated.forEach((element, index) => {
     element.style.setProperty("--i", String(Math.min(index, 12)));
   });
+}
+
+async function flashSelection(target) {
+  const element = target?.closest?.(".history-exercise-card, .exercise-definition, .exercise-draft, .history-session-card, button");
+  if (!element) return;
+  element.classList.add("is-selecting");
+  await sleep(90);
 }
 
 async function render({ animate = false } = {}) {
@@ -4043,17 +5199,21 @@ async function render({ animate = false } = {}) {
     tab.classList.toggle("is-active", tab.dataset.tab === state.activeTab);
   });
 
-  if (state.activeTab === "dashboard") els.app.innerHTML = renderDashboard();
-  if (state.activeTab === "log") els.app.innerHTML = renderLog();
-  if (state.activeTab === "trends") els.app.innerHTML = renderTrends();
-  if (state.activeTab === "coach") els.app.innerHTML = renderCoach();
-  if (state.activeTab === "exercises") els.app.innerHTML = renderExercises();
-  if (state.activeTab === "history") els.app.innerHTML = renderHistory();
-  if (state.activeTab === "settings") els.app.innerHTML = await renderSettings();
+  let screen = "";
+  if (state.activeTab === "dashboard") screen = renderDashboard();
+  if (state.activeTab === "log") screen = renderLog();
+  if (state.activeTab === "trends") screen = renderTrends();
+  if (state.activeTab === "coach") screen = renderCoach();
+  if (state.activeTab === "exercises") screen = renderExercises();
+  if (state.activeTab === "history") screen = renderHistory();
+  if (state.activeTab === "settings") screen = await renderSettings();
+  els.app.innerHTML = `${renderAppChrome()}${screen}`;
   if (token !== renderToken) return;
   els.app.classList.remove("content-exit", "content-enter");
   if (animate) els.app.classList.add("content-enter");
   applyStaggerAnimations();
+  if (typeof requestAnimationFrame === "function") requestAnimationFrame(updateScrollTopButton);
+  else updateScrollTopButton();
 }
 
 async function saveExercise(form) {
@@ -4085,8 +5245,9 @@ async function saveExercise(form) {
   state.exerciseFormErrors = {};
   state.selectedExercise = exercise.name;
   state.draftTargetMuscle = exercise.primaryMuscles[0] || "chest";
+  clearDraftRecoveryScope("exercise");
+  announce(existing ? "Exercise updated." : "Exercise saved.", { tone: "good" });
   await render();
-  toast(existing ? "Exercise updated." : "Exercise saved.");
 }
 
 async function saveWorkout(form) {
@@ -4123,6 +5284,8 @@ async function saveWorkout(form) {
   });
 
   const staleWorkoutIds = staleWorkoutIdsForSavedDraft(data.date, entries);
+  const undoPayload = workoutSaveUndoPayload(entries, staleWorkoutIds);
+  setUndoAction(hadExisting ? "Undo workout update" : "Undo workout lock-in", undoPayload);
   await dbPutBatch("workouts", entries);
   await Promise.all(staleWorkoutIds.map((id) => dbDelete("workouts", id)));
   const first = entries[0];
@@ -4143,8 +5306,14 @@ async function saveWorkout(form) {
   }));
   state.loadedWorkoutDateIds = entries.map((entry) => entry.id).filter(Boolean);
   await loadState();
+  clearDraftRecoveryScope("strength");
+  announce(hadExisting ? "Workout updated." : "Workout locked in.", {
+    tone: "good",
+    detail: "Charts updated. Undo is available if this was accidental.",
+    action: "undo-last-action",
+    actionLabel: "Undo"
+  });
   await render();
-  toast(hadExisting ? "Workout updated." : "Workout locked in.");
 }
 
 async function saveMetric(form) {
@@ -4157,8 +5326,11 @@ async function saveMetric(form) {
   await Promise.all(duplicateIds.map((id) => dbDelete("metrics", id)));
   await loadState();
   state.metricDate = date;
+  state.metricFormDraft = null;
+  clearDraftRecoveryScope("metric");
+  clearLogDraftNotice();
+  notifyMetricSaved(existing);
   await render();
-  toast(existing ? "Metrics updated." : "Metrics saved.");
 }
 
 function isSampleEntry(entry) {
@@ -4284,16 +5456,16 @@ async function loadSampleData() {
   state.selectedExercise = "Dumbbell Bench Press";
   state.activeTab = "trends";
   await loadState();
+  announce("Sample data loaded.", { tone: "good", detail: "Sample entries can be removed from Settings." });
   await render();
-  toast("Sample data loaded.");
 }
 
 async function removeSampleData() {
   await deleteSampleEntries();
   await saveSetting("sampleDataLoadedAt", null);
   await loadState();
+  announce("Sample data removed.", { tone: "good" });
   await render();
-  toast("Sample data removed.");
 }
 
 function exportSafeSettings() {
@@ -4302,7 +5474,11 @@ function exportSafeSettings() {
     nutritionGoal: selectedNutritionGoal(),
     dayTemplates: getDayTemplates(),
     customExercises: getCustomExercises({ includeArchived: true }),
-    lastBackupAt: new Date().toISOString()
+    dashboardWidgets: selectedDashboardWidgets(),
+    dashboardWidgetOrder: dashboardWidgetOrder(),
+    lastBackupAt: new Date().toISOString(),
+    lastCloudPushAt: String(state.settings.lastCloudPushAt || ""),
+    lastCloudPullAt: String(state.settings.lastCloudPullAt || "")
   };
 }
 
@@ -4317,7 +5493,321 @@ function exportPayload() {
   };
 }
 
-function downloadBackup() {
+function debugViewportInfo() {
+  const root = document.documentElement || {};
+  const visual = window.visualViewport || {};
+  return {
+    width: Number(window.innerWidth || visual.width || root.clientWidth || 0),
+    height: Number(window.innerHeight || visual.height || root.clientHeight || 0),
+    scrollWidth: Number(root.scrollWidth || 0),
+    clientWidth: Number(root.clientWidth || 0)
+  };
+}
+
+function workoutDebugSummary(workout) {
+  const rows = setRowsFromWorkout(workout);
+  return {
+    id: workout.id || "",
+    date: workout.date || "",
+    exercise: workout.exercise || "",
+    exerciseId: workout.exerciseId || "",
+    primaryMuscles: workoutMeta(workout).primaryMuscles || [],
+    secondaryMuscles: workoutMeta(workout).secondaryMuscles || [],
+    sets: rows.length,
+    setRows: rows,
+    hardSets: hardSetCount(workout),
+    volume: workoutVolume(workout),
+    e1rm: e1rm(workout),
+    bestSet: bestSet(workout),
+    averageRir: averageRir(workout),
+    restSeconds: averageRestSeconds(workout),
+    order: Number.isFinite(Number(workout.order)) ? Number(workout.order) : null,
+    pendingDraft: Boolean(workout.pendingDraft),
+    editingWorkoutId: workout.editingWorkoutId || null,
+    notes: workout.notes || ""
+  };
+}
+
+function coachDebugPlanSummary(plan) {
+  const sessionPlan = plan.sessionPlan || {};
+  return {
+    mode: plan.mode,
+    title: plan.title,
+    subtitle: plan.subtitle,
+    totalMinutes: sessionPlan.totalMinutes || 0,
+    limitMinutes: sessionPlan.limitMinutes || selectedCoachTimeframeMinutes(),
+    targetFloorMinutes: sessionPlan.targetFloorMinutes || 0,
+    hardLimitMinutes: sessionPlan.hardLimitMinutes || 0,
+    restart: Boolean(sessionPlan.restart),
+    shortfallReason: sessionPlan.shortfallReason || "",
+    contractNotes: sessionPlan.contractNotes || [],
+    items: (sessionPlan.items || []).map((item) => ({
+      muscle: item.muscle?.label || "",
+      muscleId: item.muscle?.id || "",
+      exercise: item.exercise?.name || "",
+      exerciseId: item.exercise?.id || "",
+      sets: item.sets,
+      minutes: item.minutes,
+      phase: item.phase,
+      growthMode: item.growthMode,
+      reason: item.reason,
+      planTarget: item.planTarget ? {
+        kind: item.planTarget.kind,
+        label: item.planTarget.label,
+        detail: item.planTarget.detail,
+        tone: item.planTarget.tone,
+        message: item.planTarget.message || ""
+      } : null,
+      performanceSignal: item.performanceSignal ? {
+        status: item.performanceSignal.status,
+        tone: item.performanceSignal.tone,
+        message: item.performanceSignal.message,
+        progressEvidence: item.performanceSignal.progressEvidence || null,
+        latest: item.performanceSignal.latest ? workoutDebugSummary(item.performanceSignal.latest) : null,
+        previous: item.performanceSignal.previous ? workoutDebugSummary(item.performanceSignal.previous) : null
+      } : null
+    })),
+    missing: (sessionPlan.missing || []).map((muscle) => ({ id: muscle.id, label: muscle.label })),
+    deprioritized: (sessionPlan.deprioritized || []).map((item) => ({
+      muscle: item.muscle?.label || "",
+      muscleId: item.muscle?.id || "",
+      reason: item.reason
+    })),
+    performanceNotes: sessionPlan.performanceNotes || [],
+    why: plan.why || [],
+    explanation: plan.explanation || {},
+    notes: plan.notes || []
+  };
+}
+
+function coachDebugModeComparison() {
+  const originalMode = state.coachGlobalGrowthMode;
+  const originalGrowthModes = state.coachGrowthModes && typeof state.coachGrowthModes === "object"
+    ? { ...state.coachGrowthModes }
+    : {};
+  const targetGrowthModes = selectedCoachGrowthModes(selectedCoachTargetMuscles());
+  try {
+    const comparisons = Object.fromEntries(COACH_GROWTH_MODE_OPTIONS.map((option) => {
+      state.coachGlobalGrowthMode = option.id;
+      state.coachGrowthModes = { ...targetGrowthModes };
+      const plan = buildTodayPlan(selectedCoachTimeframeMinutes());
+      const summary = coachDebugPlanSummary(plan);
+      return [option.id, {
+        mode: option.id,
+        label: option.label,
+        totalMinutes: summary.totalMinutes,
+        limitMinutes: summary.limitMinutes,
+        totalSets: summary.items.reduce((sum, item) => sum + (Number(item.sets) || 0), 0),
+        itemCount: summary.items.length,
+        items: summary.items.map((item) => ({
+          muscle: item.muscle,
+          muscleId: item.muscleId,
+          exercise: item.exercise,
+          exerciseId: item.exerciseId,
+          sets: item.sets,
+          minutes: item.minutes,
+          phase: item.phase,
+          growthMode: item.growthMode,
+          reason: item.reason,
+          planTarget: item.planTarget,
+          performanceStatus: item.performanceSignal?.status || ""
+        })),
+        missing: summary.missing,
+        deprioritized: summary.deprioritized,
+        performanceNotes: summary.performanceNotes,
+        contractNotes: summary.contractNotes,
+        shortfallReason: summary.shortfallReason,
+        why: summary.why,
+        notes: summary.notes
+      }];
+    }));
+    if (comparisons.aggressive && comparisons.medium) {
+      const aggressivePlan = {
+        ...comparisons.aggressive,
+        items: comparisons.aggressive.items.map((item) => ({
+          ...item,
+          muscle: { id: item.muscleId, label: item.muscle, sets: 0 },
+          sets: Number(item.sets) || 0
+        })),
+        totalMinutes: comparisons.aggressive.totalMinutes,
+        hardLimitMinutes: (comparisons.aggressive.limitMinutes || selectedCoachTimeframeMinutes()) + COACH_TIME_TOLERANCE_MINUTES,
+        performanceNotes: comparisons.aggressive.performanceNotes,
+        missing: comparisons.aggressive.missing,
+        deprioritized: comparisons.aggressive.deprioritized
+      };
+      const mediumPlan = {
+        ...comparisons.medium,
+        items: comparisons.medium.items.map((item) => ({
+          ...item,
+          muscle: { id: item.muscleId, label: item.muscle, sets: 0 },
+          sets: Number(item.sets) || 0
+        })),
+        totalMinutes: comparisons.medium.totalMinutes,
+        hardLimitMinutes: (comparisons.medium.limitMinutes || selectedCoachTimeframeMinutes()) + COACH_TIME_TOLERANCE_MINUTES,
+        performanceNotes: comparisons.medium.performanceNotes,
+        missing: comparisons.medium.missing,
+        deprioritized: comparisons.medium.deprioritized
+      };
+      comparisons.aggressive.limitingReason = aggressivePlanLimitingReason(aggressivePlan, mediumPlan);
+    }
+    return comparisons;
+  } finally {
+    state.coachGlobalGrowthMode = originalMode;
+    state.coachGrowthModes = originalGrowthModes;
+  }
+}
+
+function coachDebugMuscleAudit(context = coachPlanningContext()) {
+  return context.rankedStats.map((stat, index) => ({
+    rank: index + 1,
+    id: stat.id,
+    label: stat.label,
+    sets: stat.sets,
+    sessions: stat.sessions,
+    deficit: stat.deficit,
+    readiness: stat.readiness,
+    reason: stat.reason,
+    daysSince: stat.daysSince,
+    primaryDaysSince: stat.primaryDaysSince,
+    secondaryDaysSince: stat.secondaryDaysSince,
+    growthMode: coachGrowthModeForMuscle(stat.id),
+    targetMuscle: isCoachTargetMuscle(stat.id),
+    floorGap: Math.max(0, HYPERTROPHY.minimumSets - stat.sets),
+    growthGap: Math.max(0, HYPERTROPHY.growthHigh - stat.sets),
+    planGap: planSetGap(stat, false, coachGrowthModeForMuscle(stat.id)),
+    hasPrimaryExercise: hasPrimaryExerciseForMuscle(stat.id)
+  }));
+}
+
+function coachDebugLibraryCoverage() {
+  const active = exerciseDatabase();
+  const archived = getCustomExercises({ includeArchived: true }).filter((exercise) => exercise.archivedAt);
+  return muscleGroups.map((muscle) => ({
+    id: muscle.id,
+    label: muscle.label,
+    activePrimary: active
+      .filter((exercise) => exercise.primaryMuscles.includes(muscle.id))
+      .map((exercise) => ({ id: exercise.id, name: exercise.name })),
+    archivedPrimary: archived
+      .filter((exercise) => exercise.primaryMuscles.includes(muscle.id))
+      .map((exercise) => ({ id: exercise.id, name: exercise.name, archivedAt: exercise.archivedAt }))
+  }));
+}
+
+function recentDebugWorkouts(days = 120) {
+  return workoutsNewestFirst(state.workouts.filter((entry) => !isSampleEntry(entry)))
+    .filter((entry) => {
+      const age = daysBetween(entry.date, todayISO());
+      return age === null || age <= days;
+    })
+    .map(workoutDebugSummary);
+}
+
+function recentDebugMetrics(days = 30) {
+  return canonicalMetricEntries(state.metrics.filter((entry) => !isSampleEntry(entry)))
+    .filter((entry) => {
+      const age = daysBetween(entry.date, todayISO());
+      return age === null || age <= days;
+    })
+    .sort((a, b) => b.date.localeCompare(a.date));
+}
+
+function buildCoachDebugReport() {
+  const planningContext = coachPlanningContext();
+  const todayPlan = buildTodayPlan(selectedCoachTimeframeMinutes());
+  const copiedPlan = activeCopiedCoachPlan();
+  const draftOnlyEntries = coachPendingWorkoutEntries().map(workoutDebugSummary);
+  return {
+    app: "TrainWise Coach Debug Report",
+    reportVersion: 1,
+    notBackup: true,
+    generatedAt: new Date().toISOString(),
+    appVersion: APP_VERSION,
+    runtime: {
+      today: todayISO(),
+      trainingWeekStart: isoFromLocalDate(currentTrainingWeekStart()),
+      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "",
+      activeTab: state.activeTab,
+      logMode: state.logMode,
+      strengthDate: state.draftDate,
+      metricDate: state.metricDate,
+      selectedExercise: state.selectedExercise,
+      viewport: debugViewportInfo()
+    },
+    settings: {
+      safe: exportSafeSettings(),
+      coach: {
+        timeframeMinutes: selectedCoachTimeframeMinutes(),
+        timeframeLabel: coachTimeframeLabel(),
+        globalGrowthMode: selectedCoachGlobalGrowthMode(),
+        targetMuscles: selectedCoachTargetMuscles(),
+        growthModes: selectedCoachGrowthModes(),
+        copiedPlanDate: copiedPlan?.copiedDate || ""
+      },
+      sync: {
+        configured: Boolean(state.settings.supabaseUrl),
+        email: state.settings.supabaseEmail || "",
+        status: supabaseStatus()
+      }
+    },
+    coach: {
+      todayPlan: coachDebugPlanSummary(todayPlan),
+      copiedPlan: copiedPlan ? coachDebugPlanSummary(copiedPlan) : null,
+      modeComparison: coachDebugModeComparison(),
+      muscleAudit: coachDebugMuscleAudit(planningContext),
+      libraryCoverage: coachDebugLibraryCoverage()
+    },
+    submitted: {
+      workoutCount: state.workouts.filter((entry) => !isSampleEntry(entry)).length,
+      recentWorkouts: recentDebugWorkouts()
+    },
+    draftOnly: {
+      date: state.draftDate,
+      entries: draftOnlyEntries,
+      rawDrafts: (state.workoutDraft || []).map((draft) => ({
+        draftId: draft.draftId || "",
+        editingWorkoutId: draft.editingWorkoutId || null,
+        exercise: draft.exercise || "",
+        targetMuscle: draft.targetMuscle || "",
+        notes: draft.notes || "",
+        setRows: normalizeSetRows(draft.setRows)
+      }))
+    },
+    nutrition: {
+      summary: healthCoachSummary(),
+      recentMetrics: recentDebugMetrics()
+    }
+  };
+}
+
+async function downloadCoachDebugReport() {
+  const payload = buildCoachDebugReport();
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `trainwise-debug-${todayISO()}.json`;
+  a.click();
+  URL.revokeObjectURL(url);
+  announce("Coach debug report exported.", { tone: "good", detail: "Safe diagnostic file only; it is not a backup." });
+}
+
+function backupImportSummary(payload) {
+  const normalized = normalizeBackupPayload(payload);
+  const dates = [
+    ...normalized.workouts.map((entry) => entry.date),
+    ...normalized.metrics.map((entry) => entry.date)
+  ].filter(Boolean).sort();
+  return {
+    workouts: normalized.workouts.length,
+    metrics: normalized.metrics.length,
+    customExercises: normalized.settings.customExercises.length,
+    newestDate: dates[dates.length - 1] || "",
+    normalized
+  };
+}
+
+async function downloadBackup() {
   const payload = exportPayload();
   const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
   const url = URL.createObjectURL(blob);
@@ -4326,8 +5816,9 @@ function downloadBackup() {
   a.download = `trainwise-backup-${todayISO()}.json`;
   a.click();
   URL.revokeObjectURL(url);
-  saveSetting("lastBackupAt", payload.exportedAt);
-  toast("Backup exported.");
+  await saveSetting("lastBackupAt", payload.exportedAt);
+  announce("Backup exported.", { tone: "good", detail: "Local browser data is still unchanged." });
+  await render();
 }
 
 function isValidISODate(value) {
@@ -4390,7 +5881,11 @@ function normalizeBackupSettings(settings = {}) {
       : "bulk",
     dayTemplates: Array.isArray(settings.dayTemplates) ? settings.dayTemplates : [],
     customExercises,
-    lastBackupAt: String(settings.lastBackupAt || "")
+    dashboardWidgets: Array.isArray(settings.dashboardWidgets) ? settings.dashboardWidgets : [...DEFAULT_TODAY_WIDGETS],
+    dashboardWidgetOrder: Array.isArray(settings.dashboardWidgetOrder) ? settings.dashboardWidgetOrder : [...DEFAULT_TODAY_WIDGETS],
+    lastBackupAt: String(settings.lastBackupAt || ""),
+    lastCloudPushAt: String(settings.lastCloudPushAt || ""),
+    lastCloudPullAt: String(settings.lastCloudPullAt || "")
   };
 }
 
@@ -4407,7 +5902,7 @@ function normalizeBackupPayload(payload) {
 }
 
 async function importPayload(payload) {
-  const normalized = normalizeBackupPayload(payload);
+  const normalized = payload?.normalized ? payload.normalized : normalizeBackupPayload(payload);
   await Promise.all(STORES.filter((store) => store !== "settings").map((store) => dbClear(store)));
   for (const entry of normalized.workouts) await dbPut("workouts", entry);
   for (const entry of normalized.metrics) await dbPut("metrics", entry);
@@ -4415,7 +5910,11 @@ async function importPayload(payload) {
   await saveSetting("nutritionGoal", normalized.settings.nutritionGoal);
   await saveSetting("dayTemplates", normalized.settings.dayTemplates);
   await saveSetting("customExercises", normalized.settings.customExercises);
+  await saveSetting("dashboardWidgets", normalized.settings.dashboardWidgets);
+  await saveSetting("dashboardWidgetOrder", normalized.settings.dashboardWidgetOrder);
   await saveSetting("lastBackupAt", normalized.settings.lastBackupAt);
+  await saveSetting("lastCloudPushAt", normalized.settings.lastCloudPushAt);
+  await saveSetting("lastCloudPullAt", normalized.settings.lastCloudPullAt);
   await loadState();
   await render();
 }
@@ -4423,9 +5922,68 @@ async function importPayload(payload) {
 async function importFile(file) {
   const text = await file.text();
   const payload = JSON.parse(text);
-  if (!confirm("Replace local TrainWise data with this backup?")) return;
-  await importPayload(payload);
-  toast("Backup restored.");
+  const summary = backupImportSummary(payload);
+  state.pendingImport = {
+    sourceType: "file",
+    fileName: file.name || "Backup file",
+    source: file.name || "Backup file",
+    payload,
+    summary
+  };
+  showBanner("Backup ready to review.", {
+    tone: "warn",
+    detail: "Import preview is open. Local data has not changed yet."
+  });
+  await render();
+}
+
+async function confirmPendingImport() {
+  const pending = state.pendingImport;
+  if (!pending) return;
+  const previous = exportPayload();
+  setUndoAction("Undo import", { type: "import", previous });
+  await importPayload({ normalized: pending.summary.normalized });
+  if (pending.sourceType === "cloud") await saveSetting("lastCloudPullAt", new Date().toISOString());
+  state.pendingImport = null;
+  announce("Backup restored.", {
+    tone: "good",
+    detail: "Previous local data can be restored with Undo.",
+    action: "undo-last-action",
+    actionLabel: "Undo"
+  });
+  await render();
+}
+
+async function undoLastAction() {
+  const undo = state.undoAction;
+  if (!undo?.payload) throw new Error("Nothing to undo.");
+  const { payload } = undo;
+  if (payload.type === "delete-workout" && payload.entry) {
+    await dbPut("workouts", payload.entry);
+  } else if (payload.type === "save-workout") {
+    const restoredEntries = [...(payload.previousEntries || []), ...(payload.staleEntries || [])];
+    await Promise.all((payload.savedEntryIds || []).map((id) => dbDelete("workouts", id)));
+    await dbPutBatch("workouts", restoredEntries);
+    clearWorkoutDraft(payload.date || todayISO());
+  } else if (payload.type === "delete-metrics" && Array.isArray(payload.entries)) {
+    for (const entry of payload.entries) await dbPut("metrics", entry);
+  } else if (payload.type === "custom-exercises" && Array.isArray(payload.previous)) {
+    await saveSetting("customExercises", payload.previous);
+  } else if (payload.type === "clear-all") {
+    await Promise.all(["workouts", "metrics"].map((store) => dbClear(store)));
+    for (const entry of payload.workouts || []) await dbPut("workouts", entry);
+    for (const entry of payload.metrics || []) await dbPut("metrics", entry);
+  } else if (payload.type === "clear-draft" && payload.recovery) {
+    restoreDraftRecovery(payload.recovery);
+  } else if (payload.type === "import" && payload.previous) {
+    await importPayload(payload.previous);
+  } else {
+    throw new Error("Undo is no longer available.");
+  }
+  clearUndoAction();
+  await loadState();
+  showBanner("Undo complete.", { tone: "good" });
+  await render();
 }
 
 function readSupabaseFields() {
@@ -4444,8 +6002,8 @@ async function saveSupabaseSettings({ renderAfter = true, notify = true } = {}) 
   await saveSetting("supabaseEmail", email);
   await saveSetting("supabaseRememberPassword", rememberPassword);
   await saveSetting("supabasePassword", rememberPassword ? password : "");
+  if (notify) announce("Supabase settings saved.", { tone: "good" });
   if (renderAfter) await render();
-  if (notify) toast("Supabase settings saved.");
 }
 
 function supabaseConfig() {
@@ -4500,7 +6058,8 @@ async function supabaseAuth(mode) {
   const json = await response.json();
   if (!response.ok) throw new Error(json.msg || json.message || "Supabase auth failed.");
   if (!json.access_token) {
-    toast("Account created. Confirm your email if Supabase asks for it, then sign in.");
+    announce("Account created.", { tone: "good", detail: "Confirm your email if Supabase asks for it, then sign in." });
+    await render();
     return;
   }
   await saveSetting("supabaseSession", {
@@ -4508,8 +6067,8 @@ async function supabaseAuth(mode) {
     refresh_token: json.refresh_token,
     expires_at: json.expires_at
   });
+  announce("Signed in to Supabase.", { tone: "good" });
   await render();
-  toast("Signed in to Supabase.");
 }
 
 async function pushSupabaseBackup() {
@@ -4525,7 +6084,9 @@ async function pushSupabaseBackup() {
     body: JSON.stringify({ payload: exportPayload(), app_version: APP_VERSION })
   });
   if (!response.ok) throw new Error(await response.text());
-  toast("Cloud backup pushed.");
+  await saveSetting("lastCloudPushAt", new Date().toISOString());
+  announce("Cloud backup pushed.", { tone: "good", detail: "Supabase now has the latest local backup." });
+  await render();
 }
 
 async function pullSupabaseBackup() {
@@ -4539,12 +6100,21 @@ async function pullSupabaseBackup() {
   const json = await response.json();
   if (!response.ok) throw new Error(json.message || "Could not fetch latest backup.");
   if (!json.length) {
-    toast("No cloud backups found.");
+    announce("No cloud backups found.", { tone: "warn" });
     return;
   }
-  if (!confirm(`Replace local data with cloud backup from ${json[0].created_at}?`)) return;
-  await importPayload(json[0].payload);
-  toast("Cloud backup restored.");
+  const summary = backupImportSummary(json[0].payload);
+  state.pendingImport = {
+    sourceType: "cloud",
+    source: `Cloud backup from ${formatDateTime(json[0].created_at)}`,
+    payload: json[0].payload,
+    summary
+  };
+  showBanner("Cloud backup ready to review.", {
+    tone: "warn",
+    detail: "Local data has not changed yet."
+  });
+  await render();
 }
 
 async function refreshAppShell() {
@@ -4574,10 +6144,15 @@ async function refreshAppShell() {
 
 async function clearAll() {
   if (!confirm("Clear all local workout and nutrition data? Export a backup first if you need it.")) return;
+  setUndoAction("Restore local data", {
+    type: "clear-all",
+    workouts: state.workouts.filter((entry) => !isSampleEntry(entry)),
+    metrics: state.metrics.filter((entry) => !isSampleEntry(entry))
+  });
   await Promise.all(["workouts", "metrics"].map((store) => dbClear(store)));
   await loadState();
+  announce("Local data cleared.", { tone: "warn", action: "undo-last-action", actionLabel: "Undo" });
   await render();
-  toast("Local data cleared.");
 }
 
 function editWorkout(id) {
@@ -4605,7 +6180,7 @@ function editWorkout(id) {
 }
 
 function defaultLogExerciseName() {
-  return exerciseNames()[0] || "Custom exercise";
+  return exerciseNames()[0] || "";
 }
 
 function workoutEntryToDraft(entry) {
@@ -4629,17 +6204,49 @@ function staleWorkoutIdsForSavedDraft(date, savedEntries = []) {
   });
 }
 
+function clonePlain(value) {
+  return value === undefined ? value : JSON.parse(JSON.stringify(value));
+}
+
+function workoutSaveUndoPayload(savedEntries = [], staleWorkoutIds = [], workouts = state.workouts) {
+  const workoutById = new Map((workouts || []).map((entry) => [entry.id, entry]));
+  const savedEntryIds = savedEntries.map((entry) => entry.id).filter(Boolean);
+  const previousEntries = savedEntryIds
+    .map((id) => workoutById.get(id))
+    .filter(Boolean)
+    .map(clonePlain);
+  const staleEntries = (staleWorkoutIds || [])
+    .map((id) => workoutById.get(id))
+    .filter(Boolean)
+    .map(clonePlain);
+  return {
+    type: "save-workout",
+    date: savedEntries[0]?.date || previousEntries[0]?.date || staleEntries[0]?.date || state.draftDate || todayISO(),
+    savedEntryIds,
+    previousEntries,
+    staleEntries
+  };
+}
+
+function applyWorkoutSaveUndoSnapshot(workouts = [], payload = {}) {
+  const removeIds = new Set(payload.savedEntryIds || []);
+  const restored = [...(payload.previousEntries || []), ...(payload.staleEntries || [])].map(clonePlain);
+  const restoredIds = new Set(restored.map((entry) => entry.id).filter(Boolean));
+  return [
+    ...(workouts || []).filter((entry) => !removeIds.has(entry.id) && !restoredIds.has(entry.id)),
+    ...restored
+  ];
+}
+
 function clearWorkoutDraft(date = todayISO()) {
-  const exercise = defaultLogExerciseName();
-  const meta = resolveExerciseMeta(exercise);
   state.editingWorkoutId = null;
   state.loadedWorkoutDateIds = [];
   state.draftDate = date;
   state.draftNotes = "";
-  state.selectedExercise = exercise;
-  state.draftTargetMuscle = meta.primaryMuscles[0] || "chest";
+  state.selectedExercise = "";
+  state.draftTargetMuscle = "chest";
   state.setRows = defaultSetRows();
-  state.workoutDraft = [defaultDraftExercise(exercise)];
+  state.workoutDraft = [];
   state.logHistoryExercise = "";
   syncLegacyDraftFromFirst();
 }
@@ -4658,6 +6265,41 @@ function loadWorkoutDateDraft(date) {
   clearWorkoutDraft(date);
 }
 
+async function applySharedDateInput(input) {
+  if (!input) return;
+  const value = input.value || todayISO();
+  if (input.id === "workout-date") {
+    preserveVisibleDraft("date-change");
+    loadWorkoutDateDraft(value);
+    await render();
+    return;
+  }
+  if (input.id === "metric-date") {
+    loadMetricDateDraft(value);
+    await render();
+    return;
+  }
+  if (input.id === "history-date") {
+    state.historyMode = "dates";
+    state.historyDate = value;
+    await render();
+  }
+}
+
+function applyLogModeSwitch(nextMode) {
+  if (nextMode === "metrics") {
+    const date = state.draftDate || state.metricDate || todayISO();
+    state.metricDate = date;
+    if (state.metricFormDraft?.date !== date) state.metricFormDraft = null;
+    clearLogDraftNotice();
+    return;
+  }
+  if (nextMode === "strength") {
+    loadWorkoutDateDraft(state.metricDate || state.draftDate || todayISO());
+    clearLogDraftNotice();
+  }
+}
+
 async function moveExerciseDraft(draftId, direction) {
   readDraftFromForm();
   const drafts = [...state.workoutDraft];
@@ -4674,34 +6316,115 @@ async function moveExerciseDraft(draftId, direction) {
 async function handleAction(action, target) {
   const actions = {
     async "app-retry"() { await init(); },
+    async "dismiss-banner"() {
+      clearBanner();
+      await render();
+    },
+    async "dismiss-log-draft-notice"() {
+      clearLogDraftNotice();
+      syncLogDraftNoticeDom();
+    },
+    async "scroll-top"() {
+      hideScrollTopButton();
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    },
+    async "undo-last-action"() { await undoLastAction(); },
+    async "restore-draft"() {
+      if (!restoreDraftRecovery()) throw new Error("No saved draft found.");
+      clearLogDraftNotice();
+      toast("Draft restored.", { duration: 2000 });
+      await render();
+    },
+    async "quick-add-exercise"() {
+      preserveVisibleDraft("add-exercise");
+      state.activeTab = "exercises";
+      state.editingExerciseId = null;
+      state.exerciseFormDraft = null;
+      state.exerciseFormErrors = {};
+      await render({ animate: true });
+    },
     async "refresh-app-shell"() { await refreshAppShell(); },
+    async "confirm-import"() { await confirmPendingImport(); },
+    async "cancel-import"() {
+      state.pendingImport = null;
+      showBanner("Import canceled.", { tone: "info" });
+      await render();
+    },
+    async "date-step"() {
+      const input = document.getElementById(target.dataset.dateInput);
+      const delta = Number(target.dataset.dateDelta || 0);
+      if (!input) return;
+      input.value = shiftISODate(input.value || todayISO(), delta);
+      await applySharedDateInput(input);
+    },
+    async "date-today"() {
+      const input = document.getElementById(target.dataset.dateInput);
+      if (!input) return;
+      input.value = todayISO();
+      await applySharedDateInput(input);
+    },
+    async "date-clear"() {
+      const input = document.getElementById(target.dataset.dateInput);
+      if (!input) return;
+      if (input.id === "history-date") {
+        state.historyDate = "";
+        await render();
+        return;
+      }
+      input.value = "";
+      await applySharedDateInput(input);
+    },
+    async "toggle-dashboard-widget"() {
+      const widgetId = target.dataset.widgetId;
+      const enabled = selectedDashboardWidgets();
+      const next = enabled.includes(widgetId)
+        ? enabled.filter((id) => id !== widgetId)
+        : [...enabled, widgetId];
+      await saveDashboardWidgets(next.length ? next : enabled, dashboardWidgetOrder());
+      showBanner("Today widgets updated.", { tone: "good" });
+      await render();
+    },
+    async "move-dashboard-widget"() {
+      const widgetId = target.dataset.widgetId;
+      const direction = Number(target.dataset.widgetDirection || 0);
+      const order = dashboardWidgetOrder();
+      const index = order.indexOf(widgetId);
+      const swap = index + direction;
+      if (index < 0 || swap < 0 || swap >= order.length) return;
+      [order[index], order[swap]] = [order[swap], order[index]];
+      await saveDashboardWidgets(selectedDashboardWidgets(), order);
+      showBanner("Today widgets reordered.", { tone: "good" });
+      await render();
+    },
     async "toggle-template-panel"() {
       readDraftFromForm();
       state.showTemplatePanel = !state.showTemplatePanel;
       await render();
     },
     async "history-select-exercise"() {
+      await flashSelection(target);
       state.historyExercise = target.dataset.exercise || "";
       state.historyMode = "exercises";
-      await render();
+      await render({ animate: true });
     },
     async "history-back"() {
       state.historyExercise = "";
       state.historyMode = "exercises";
-      await render();
+      await render({ animate: true });
     },
     async "history-set-mode"() {
       state.historyMode = target.dataset.historyMode === "dates" ? "dates" : "exercises";
-      await render();
+      await render({ animate: true });
     },
     async "history-date-chip"() {
+      await flashSelection(target);
       state.historyMode = "dates";
       state.historyDate = target.dataset.historyDateValue || "";
-      await render();
+      await render({ animate: true });
     },
     async "clear-history-date"() {
       state.historyDate = "";
-      await render();
+      await render({ animate: true });
     },
     async "coach-timeframe"() {
       const minutes = Number(target.dataset.coachMinutes);
@@ -4710,25 +6433,58 @@ async function handleAction(action, target) {
         : SESSION_LIMIT_MINUTES;
       await render();
     },
+    async "coach-global-growth-mode"() {
+      const mode = target.dataset.growthMode;
+      if (!COACH_GROWTH_MODE_OPTIONS.some((option) => option.id === mode)) return;
+      state.coachGlobalGrowthMode = mode;
+      await render();
+    },
     async "coach-target-muscle"() {
       const muscleId = target.dataset.muscleId;
       if (!muscleGroups.some((muscle) => muscle.id === muscleId)) return;
       const scrollLeft = target.closest(".coach-target-options")?.scrollLeft || 0;
       const selected = selectedCoachTargetMuscles();
+      const wasSelected = selected.includes(muscleId);
+      const warning = wasSelected ? "" : coachTargetSelectionWarning(muscleId);
+      if (warning) {
+        toast(warning);
+        return;
+      }
       state.coachTargetMuscles = selected.includes(muscleId)
         ? selected.filter((id) => id !== muscleId)
         : [...selected, muscleId];
+      if (!state.coachTargetMuscles.includes(muscleId) && state.coachGrowthModes) delete state.coachGrowthModes[muscleId];
       await render();
       restoreCoachTargetScroll(scrollLeft);
     },
+    async "coach-growth-mode"() {
+      const muscleId = target.dataset.muscleId;
+      const mode = target.dataset.growthMode;
+      if (!selectedCoachTargetMuscles().includes(muscleId)) return;
+      if (!COACH_GROWTH_MODE_OPTIONS.some((option) => option.id === mode)) return;
+      state.coachGrowthModes = { ...(state.coachGrowthModes || {}), [muscleId]: mode };
+      await render();
+    },
     async "clear-coach-targets"() {
       state.coachTargetMuscles = [];
+      state.coachGrowthModes = {};
       await render();
     },
     async "copy-coach-plan"() {
       copyCoachPlanToLog(buildTodayPlan(selectedCoachTimeframeMinutes()));
+      announce("Coach plan copied to Log.", { tone: "good", detail: "Exercises and planned sets are ready as an unsaved draft." });
       await render({ animate: true });
-      toast("Coach plan copied to Log.");
+    },
+    async "export-coach-debug"() { await downloadCoachDebugReport(); },
+    async "preview-next-coach-plan"() {
+      state.previewNextCoachPlan = true;
+      await render();
+    },
+    async "clear-copied-coach-plan"() {
+      state.copiedCoachPlan = null;
+      state.previewNextCoachPlan = false;
+      persistCopiedCoachPlan(null);
+      await render();
     },
     async "dismiss-record-trophy"() {
       readDraftFromForm();
@@ -4744,13 +6500,21 @@ async function handleAction(action, target) {
     },
     async "add-exercise-table"() {
       readDraftFromForm();
-      state.workoutDraft.push(defaultDraftExercise(defaultLogExerciseName()));
+      const exercise = defaultLogExerciseName();
+      if (!exercise) {
+        state.activeTab = "exercises";
+        state.editingExerciseId = null;
+        state.exerciseFormDraft = null;
+        state.exerciseFormErrors = {};
+        await render({ animate: true });
+        return;
+      }
+      state.workoutDraft.push(defaultDraftExercise(exercise));
       await render();
     },
     async "remove-exercise-table"() {
       readDraftFromForm();
-      state.workoutDraft = ensureWorkoutDraft().filter((draft) => draft.draftId !== target.dataset.draftId);
-      syncLegacyDraftFromFirst();
+      removeExerciseDraftTable(target.dataset.draftId);
       await render();
     },
     async "move-exercise-up"() { await moveExerciseDraft(target.dataset.draftId, -1); },
@@ -4762,13 +6526,14 @@ async function handleAction(action, target) {
     },
     async "open-exercise-history"() {
       readDraftFromForm();
+      await flashSelection(target);
       state.logHistoryExercise = target.dataset.exercise;
       state.openExerciseMenu = null;
-      await render();
+      await render({ animate: true });
     },
     async "close-log-history"() {
       state.logHistoryExercise = "";
-      await render();
+      await render({ animate: true });
     },
     async "edit-exercise"() {
       state.activeTab = "exercises";
@@ -4821,13 +6586,15 @@ async function handleAction(action, target) {
       const mode = exerciseRemovalMode(exercise);
       if (mode === "delete") {
         if (!confirm(`Delete "${exercise.name}" from your exercise database?`)) return;
+        setUndoAction("Undo exercise change", { type: "custom-exercises", previous: exercises });
         await saveSetting("customExercises", exercises.filter((item) => item.id !== exercise.id));
-        toast("Exercise deleted.");
+        announce("Exercise deleted.", { tone: "warn", action: "undo-last-action", actionLabel: "Undo" });
       } else {
         if (!confirm(`Archive "${exercise.name}"? Existing logs stay intact.`)) return;
+        setUndoAction("Undo exercise change", { type: "custom-exercises", previous: exercises });
         const archived = { ...exercise, archivedAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
         await saveSetting("customExercises", exercises.map((item) => item.id === exercise.id ? archived : item));
-        toast("Exercise archived.");
+        announce("Exercise archived.", { tone: "warn", action: "undo-last-action", actionLabel: "Undo" });
       }
       if (state.editingExerciseId === exercise.id) state.editingExerciseId = null;
       state.openExerciseActionMenu = null;
@@ -4837,12 +6604,13 @@ async function handleAction(action, target) {
       const exercises = getCustomExercises({ includeArchived: true });
       const exercise = exercises.find((item) => item.id === target.dataset.id);
       if (!exercise) throw new Error("Exercise not found.");
+      setUndoAction("Undo exercise restore", { type: "custom-exercises", previous: exercises });
       const restored = { ...exercise, updatedAt: new Date().toISOString() };
       delete restored.archivedAt;
       await saveSetting("customExercises", exercises.map((item) => item.id === exercise.id ? restored : item));
       state.openExerciseActionMenu = null;
+      toast("Exercise restored.", { duration: 2000 });
       await render();
-      toast("Exercise restored.");
     },
     async "delete-exercise"() {
       const exercises = getCustomExercises({ includeArchived: true });
@@ -4850,13 +6618,16 @@ async function handleAction(action, target) {
       if (!exercise) throw new Error("Exercise not found.");
       if (exerciseRemovalMode(exercise) !== "delete") throw new Error("Archived exercises with logs can be restored, not permanently deleted.");
       if (!confirm(`Permanently delete "${exercise.name}" from your exercise database?`)) return;
+      setUndoAction("Undo exercise delete", { type: "custom-exercises", previous: exercises });
       await saveSetting("customExercises", exercises.filter((item) => item.id !== exercise.id));
       if (state.editingExerciseId === exercise.id) state.editingExerciseId = null;
       state.openExerciseActionMenu = null;
+      announce("Exercise deleted.", { tone: "warn", action: "undo-last-action", actionLabel: "Undo" });
       await render();
-      toast("Exercise deleted.");
     },
     async "log-exercise"() {
+      await flashSelection(target);
+      preserveVisibleDraft("log-exercise");
       state.activeTab = "log";
       state.logMode = "strength";
       state.editingWorkoutId = null;
@@ -4866,8 +6637,26 @@ async function handleAction(action, target) {
       state.workoutDraft = [defaultDraftExercise(state.selectedExercise)];
       await render();
     },
-    "quick-backup"() { downloadBackup(); },
-    "export-data"() { downloadBackup(); },
+    async "open-exercise-trend"() {
+      const exercise = target.dataset.exercise;
+      if (!exercise) return;
+      await flashSelection(target);
+      preserveVisibleDraft("cross-tab");
+      state.selectedExercise = exercise;
+      state.activeTab = "trends";
+      await render({ animate: true });
+    },
+    async "open-exercise-history-global"() {
+      const exercise = target.dataset.exercise;
+      if (!exercise) return;
+      await flashSelection(target);
+      preserveVisibleDraft("cross-tab");
+      state.historyExercise = exercise;
+      state.historyMode = "exercises";
+      state.activeTab = "history";
+      await render({ animate: true });
+    },
+    async "export-data"() { await downloadBackup(); },
     "import-click"() { document.getElementById("import-file")?.click(); },
     async "add-set"() {
       readDraftFromForm();
@@ -4904,7 +6693,9 @@ async function handleAction(action, target) {
     async "new-log"() {
       if (!confirm("Clear all logged info? This will discard your current draft.")) return;
       readDraftFromForm();
+      setUndoAction("Restore draft", { type: "clear-draft", recovery: draftRecoveryPayload("clear-draft") });
       clearWorkoutDraft();
+      announce("Draft cleared.", { tone: "warn", action: "undo-last-action", actionLabel: "Undo" });
       await render();
     },
     async "edit-workout"() {
@@ -4932,21 +6723,25 @@ async function handleAction(action, target) {
     },
     async "delete-workout"() {
       if (!confirm("Delete this workout? This cannot be undone.")) return;
+      const entry = state.workouts.find((workout) => workout.id === target.dataset.id);
+      if (entry) setUndoAction("Restore lift", { type: "delete-workout", entry });
       await dbDelete("workouts", target.dataset.id);
       if (state.editingWorkoutId === target.dataset.id) clearWorkoutDraft();
       await loadState();
+      announce("Lift deleted.", { tone: "warn", action: "undo-last-action", actionLabel: "Undo" });
       await render();
-      toast("Lift deleted.");
     },
     async "delete-metric"() {
       if (!confirm(`Delete nutrition entry${target.dataset.date ? ` for ${target.dataset.date}` : ""}? This cannot be undone.`)) return;
       const ids = target.dataset.date
         ? metricEntriesForDate(target.dataset.date).map((entry) => entry.id).filter(Boolean)
         : [target.dataset.id].filter(Boolean);
+      const entries = state.metrics.filter((entry) => ids.includes(entry.id));
+      if (entries.length) setUndoAction("Restore nutrition", { type: "delete-metrics", entries });
       await Promise.all(ids.map((id) => dbDelete("metrics", id)));
       await loadState();
+      announce("Metric deleted.", { tone: "warn", action: "undo-last-action", actionLabel: "Undo" });
       await render();
-      toast("Metric deleted.");
     },
     async "choose-exercise"() {
       readDraftFromForm();
@@ -4954,17 +6749,32 @@ async function handleAction(action, target) {
       syncLegacyDraftFromFirst();
       await render();
     },
-    async "save-supabase"() { await saveSupabaseSettings(); },
-    async "signup-supabase"() { await supabaseAuth("signup"); },
-    async "signin-supabase"() { await supabaseAuth("signin"); },
-    async "push-supabase"() { await pushSupabaseBackup(); },
-    async "pull-supabase"() { await pullSupabaseBackup(); },
+    async "save-supabase"() {
+      forceSettingsPanelOpen("supabase-sync");
+      await saveSupabaseSettings();
+    },
+    async "signup-supabase"() {
+      forceSettingsPanelOpen("supabase-sync");
+      await supabaseAuth("signup");
+    },
+    async "signin-supabase"() {
+      forceSettingsPanelOpen("supabase-sync");
+      await supabaseAuth("signin");
+    },
+    async "push-supabase"() {
+      forceSettingsPanelOpen("supabase-sync");
+      await pushSupabaseBackup();
+    },
+    async "pull-supabase"() {
+      forceSettingsPanelOpen("supabase-sync");
+      await pullSupabaseBackup();
+    },
     async "nutrition-goal"() {
       const goal = target.dataset.nutritionGoal;
       if (!NUTRITION_GOAL_OPTIONS.some((option) => option.id === goal)) return;
       await saveSetting("nutritionGoal", goal);
+      announce(`Nutrition goal set to ${nutritionGoalLabel(goal)}.`, { tone: "good" });
       await render();
-      toast(`Nutrition goal set to ${nutritionGoalLabel(goal)}.`);
     },
     async "load-sample-data"() { await loadSampleData(); },
     async "remove-sample-data"() { await removeSampleData(); },
@@ -4996,6 +6806,8 @@ function activateDrag() {
   dragState.active = true;
   dragState.pending = false;
   state.draggingDraftId = dragState.id;
+  state.dragPendingDraftId = null;
+  handle.classList.remove("is-pending");
   section.classList.add("is-dragging");
   handle.setPointerCapture?.(dragState.pointerId);
 }
@@ -5007,14 +6819,24 @@ function startExerciseDrag(handle, event) {
   dragState.pending = true;
   dragState.moved = false;
   dragState.pointerId = event.pointerId;
+  state.dragPendingDraftId = handle.dataset?.draftId || null;
+  handle.classList.add("is-pending");
   clearTimeout(dragState.dragTimer);
   dragState.dragTimer = setTimeout(activateDrag, dragState.holdDelay);
 }
 
 function cancelPendingDrag() {
   clearTimeout(dragState.dragTimer);
+  dragState.handle?.classList?.remove("is-pending");
   dragState.pending = false;
   dragState.handle = null;
+  state.dragPendingDraftId = null;
+}
+
+function updatePendingExerciseDrag(event) {
+  if (!dragState.pending) return;
+  dragState.currentY = event.clientY;
+  if (Math.abs(dragState.currentY - dragState.startY) > 14) cancelPendingDrag();
 }
 
 function resetDragState() {
@@ -5024,6 +6846,8 @@ function resetDragState() {
   dragState.moved = false;
   dragState.handle = null;
   state.draggingDraftId = null;
+  state.dragPendingDraftId = null;
+  document.querySelectorAll(".drag-handle.is-pending").forEach((handle) => handle.classList.remove("is-pending"));
   document.querySelectorAll(".exercise-draft.is-dragging").forEach((section) => {
     section.classList.remove("is-dragging");
     section.style.transform = "";
@@ -5098,6 +6922,13 @@ function restoreCoachTargetScroll(scrollLeft) {
   else restore();
 }
 
+document.addEventListener("toggle", (event) => {
+  const panel = event.target?.closest?.("details[data-settings-panel]");
+  if (panel && state.activeTab === "settings") {
+    setSettingsPanelOpen(panel.dataset.settingsPanel, panel.open);
+  }
+}, true);
+
 document.addEventListener("click", async (event) => {
   const tab = event.target.closest("[data-tab]");
   const logMode = event.target.closest("[data-log-mode]");
@@ -5105,11 +6936,17 @@ document.addEventListener("click", async (event) => {
 
   try {
     if (tab) {
+      if (tab.dataset.tab !== state.activeTab) preserveVisibleDraft("tab-change");
       state.activeTab = tab.dataset.tab;
       await render({ animate: true });
     }
     if (logMode) {
-      state.logMode = logMode.dataset.logMode;
+      const nextMode = logMode.dataset.logMode;
+      if (nextMode !== state.logMode) {
+        preserveVisibleDraft("log-mode-change");
+        applyLogModeSwitch(nextMode);
+      }
+      state.logMode = nextMode;
       await render();
     }
     if (action) {
@@ -5130,18 +6967,10 @@ document.addEventListener("change", async (event) => {
         draft.targetMuscle = meta.primaryMuscles[0] || draft.targetMuscle || "chest";
       }
       syncLegacyDraftFromFirst();
+      saveDraftRecovery("strength-change");
       await render();
     }
-    if (event.target.matches("#workout-date")) {
-      readDraftFromForm();
-      const newDate = event.target.value || todayISO();
-      loadWorkoutDateDraft(newDate);
-      await render();
-    }
-    if (event.target.matches("#metric-date")) {
-      state.metricDate = event.target.value || todayISO();
-      await render();
-    }
+    if (event.target.matches("[data-shared-date-input]")) await applySharedDateInput(event.target);
     if (event.target.matches("#trend-exercise")) {
       state.selectedExercise = event.target.value;
       await render();
@@ -5149,13 +6978,12 @@ document.addEventListener("change", async (event) => {
     if (event.target.matches("#exercise-primary")) {
       syncSecondaryMuscleCheckboxes(event.target.closest("#exercise-form"));
     }
+    if (event.target.closest("#exercise-form")) {
+      state.exerciseFormDraft = exerciseFormDraftFromForm(event.target.closest("#exercise-form"));
+      saveDraftRecovery("exercise-change");
+    }
     if (event.target.matches("[data-exercise-sort]")) {
       state.exerciseSort = ["recent", "az", "muscle", "most"].includes(event.target.value) ? event.target.value : "recent";
-      await render();
-    }
-    if (event.target.matches("#history-date")) {
-      state.historyMode = "dates";
-      state.historyDate = event.target.value || "";
       await render();
     }
     if (event.target.matches("#trend-muscle")) {
@@ -5176,10 +7004,28 @@ document.addEventListener("input", async (event) => {
     if (event.target.matches("[data-meal-field], [data-quick-field]")) {
       refreshNutritionFormTotals(event.target.closest("#metric-form"));
     }
+    if (event.target.closest("#metric-form") && !event.target.matches("[data-shared-date-input]")) {
+      state.metricFormDraft = metricDraftFromForm(event.target.closest("#metric-form"));
+      if (saveDraftRecovery("nutrition-input")) {
+        showLogDraftNotice();
+        syncLogDraftNoticeDom();
+      }
+    }
     if (event.target.matches("[data-set-field]")) {
       const section = event.target.closest(".exercise-draft");
       readDraftFromForm();
+      if (saveDraftRecovery("strength-input")) {
+        showLogDraftNotice();
+        syncLogDraftNoticeDom();
+      }
       if (section?.dataset.draftId) refreshDraftRecordTrophies(section.dataset.draftId);
+    }
+    if (event.target.matches("[data-draft-field='notes']")) {
+      readDraftFromForm();
+      if (saveDraftRecovery("strength-input")) {
+        showLogDraftNotice();
+        syncLogDraftNoticeDom();
+      }
     }
     if (event.target.matches("[data-history-search]")) {
       const caret = event.target.selectionStart || 0;
@@ -5197,6 +7043,10 @@ document.addEventListener("input", async (event) => {
       input?.focus();
       input?.setSelectionRange?.(caret, caret);
     }
+    if (event.target.closest("#exercise-form") && !event.target.matches("[data-exercise-search]")) {
+      state.exerciseFormDraft = exerciseFormDraftFromForm(event.target.closest("#exercise-form"));
+      saveDraftRecovery("exercise-input");
+    }
   } catch (error) {
     toast(error.message || "Something went wrong.");
   }
@@ -5211,7 +7061,10 @@ document.addEventListener("pointermove", (event) => {
     if (dragged) dragged.style.transform = `translateY(${delta}px)`;
     return;
   }
-  cancelPendingDrag();
+  if (dragState.pending) {
+    updatePendingExerciseDrag(event);
+    return;
+  }
   const chart = event.target.closest(".interactive-chart");
   if (chart) updateInteractiveChart(chart, event);
 });
@@ -5244,6 +7097,7 @@ document.addEventListener("pointercancel", async (event) => {
     dragState.moved = false;
     dragState.handle = null;
     state.draggingDraftId = null;
+    state.dragPendingDraftId = null;
     document.querySelectorAll(".exercise-draft.is-dragging").forEach((section) => {
       section.classList.remove("is-dragging");
       section.style.transform = "";
@@ -5270,7 +7124,8 @@ document.addEventListener("touchmove", (event) => {
     const dragged = document.querySelector(`.exercise-draft[data-draft-id="${dragState.id}"]`);
     if (dragged) dragged.style.transform = `translateY(${delta}px)`;
   } else if (dragState.pending) {
-    cancelPendingDrag();
+    const touch = event.touches[0];
+    updatePendingExerciseDrag({ clientY: touch.clientY });
   }
 }, { passive: false });
 
@@ -5290,11 +7145,20 @@ document.addEventListener("touchcancel", () => {
   dragState.moved = false;
   dragState.handle = null;
   state.draggingDraftId = null;
+  state.dragPendingDraftId = null;
+  document.querySelectorAll(".drag-handle.is-pending").forEach((handle) => handle.classList.remove("is-pending"));
   document.querySelectorAll(".exercise-draft.is-dragging").forEach((section) => {
     section.classList.remove("is-dragging");
     section.style.transform = "";
   });
 });
+
+if (window.addEventListener) {
+  window.addEventListener("scroll", updateScrollTopButton, { passive: true });
+  window.addEventListener("resize", updateScrollTopButton);
+  window.visualViewport?.addEventListener("scroll", updateScrollTopButton, { passive: true });
+  window.visualViewport?.addEventListener("resize", updateScrollTopButton);
+}
 
 document.addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -5358,6 +7222,9 @@ async function init() {
     state.db = await openDB();
     await loadState();
   }
+
+  restoreDraftRecovery();
+  restoreCopiedCoachPlan();
 
   if (navigator.storage?.persist) {
     navigator.storage.persist().catch(() => {});

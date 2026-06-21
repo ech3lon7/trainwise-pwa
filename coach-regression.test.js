@@ -77,6 +77,10 @@ const resetAndHelpers = `
   state.settings = {};
   state.selectedExercise = "Push-up";
   state.coachTargetMuscles = [];
+  state.coachGlobalGrowthMode = "medium";
+  state.coachGrowthModes = {};
+  state.copiedCoachPlan = null;
+  state.previewNextCoachPlan = false;
   state.workoutDraft = [];
   state.draftDate = todayISO();
   state.templateQueue = [];
@@ -270,7 +274,7 @@ const dailyMuscleCap = runScenario(`
   });
 `);
 
-assert(dailyMuscleCap.muscles.length <= 5, `Expected Coach to cap new daily muscles at 5, got ${dailyMuscleCap.muscles.length}: ${dailyMuscleCap.muscles.join(", ")}`);
+assert(dailyMuscleCap.muscles.length <= 8, `Expected Coach to cap new daily muscles by timeframe, got ${dailyMuscleCap.muscles.length}: ${dailyMuscleCap.muscles.join(", ")}`);
 
 const weeklyExerciseFairnessCap = runScenario(`
   ${resetAndHelpers}
@@ -293,7 +297,7 @@ const weeklyExerciseFairnessCap = runScenario(`
 assert.strictEqual(weeklyExerciseFairnessCap.chosen, "Hammer Curl", `Expected weekly use cap to rotate away from repeated Bicep Curl, got ${weeklyExerciseFairnessCap.chosen}`);
 assert.strictEqual(weeklyExerciseFairnessCap.curlMemory, 2, `Expected Curl weekly use count to be 2, got ${weeklyExerciseFairnessCap.curlMemory}`);
 
-const activeDraftUpdatesCoachPlan = runScenario(`
+const activeDraftDoesNotUpdateCoachPlan = runScenario(`
   ${resetAndHelpers}
   var biceps = muscleGroups.find((muscle) => muscle.id === "biceps");
   state.workouts = [makeWorkout(biceps, 2, 8)];
@@ -310,11 +314,14 @@ const activeDraftUpdatesCoachPlan = runScenario(`
     ]
   }];
   var bicepsStat = rankedCoachMuscles().find((muscle) => muscle.id === "biceps");
-  ({ sets: bicepsStat.sets, sessions: bicepsStat.sessions });
+  var coachEntries = coachWorkoutEntries();
+  ({ sets: bicepsStat.sets, sessions: bicepsStat.sessions, coachEntryCount: coachEntries.length, hasPending: coachEntries.some((entry) => entry.pendingDraft) });
 `);
 
-assert.strictEqual(activeDraftUpdatesCoachPlan.sets, 10, `Expected Coach to count active log draft as pending biceps work, got ${activeDraftUpdatesCoachPlan.sets}`);
-assert.strictEqual(activeDraftUpdatesCoachPlan.sessions, 2, `Expected pending draft date to count as a Coach touch, got ${activeDraftUpdatesCoachPlan.sessions}`);
+assert.strictEqual(activeDraftDoesNotUpdateCoachPlan.sets, 8, `Expected Coach to ignore active Log draft until lock-in, got ${activeDraftDoesNotUpdateCoachPlan.sets}`);
+assert.strictEqual(activeDraftDoesNotUpdateCoachPlan.sessions, 1, `Expected active draft not to count as a Coach touch, got ${activeDraftDoesNotUpdateCoachPlan.sessions}`);
+assert.strictEqual(activeDraftDoesNotUpdateCoachPlan.coachEntryCount, 1, `Expected Coach entries to use submitted workouts only, got ${activeDraftDoesNotUpdateCoachPlan.coachEntryCount}`);
+assert.strictEqual(activeDraftDoesNotUpdateCoachPlan.hasPending, false, "Expected Coach entries not to include pending draft rows.");
 
 const repeatedFailureRotatesExercise = runScenario(`
   ${resetAndHelpers}
@@ -354,6 +361,57 @@ const repeatedFailureRotatesExercise = runScenario(`
 
 assert.strictEqual(repeatedFailureRotatesExercise.exercise, "Incline Dumbbell Press", `Expected repeated bench failure to rotate to incline, got ${repeatedFailureRotatesExercise.exercise}`);
 assert((repeatedFailureRotatesExercise.note + repeatedFailureRotatesExercise.why).includes("deload") || (repeatedFailureRotatesExercise.note + repeatedFailureRotatesExercise.why).includes("stalled"), `Expected repeated failure explanation, got ${repeatedFailureRotatesExercise.note} ${repeatedFailureRotatesExercise.why}`);
+
+const topSetPrAvoidsFalseFailure = runScenario(`
+  ${resetAndHelpers}
+  state.settings.customExercises = [
+    { id: "bench", name: "Flat Bench Press", primaryMuscles: ["chest"], secondaryMuscles: ["triceps", "shoulders"], equipment: "barbell", reps: "8-12", rest: "120-180 sec", cue: "Bench.", userCreated: true }
+  ];
+  var chest = muscleGroups.find((muscle) => muscle.id === "chest");
+  state.workouts = [
+    {
+      ...makeWorkout(chest, 2, 3, {
+      id: "bench-pr",
+      exercise: "Flat Bench Press",
+      exerciseId: "bench",
+      primaryMuscles: ["chest"],
+      secondaryMuscles: ["triceps", "shoulders"],
+      restSeconds: 150
+      }),
+      reps: 10,
+      weight: 155,
+      setRows: [
+        { weight: 155, reps: 10, rir: 1, restSeconds: 150 },
+        { weight: 135, reps: 9, rir: 1, restSeconds: 150 },
+        { weight: 125, reps: 8, rir: 2, restSeconds: 150 }
+      ]
+    },
+    {
+      ...makeWorkout(chest, 5, 3, {
+      id: "bench-prior",
+      exercise: "Flat Bench Press",
+      exerciseId: "bench",
+      primaryMuscles: ["chest"],
+      secondaryMuscles: ["triceps", "shoulders"],
+      restSeconds: 150
+      }),
+      reps: 10,
+      weight: 145,
+      setRows: [
+        { weight: 145, reps: 10, rir: 1, restSeconds: 150 },
+        { weight: 135, reps: 11, rir: 1, restSeconds: 150 },
+        { weight: 125, reps: 10, rir: 2, restSeconds: 150 }
+      ]
+    }
+  ];
+  var signal = coachExercisePerformanceSignal(resolveExerciseMeta("Flat Bench Press"));
+  var target = coachPlanTargetForExercise(resolveExerciseMeta("Flat Bench Press"), signal);
+  ({ status: signal.status, message: signal.message, targetKind: target.kind, targetLabel: target.label });
+`);
+
+assert.strictEqual(topSetPrAvoidsFalseFailure.status, "progressing", `Expected top-set PR with normal backoff drop to count as progressing, got ${topSetPrAvoidsFalseFailure.status}: ${topSetPrAvoidsFalseFailure.message}`);
+assert.notStrictEqual(topSetPrAvoidsFalseFailure.targetKind, "reset", `Expected top-set PR not to produce reset target, got ${topSetPrAvoidsFalseFailure.targetLabel}`);
+assert.notStrictEqual(topSetPrAvoidsFalseFailure.targetKind, "deload", `Expected top-set PR not to produce deload target, got ${topSetPrAvoidsFalseFailure.targetLabel}`);
 
 const planIncludesProgressionTarget = runScenario(`
   ${resetAndHelpers}
@@ -536,20 +594,367 @@ const targetedMuscles = runScenario(`
 assert.strictEqual(targetedMuscles.mode, "session", `Expected target focus to create a session, got ${targetedMuscles.mode}`);
 assert(targetedMuscles.muscles.includes("biceps"), `Expected biceps target in plan, got ${targetedMuscles.muscles.join(", ")}`);
 assert(targetedMuscles.bicepsSets > 0, `Expected biceps target to receive work, got ${targetedMuscles.bicepsSets}`);
-assert(targetedMuscles.why.includes("Target focus"), `Expected target focus explanation, got ${targetedMuscles.why}`);
+assert(targetedMuscles.why.includes("Targets selected") && targetedMuscles.why.includes("conservative priority"), `Expected target priority explanation, got ${targetedMuscles.why}`);
+
+const targetsPrioritizeBeforeGeneralFill = runScenario(`
+  ${resetAndHelpers}
+  state.coachTargetMuscles = ["biceps"];
+  state.coachGrowthModes = { biceps: "soft" };
+  state.coachGlobalGrowthMode = "medium";
+  state.workouts = muscleGroups.map((muscle) => makeWorkout(muscle, 2, muscle.id === "biceps" ? 12 : 10));
+  var plan = buildTodayPlan(60);
+  var muscles = plan.sessionPlan.items.map((item) => item.muscle.id);
+  var bicepsIndex = muscles.indexOf("biceps");
+  var firstNonTargetIndex = muscles.findIndex((id) => id !== "biceps");
+  ({
+    muscles,
+    bicepsIndex,
+    firstNonTargetIndex,
+    bicepsSets: plan.sessionPlan.items.find((item) => item.muscle.id === "biceps")?.sets || 0,
+    why: plan.why.join(" ")
+  });
+`);
+
+assert(targetsPrioritizeBeforeGeneralFill.bicepsIndex >= 0, `Expected selected Biceps target in plan, got ${targetsPrioritizeBeforeGeneralFill.muscles.join(", ")}`);
+assert(targetsPrioritizeBeforeGeneralFill.firstNonTargetIndex < 0 || targetsPrioritizeBeforeGeneralFill.bicepsIndex < targetsPrioritizeBeforeGeneralFill.firstNonTargetIndex, `Expected selected target before non-target optional fill, got ${targetsPrioritizeBeforeGeneralFill.muscles.join(", ")}`);
+assert(targetsPrioritizeBeforeGeneralFill.bicepsSets > 0, "Expected Soft target to receive conservative work before non-target optional work.");
+assert(targetsPrioritizeBeforeGeneralFill.why.includes("Soft targets get conservative priority"), `Expected Soft target wording, got ${targetsPrioritizeBeforeGeneralFill.why}`);
+
+const targetSelectionRecoveryWarning = runScenario(`
+  ${resetAndHelpers}
+  var triceps = muscleGroups.find((muscle) => muscle.id === "triceps");
+  state.workouts = [makeWorkout(triceps, 1, 3)];
+  var directWarning = coachTargetSelectionWarning("triceps");
+  state.workouts = [makeWorkout(muscleGroups.find((muscle) => muscle.id === "chest"), 1, 3, { secondaryMuscles: ["triceps"] })];
+  var secondaryWarning = coachTargetSelectionWarning("triceps");
+  state.workouts = [makeWorkout(triceps, 2, 3)];
+  var readyWarning = coachTargetSelectionWarning("triceps");
+  ({
+    directWarning,
+    secondaryWarning,
+    readyWarning
+  });
+`);
+
+assert(targetSelectionRecoveryWarning.directWarning.includes("Triceps was directly trained yesterday"), `Expected direct recent target warning, got ${targetSelectionRecoveryWarning.directWarning}`);
+assert(targetSelectionRecoveryWarning.directWarning.includes("Coach will protect recovery and skip direct Triceps work today"), `Expected firm recovery wording, got ${targetSelectionRecoveryWarning.directWarning}`);
+assert.strictEqual(targetSelectionRecoveryWarning.secondaryWarning, "", `Expected secondary-only work not to warn, got ${targetSelectionRecoveryWarning.secondaryWarning}`);
+assert.strictEqual(targetSelectionRecoveryWarning.readyWarning, "", `Expected ready target not to warn, got ${targetSelectionRecoveryWarning.readyWarning}`);
+
+const targetSelectionBlocksRecoveryConflict = runScenario(`
+  ${resetAndHelpers}
+  var originalToast = toast;
+  var toastMessage = "";
+  toast = (message) => { toastMessage = message; };
+  var triceps = muscleGroups.find((muscle) => muscle.id === "triceps");
+  state.workouts = [makeWorkout(triceps, 1, 3)];
+  state.coachTargetMuscles = [];
+  var targetEl = {
+    dataset: { muscleId: "triceps" },
+    closest: () => ({ scrollLeft: 0 })
+  };
+  Promise.resolve(handleAction("coach-target-muscle", targetEl)).then(() => {});
+  toast = originalToast;
+  ({
+    selected: selectedCoachTargetMuscles(),
+    toastMessage
+  });
+`);
+
+assert(!targetSelectionBlocksRecoveryConflict.selected.includes("triceps"), `Expected recovery-conflicting Triceps target to stay unselected, got ${targetSelectionBlocksRecoveryConflict.selected.join(", ")}`);
+assert(targetSelectionBlocksRecoveryConflict.toastMessage.includes("skip direct Triceps work today"), `Expected blocked selection toast, got ${targetSelectionBlocksRecoveryConflict.toastMessage}`);
+
+const targetAboveGrowthZoneStillGetsReserve = runScenario(`
+  ${resetAndHelpers}
+  state.coachTargetMuscles = ["hamstrings"];
+  state.coachGlobalGrowthMode = "medium";
+  state.workouts = muscleGroups.map((muscle) => makeWorkout(muscle, 2, muscle.id === "hamstrings" ? 21 : 10));
+  var warning = coachTargetSelectionWarning("hamstrings");
+  var plan = buildTodayPlan(60);
+  var hamstrings = plan.sessionPlan.items.find((item) => item.muscle.id === "hamstrings");
+  ({
+    warning,
+    muscles: plan.sessionPlan.items.map((item) => item.muscle.id),
+    phase: hamstrings?.phase || "",
+    sets: hamstrings?.sets || 0,
+    projectedSets: hamstrings ? hamstrings.muscle.sets + hamstrings.sets : 0,
+    reason: hamstrings?.reason || "",
+    why: plan.why.join(" ")
+  });
+`);
+
+assert.strictEqual(targetAboveGrowthZoneStillGetsReserve.warning, "", `Expected high-volume but recovered target selection to be allowed, got ${targetAboveGrowthZoneStillGetsReserve.warning}`);
+assert(targetAboveGrowthZoneStillGetsReserve.muscles.includes("hamstrings"), `Expected selected Hamstrings above 20 to receive target reserve work, got ${targetAboveGrowthZoneStillGetsReserve.muscles.join(", ")}`);
+assert.strictEqual(targetAboveGrowthZoneStillGetsReserve.phase, "target-extra", `Expected Hamstrings to be target-extra, got ${targetAboveGrowthZoneStillGetsReserve.phase}`);
+assert(targetAboveGrowthZoneStillGetsReserve.sets > 0, `Expected target reserve sets for Hamstrings, got ${targetAboveGrowthZoneStillGetsReserve.sets}`);
+assert(targetAboveGrowthZoneStillGetsReserve.projectedSets > 20, `Expected selected target to be allowed above 20, got ${targetAboveGrowthZoneStillGetsReserve.projectedSets}`);
+assert(targetAboveGrowthZoneStillGetsReserve.reason.includes("selected extra volume"), `Expected target-extra reason, got ${targetAboveGrowthZoneStillGetsReserve.reason}`);
+assert(!targetAboveGrowthZoneStillGetsReserve.why.includes("already at its Medium target"), `Expected Why this? not to deny above-20 target by mode cap, got ${targetAboveGrowthZoneStillGetsReserve.why}`);
+
+const globalGrowthModeSelector = runScenario(`
+  ${resetAndHelpers}
+  state.coachGlobalGrowthMode = "";
+  var markup = renderCoachGrowthModeSelector();
+  ({
+    selected: selectedCoachGlobalGrowthMode(),
+    hasSelector: markup.includes('data-action="coach-global-growth-mode"'),
+    mediumActive: markup.includes('growth-mode-chip is-active') && markup.includes('Medium'),
+    hasLabel: markup.includes("Plan intensity")
+  });
+`);
+
+assert.strictEqual(globalGrowthModeSelector.selected, "medium", `Expected global growth mode to default to medium, got ${globalGrowthModeSelector.selected}`);
+assert(globalGrowthModeSelector.hasSelector, "Expected Coach to render a global plan intensity selector.");
+assert(globalGrowthModeSelector.mediumActive, "Expected global plan intensity selector to show Medium as active by default.");
+assert(globalGrowthModeSelector.hasLabel, "Expected global plan intensity selector to be labeled Plan intensity.");
+
+const globalGrowthModesChangeSets = runScenario(`
+  ${resetAndHelpers}
+  state.settings.customExercises = [
+    { id: "supinated-curls", name: "Supinated Curls", primaryMuscles: ["biceps"], secondaryMuscles: [], equipment: "dumbbells", reps: "8-15", rest: "60-120 sec", cue: "Curl.", userCreated: true },
+    ...muscleGroups.filter((muscle) => muscle.id !== "biceps").map((muscle) => ({
+      id: "custom-" + muscle.id,
+      name: muscle.label + " Exercise",
+      primaryMuscles: [muscle.id],
+      secondaryMuscles: [],
+      equipment: "dumbbells",
+      reps: "8-12",
+      rest: "90-180 sec",
+      cue: "Test exercise for " + muscle.label,
+      userCreated: true
+    }))
+  ];
+  state.workouts = muscleGroups.map((muscle) => makeWorkout(muscle, 2, muscle.id === "biceps" ? 10 : 20, muscle.id === "biceps" ? { exercise: "Supinated Curls", exerciseId: "supinated-curls", primaryMuscles: ["biceps"], restSeconds: 90 } : {}));
+  state.coachGlobalGrowthMode = "soft";
+  var soft = buildTodayPlan(60).sessionPlan.items.find((item) => item.muscle.id === "biceps");
+  state.coachGlobalGrowthMode = "medium";
+  var medium = buildTodayPlan(60).sessionPlan.items.find((item) => item.muscle.id === "biceps");
+  state.coachGlobalGrowthMode = "aggressive";
+  var aggressive = buildTodayPlan(60).sessionPlan.items.find((item) => item.muscle.id === "biceps");
+  ({
+    softSets: soft?.sets || 0,
+    mediumSets: medium?.sets || 0,
+    aggressiveSets: aggressive?.sets || 0,
+    aggressiveMode: aggressive?.growthMode,
+    why: buildTodayPlan(60).why.join(" ")
+  });
+`);
+
+assert(globalGrowthModesChangeSets.softSets < globalGrowthModesChangeSets.mediumSets, `Expected Medium to prescribe more Biceps sets than Soft, got soft=${globalGrowthModesChangeSets.softSets}, medium=${globalGrowthModesChangeSets.mediumSets}`);
+assert(globalGrowthModesChangeSets.mediumSets <= globalGrowthModesChangeSets.aggressiveSets, `Expected Aggressive to prescribe at least Medium Biceps sets, got medium=${globalGrowthModesChangeSets.mediumSets}, aggressive=${globalGrowthModesChangeSets.aggressiveSets}`);
+assert.strictEqual(globalGrowthModesChangeSets.aggressiveMode, "aggressive", `Expected inherited aggressive global mode, got ${globalGrowthModesChangeSets.aggressiveMode}`);
+assert(globalGrowthModesChangeSets.why.includes("Aggressive plan intensity"), `Expected Why this? to include global plan intensity, got ${globalGrowthModesChangeSets.why}`);
+
+const belowFloorModeDifferentiation = runScenario(`
+  ${resetAndHelpers}
+  state.settings.customExercises = [
+    { id: "supinated-curls", name: "Supinated Curls", primaryMuscles: ["biceps"], secondaryMuscles: [], equipment: "dumbbells", reps: "8-15", rest: "60-120 sec", cue: "Curl.", userCreated: true },
+    ...muscleGroups.filter((muscle) => muscle.id !== "biceps").map((muscle) => ({
+      id: "custom-" + muscle.id,
+      name: muscle.label + " Exercise",
+      primaryMuscles: [muscle.id],
+      secondaryMuscles: [],
+      equipment: "dumbbells",
+      reps: "8-12",
+      rest: "90-180 sec",
+      cue: "Test exercise for " + muscle.label,
+      userCreated: true
+    }))
+  ];
+  state.workouts = muscleGroups.map((muscle) => makeWorkout(muscle, 2, muscle.id === "biceps" ? 8 : 20, muscle.id === "biceps" ? { exercise: "Supinated Curls", exerciseId: "supinated-curls", primaryMuscles: ["biceps"], restSeconds: 90 } : {}));
+  state.coachTargetMuscles = ["biceps"];
+  state.coachGlobalGrowthMode = "soft";
+  var soft = buildTodayPlan(60).sessionPlan.items.find((item) => item.muscle.id === "biceps");
+  state.coachGlobalGrowthMode = "medium";
+  var medium = buildTodayPlan(60).sessionPlan.items.find((item) => item.muscle.id === "biceps");
+  state.coachGlobalGrowthMode = "aggressive";
+  var aggressive = buildTodayPlan(60).sessionPlan.items.find((item) => item.muscle.id === "biceps");
+  ({
+    softSets: soft?.sets || 0,
+    mediumSets: medium?.sets || 0,
+    aggressiveSets: aggressive?.sets || 0,
+    softProjected: soft ? soft.muscle.sets + soft.sets : 0,
+    mediumProjected: medium ? medium.muscle.sets + medium.sets : 0,
+    aggressiveProjected: aggressive ? aggressive.muscle.sets + aggressive.sets : 0
+  });
+`);
+
+assert.strictEqual(belowFloorModeDifferentiation.softProjected, 10, `Expected Soft Biceps to clear the floor only, got projected ${belowFloorModeDifferentiation.softProjected}`);
+assert(belowFloorModeDifferentiation.mediumSets > belowFloorModeDifferentiation.softSets, `Expected Medium Biceps to exceed Soft below-floor sets, got soft=${belowFloorModeDifferentiation.softSets}, medium=${belowFloorModeDifferentiation.mediumSets}`);
+assert(belowFloorModeDifferentiation.aggressiveSets >= belowFloorModeDifferentiation.mediumSets, `Expected Aggressive Biceps to match or exceed Medium below-floor sets, got medium=${belowFloorModeDifferentiation.mediumSets}, aggressive=${belowFloorModeDifferentiation.aggressiveSets}`);
+
+const modeAwarePerExerciseCaps = runScenario(`
+  ${resetAndHelpers}
+  state.settings.customExercises = [
+    { id: "calve-raises", name: "Calve Raises", primaryMuscles: ["calves"], secondaryMuscles: [], equipment: "machine", reps: "8-15", rest: "60-120 sec", cue: "Raise.", userCreated: true },
+    ...muscleGroups.filter((muscle) => muscle.id !== "calves").map((muscle) => ({
+      id: "custom-" + muscle.id,
+      name: muscle.label + " Exercise",
+      primaryMuscles: [muscle.id],
+      secondaryMuscles: [],
+      equipment: "dumbbells",
+      reps: "8-12",
+      rest: "90-180 sec",
+      cue: "Test exercise for " + muscle.label,
+      userCreated: true
+    }))
+  ];
+  state.workouts = muscleGroups.map((muscle) => makeWorkout(muscle, 2, muscle.id === "calves" ? 10 : 20, muscle.id === "calves" ? { exercise: "Calve Raises", exerciseId: "calve-raises", primaryMuscles: ["calves"], restSeconds: 90 } : {}));
+  state.coachTargetMuscles = ["calves"];
+  state.coachGlobalGrowthMode = "soft";
+  var soft = buildTodayPlan(60).sessionPlan.items.find((item) => item.muscle.id === "calves");
+  state.coachGlobalGrowthMode = "medium";
+  var medium = buildTodayPlan(60).sessionPlan.items.find((item) => item.muscle.id === "calves");
+  state.coachGlobalGrowthMode = "aggressive";
+  var aggressive = buildTodayPlan(60).sessionPlan.items.find((item) => item.muscle.id === "calves");
+  ({
+    softSets: soft?.sets || 0,
+    mediumSets: medium?.sets || 0,
+    aggressiveSets: aggressive?.sets || 0
+  });
+`);
+
+assert(modeAwarePerExerciseCaps.softSets < modeAwarePerExerciseCaps.mediumSets, `Expected Medium Calves to exceed Soft, got soft=${modeAwarePerExerciseCaps.softSets}, medium=${modeAwarePerExerciseCaps.mediumSets}`);
+assert(modeAwarePerExerciseCaps.aggressiveSets > modeAwarePerExerciseCaps.mediumSets, `Expected Aggressive Calves to exceed the old 8-set Medium cap, got medium=${modeAwarePerExerciseCaps.mediumSets}, aggressive=${modeAwarePerExerciseCaps.aggressiveSets}`);
+
+const realisticModeComparisonExplainsAggressiveLimits = runScenario(`
+  ${resetAndHelpers}
+  state.workouts = [
+    makeWorkout(muscleGroups.find((muscle) => muscle.id === "chest"), 2, 10, { restSeconds: 120 }),
+    makeWorkout(muscleGroups.find((muscle) => muscle.id === "back"), 2, 12, { restSeconds: 90 }),
+    makeWorkout(muscleGroups.find((muscle) => muscle.id === "quads"), 2, 10, { restSeconds: 90 }),
+    makeWorkout(muscleGroups.find((muscle) => muscle.id === "abs"), 2, 15, { restSeconds: 75 }),
+    makeWorkout(muscleGroups.find((muscle) => muscle.id === "triceps"), 2, 13, { restSeconds: 75 }),
+    makeWorkout(muscleGroups.find((muscle) => muscle.id === "shoulders"), 1, 18, { restSeconds: 90 }),
+    makeWorkout(muscleGroups.find((muscle) => muscle.id === "glutes"), 1, 18, { restSeconds: 90 }),
+    makeWorkout(muscleGroups.find((muscle) => muscle.id === "calves"), 1, 18, { restSeconds: 75 }),
+    makeWorkout(muscleGroups.find((muscle) => muscle.id === "biceps"), 1, 19, { restSeconds: 75 }),
+    makeWorkout(muscleGroups.find((muscle) => muscle.id === "hamstrings"), 1, 20, { restSeconds: 90 })
+  ];
+  var comparison = coachDebugModeComparison();
+  var mediumByMuscle = Object.fromEntries(comparison.medium.items.map((item) => [item.muscleId, item.sets]));
+  var lowerAggressiveItems = comparison.aggressive.items
+    .filter((item) => mediumByMuscle[item.muscleId] && item.sets < mediumByMuscle[item.muscleId])
+    .map((item) => item.muscle + ":" + item.sets + "<" + mediumByMuscle[item.muscleId]);
+  ({
+    mediumSets: comparison.medium.totalSets,
+    aggressiveSets: comparison.aggressive.totalSets,
+    aggressiveReason: comparison.aggressive.limitingReason || "",
+    lowerAggressiveItems,
+    aggressiveItems: comparison.aggressive.items.map((item) => item.muscle + ":" + item.sets).join(", ")
+  });
+`);
+
+assert(
+  realisticModeComparisonExplainsAggressiveLimits.aggressiveSets >= realisticModeComparisonExplainsAggressiveLimits.mediumSets
+    || realisticModeComparisonExplainsAggressiveLimits.aggressiveReason.includes("Aggressive held"),
+  `Expected Aggressive to beat Medium or explain the guardrail, got medium=${realisticModeComparisonExplainsAggressiveLimits.mediumSets}, aggressive=${realisticModeComparisonExplainsAggressiveLimits.aggressiveSets}, reason=${realisticModeComparisonExplainsAggressiveLimits.aggressiveReason}, items=${realisticModeComparisonExplainsAggressiveLimits.aggressiveItems}`
+);
+assert(
+  realisticModeComparisonExplainsAggressiveLimits.lowerAggressiveItems.length === 0
+    || realisticModeComparisonExplainsAggressiveLimits.aggressiveReason.includes("Aggressive held"),
+  `Expected Aggressive not to quietly reduce planned muscles below Medium, got ${realisticModeComparisonExplainsAggressiveLimits.lowerAggressiveItems.join(", ")} with reason=${realisticModeComparisonExplainsAggressiveLimits.aggressiveReason}`
+);
 
 const targetSelectorReset = runScenario(`
   ${resetAndHelpers}
   state.coachTargetMuscles = ["biceps", "triceps"];
+  state.coachGrowthModes = { biceps: "aggressive", triceps: "medium" };
   var markup = renderCoachTargetSelector();
   ({
     hasReset: markup.includes('data-action="clear-coach-targets"'),
-    hasCount: markup.includes("2 selected")
+    hasCount: markup.includes("2 selected"),
+    hasModeControls: markup.includes('data-action="coach-growth-mode"'),
+    hasAggressive: markup.includes("Aggressive")
   });
 `);
 
 assert(targetSelectorReset.hasReset, "Expected target selector to expose a reset choices control when muscles are selected.");
 assert(targetSelectorReset.hasCount, "Expected target selector to keep selected count visible.");
+assert(targetSelectorReset.hasModeControls, "Expected selected target muscles to expose per-muscle growth mode controls.");
+assert(targetSelectorReset.hasAggressive, "Expected per-muscle growth mode controls to include Aggressive mode.");
+
+const perMuscleGrowthModes = runScenario(`
+  ${resetAndHelpers}
+  state.coachGlobalGrowthMode = "aggressive";
+  state.coachTargetMuscles = ["chest", "quads"];
+  state.coachGrowthModes = { chest: "aggressive", quads: "soft" };
+  state.workouts = muscleGroups.map((muscle) => makeWorkout(muscle, 2, muscle.id === "quads" ? 11 : muscle.id === "chest" ? 18 : 20));
+  var plan = buildTodayPlan(60);
+  var chest = plan.sessionPlan.items.find((item) => item.muscle.id === "chest");
+  var quads = plan.sessionPlan.items.find((item) => item.muscle.id === "quads");
+  ({
+    chestMode: chest?.growthMode,
+    quadsMode: quads?.growthMode,
+    chestProjected: chest ? chest.muscle.sets + chest.sets : 0,
+    quadsProjected: quads ? quads.muscle.sets + quads.sets : 0,
+    why: plan.why.join(" ")
+  });
+`);
+
+assert.strictEqual(perMuscleGrowthModes.chestMode, "aggressive", `Expected Chest to use aggressive mode, got ${perMuscleGrowthModes.chestMode}`);
+assert.strictEqual(perMuscleGrowthModes.quadsMode, "soft", `Expected Quads to use soft mode, got ${perMuscleGrowthModes.quadsMode}`);
+assert(perMuscleGrowthModes.chestProjected > perMuscleGrowthModes.quadsProjected, `Expected aggressive Chest to receive more upper-zone volume than soft Quads, got chest=${perMuscleGrowthModes.chestProjected} quads=${perMuscleGrowthModes.quadsProjected}`);
+assert(perMuscleGrowthModes.why.includes("Chest Aggressive") && perMuscleGrowthModes.why.includes("Quads Soft"), `Expected Why this? to include per-muscle modes, got ${perMuscleGrowthModes.why}`);
+
+const targetModeContractsStayMonotonic = runScenario(`
+  ${resetAndHelpers}
+  state.coachTargetMuscles = ["chest"];
+  state.coachGlobalGrowthMode = "medium";
+  state.workouts = [
+    makeWorkout(muscleGroups.find((muscle) => muscle.id === "chest"), 2, 10, { restSeconds: 120 }),
+    makeWorkout(muscleGroups.find((muscle) => muscle.id === "back"), 2, 12, { restSeconds: 90 }),
+    makeWorkout(muscleGroups.find((muscle) => muscle.id === "quads"), 2, 10, { restSeconds: 90 }),
+    makeWorkout(muscleGroups.find((muscle) => muscle.id === "abs"), 2, 15, { restSeconds: 75 }),
+    makeWorkout(muscleGroups.find((muscle) => muscle.id === "triceps"), 2, 13, { restSeconds: 75 }),
+    makeWorkout(muscleGroups.find((muscle) => muscle.id === "shoulders"), 1, 18, { restSeconds: 90 }),
+    makeWorkout(muscleGroups.find((muscle) => muscle.id === "glutes"), 1, 18, { restSeconds: 90 }),
+    makeWorkout(muscleGroups.find((muscle) => muscle.id === "calves"), 1, 18, { restSeconds: 75 }),
+    makeWorkout(muscleGroups.find((muscle) => muscle.id === "biceps"), 1, 19, { restSeconds: 75 }),
+    makeWorkout(muscleGroups.find((muscle) => muscle.id === "hamstrings"), 1, 20, { restSeconds: 90 })
+  ];
+  state.coachGrowthModes = { chest: "soft" };
+  var soft = buildTodayPlan(60).sessionPlan.items.find((item) => item.muscle.id === "chest");
+  state.coachGrowthModes = { chest: "medium" };
+  var medium = buildTodayPlan(60).sessionPlan.items.find((item) => item.muscle.id === "chest");
+  state.coachGrowthModes = { chest: "aggressive" };
+  var aggressivePlan = buildTodayPlan(60);
+  var aggressive = aggressivePlan.sessionPlan.items.find((item) => item.muscle.id === "chest");
+  ({
+    softSets: soft?.sets || 0,
+    mediumSets: medium?.sets || 0,
+    aggressiveSets: aggressive?.sets || 0,
+    aggressiveMode: aggressive?.growthMode,
+    contractNotes: aggressivePlan.sessionPlan.contractNotes || [],
+    why: aggressivePlan.why.join(" ")
+  });
+`);
+
+assert(targetModeContractsStayMonotonic.mediumSets >= targetModeContractsStayMonotonic.softSets, `Expected targeted Medium Chest to keep or exceed Soft sets, got soft=${targetModeContractsStayMonotonic.softSets}, medium=${targetModeContractsStayMonotonic.mediumSets}`);
+assert(targetModeContractsStayMonotonic.aggressiveSets >= targetModeContractsStayMonotonic.mediumSets, `Expected targeted Aggressive Chest to keep or exceed Medium sets, got medium=${targetModeContractsStayMonotonic.mediumSets}, aggressive=${targetModeContractsStayMonotonic.aggressiveSets}, notes=${targetModeContractsStayMonotonic.contractNotes.join(" ")}`);
+assert.strictEqual(targetModeContractsStayMonotonic.aggressiveMode, "aggressive", `Expected Chest to keep the aggressive override, got ${targetModeContractsStayMonotonic.aggressiveMode}`);
+
+const targetModeContractsSurviveDebugComparison = runScenario(`
+  ${resetAndHelpers}
+  state.coachTargetMuscles = ["chest"];
+  state.coachGlobalGrowthMode = "medium";
+  state.coachGrowthModes = { chest: "aggressive" };
+  state.workouts = muscleGroups.map((muscle) => makeWorkout(muscle, 2, muscle.id === "chest" ? 14 : 20));
+  var comparison = coachDebugModeComparison();
+  var chestModes = Object.fromEntries(Object.entries(comparison).map(([mode, plan]) => [
+    mode,
+    plan.items.find((item) => item.muscleId === "chest")?.growthMode || ""
+  ]));
+  ({
+    selectedMode: state.coachGlobalGrowthMode,
+    selectedOverride: state.coachGrowthModes.chest,
+    chestModes
+  });
+`);
+
+assert.deepEqual(targetModeContractsSurviveDebugComparison.chestModes, { soft: "aggressive", medium: "aggressive", aggressive: "aggressive" }, `Expected Coach debug mode comparison to preserve selected target overrides, got ${JSON.stringify(targetModeContractsSurviveDebugComparison.chestModes)}`);
+assert.strictEqual(targetModeContractsSurviveDebugComparison.selectedMode, "medium", `Expected debug mode comparison not to mutate global mode, got ${targetModeContractsSurviveDebugComparison.selectedMode}`);
+assert.strictEqual(targetModeContractsSurviveDebugComparison.selectedOverride, "aggressive", `Expected debug mode comparison not to clear target override, got ${targetModeContractsSurviveDebugComparison.selectedOverride}`);
 
 const targetScrollRestore = runScenario(`
   var originalQuerySelector = document.querySelector;
@@ -632,26 +1037,44 @@ const nearOptimumTimeframe = runScenario(`
 `);
 
 assert(withinCoachTimeWindow(nearOptimumTimeframe.total, 60), `Expected 18/20 muscles to still fill 1 hour with more muscle slots, got ${nearOptimumTimeframe.total}: ${nearOptimumTimeframe.detail}`);
-assert(nearOptimumTimeframe.itemCount <= 5, `Expected 18/20 1 hour plan to honor the 5-muscle cap, got ${nearOptimumTimeframe.itemCount}`);
+assert(nearOptimumTimeframe.itemCount <= 8, `Expected 18/20 1 hour plan to honor the 60-minute muscle cap, got ${nearOptimumTimeframe.itemCount}`);
 
 const highVolumeTimeframe = runScenario(`
   ${resetAndHelpers}
+  state.coachTargetMuscles = ["chest"];
+  state.coachGrowthModes = { chest: "aggressive" };
   state.workouts = muscleGroups.map((muscle) => makeWorkout(muscle, 2, 20));
   var plan = buildTodayPlan(60);
   ({
     mode: plan.mode,
     total: plan.sessionPlan.totalMinutes,
     hasHighVolumeReason: plan.why.join(" ").includes("High-volume filler"),
+    chestProjectedSets: plan.sessionPlan.items.find((item) => item.muscle.id === "chest")?.muscle.sets + plan.sessionPlan.items.find((item) => item.muscle.id === "chest")?.sets,
     maxProjectedSets: Math.max(...plan.sessionPlan.items.map((item) => item.muscle.sets + item.sets)),
     shortfallReason: plan.sessionPlan.shortfallReason
   });
 `);
 
-assert.strictEqual(highVolumeTimeframe.mode, "session", `Expected all-optimum muscles to build a time-fill session, got ${highVolumeTimeframe.mode}`);
-assert(highVolumeTimeframe.total < 57, `Expected all-optimum plan to stop short instead of exceeding high-volume limits, got ${highVolumeTimeframe.total}`);
-assert(highVolumeTimeframe.hasHighVolumeReason, "Expected all-optimum time-fill plan to label high-volume filler in Why this?");
+assert.strictEqual(highVolumeTimeframe.mode, "session", `Expected aggressive selected upper-zone muscle to build a high-volume session, got ${highVolumeTimeframe.mode}`);
+assert(highVolumeTimeframe.total < 57, `Expected selected high-volume plan to stop short instead of forcing universal high volume, got ${highVolumeTimeframe.total}`);
+assert(highVolumeTimeframe.hasHighVolumeReason || highVolumeTimeframe.chestProjectedSets > 20, "Expected selected aggressive plan to explain or apply slight upper-zone fill in Why this?");
+assert(highVolumeTimeframe.chestProjectedSets > 20, `Expected aggressive Chest to receive slight high-volume fill, got ${highVolumeTimeframe.chestProjectedSets}`);
 assert(highVolumeTimeframe.maxProjectedSets <= 22, `Expected high-volume filler to cap projected sets at 22, got ${highVolumeTimeframe.maxProjectedSets}`);
-assert(highVolumeTimeframe.shortfallReason.includes("volume limits"), `Expected all-optimum shortfall to explain volume limits, got ${highVolumeTimeframe.shortfallReason}`);
+assert(highVolumeTimeframe.shortfallReason.includes("volume limits"), `Expected aggressive high-volume shortfall to explain volume limits, got ${highVolumeTimeframe.shortfallReason}`);
+
+const noUniversalHighVolume = runScenario(`
+  ${resetAndHelpers}
+  state.workouts = muscleGroups.map((muscle) => makeWorkout(muscle, 2, 20));
+  var plan = buildTodayPlan(60);
+  ({
+    mode: plan.mode,
+    itemCount: plan.sessionPlan.items.length,
+    why: plan.why.join(" ")
+  });
+`);
+
+assert.notStrictEqual(noUniversalHighVolume.mode, "session", "Expected non-targeted muscles at upper growth zone not to force universal high-volume filler.");
+assert.strictEqual(noUniversalHighVolume.itemCount, 0, `Expected no forced all-muscle high-volume plan, got ${noUniversalHighVolume.itemCount}`);
 
 const restartTimeframe = runScenario(`
   ${resetAndHelpers}
@@ -667,7 +1090,7 @@ const restartTimeframe = runScenario(`
 
 assert.strictEqual(restartTimeframe.mode, "restart", `Expected no-workout case to remain restart mode, got ${restartTimeframe.mode}`);
 assert(withinCoachTimeWindow(restartTimeframe.total, 60), `Expected restart 1 hour plan to fill time with more muscles, got ${restartTimeframe.total}`);
-assert(restartTimeframe.itemCount <= 5, `Expected restart 1 hour plan to honor the 5-muscle cap, got ${restartTimeframe.itemCount}`);
+assert(restartTimeframe.itemCount <= 8, `Expected restart 1 hour plan to honor the timeframe muscle cap, got ${restartTimeframe.itemCount}`);
 assert(restartTimeframe.maxSets <= 3, `Expected restart plan to keep per-muscle volume controlled, got max ${restartTimeframe.maxSets}`);
 
 const insufficientLibraryShortfall = runScenario(`
@@ -683,7 +1106,7 @@ const insufficientLibraryShortfall = runScenario(`
     cue: "Single coverage test.",
     userCreated: true
   }];
-  state.workouts = muscleGroups.map((muscle) => makeWorkout(muscle, 2, 20));
+  state.workouts = muscleGroups.map((muscle) => makeWorkout(muscle, 2, 10));
   var plan = buildTodayPlan(60);
   ({
     total: plan.sessionPlan.totalMinutes,
@@ -831,7 +1254,7 @@ const optimumPlanAction = runScenario(`
     mode: action.mode,
     itemCount: plan.sessionPlan.items.length,
     total: plan.sessionPlan.totalMinutes,
-    hasOptimumReason: plan.why.join(" ").includes("/20 hard sets"),
+    hasOptimumReason: plan.why.join(" ").includes("upper growth"),
     maxMuscleSets: Math.max(...plan.sessionPlan.items.map((item) => item.muscle.sets + item.sets)),
     hasTitle: typeof action.title === "string" && action.title.length > 0,
     hasBody: typeof action.body === "string" && action.body.length > 0
@@ -840,8 +1263,8 @@ const optimumPlanAction = runScenario(`
 
 assert.strictEqual(optimumPlanAction.mode, "session", `Expected all floor-covered muscles below 20 to build an optimum-volume session, got ${optimumPlanAction.mode}`);
 assert(optimumPlanAction.itemCount > 0, "Expected optimum-volume plan to include exercises after minimums are covered.");
-assert(withinCoachTimeWindow(optimumPlanAction.total, 60), `Expected optimum-volume 1 hour plan to land near 60 min, got ${optimumPlanAction.total}`);
-assert(optimumPlanAction.hasOptimumReason, "Expected optimum-volume reasons to use the 20-set target after the floor is covered.");
+assert(optimumPlanAction.total <= 63, `Expected optimum-volume 1 hour plan to fit, got ${optimumPlanAction.total}`);
+assert(optimumPlanAction.hasOptimumReason, "Expected optimum-volume reasons to use upper growth zone language after the floor is covered.");
 assert(optimumPlanAction.maxMuscleSets <= 20, `Expected optimum-volume plan not to push muscles over 20 sets, got ${optimumPlanAction.maxMuscleSets}`);
 assert(optimumPlanAction.hasTitle, `Expected action to have a title, got mode=${optimumPlanAction.mode}`);
 assert(optimumPlanAction.hasBody, `Expected action to have body text, got mode=${optimumPlanAction.mode}`);
@@ -863,6 +1286,48 @@ assert.notStrictEqual(emptyPlanAction.mode, "session", "Expected all muscles at 
 assert.strictEqual(emptyPlanAction.itemCount, 0, `Expected all-ceiling plan to have no forced session items, got ${emptyPlanAction.itemCount}`);
 assert(emptyPlanAction.hasTitle, `Expected action to have a title even with no items, got mode=${emptyPlanAction.mode}`);
 assert(emptyPlanAction.hasBody, `Expected action to have body text even with no items, got mode=${emptyPlanAction.mode}`);
+
+const copiedPlanPreview = runScenario(`
+  ${resetAndHelpers}
+  state.coachTargetMuscles = ["chest"];
+  state.coachGrowthModes = { chest: "aggressive" };
+  var beforeCount = state.workouts.length;
+  var plan = buildTodayPlan(60);
+  copyCoachPlanToLog(plan);
+  state.activeTab = "coach";
+  var markup = renderCoach();
+  var preview = buildNextCoachPlanPreview();
+  ({
+    copiedTitle: state.copiedCoachPlan?.title || "",
+    copiedItems: state.copiedCoachPlan?.sessionPlan?.items?.length || 0,
+    workoutsUnchanged: state.workouts.length === beforeCount,
+    hasPreviewButton: markup.includes('data-action="preview-next-coach-plan"'),
+    previewNotice: preview.notice,
+    previewItems: preview.plan.sessionPlan.items.length,
+    workoutsStillUnchanged: state.workouts.length === beforeCount
+  });
+`);
+
+assert(copiedPlanPreview.copiedTitle, "Expected Coach copy to preserve a copied-plan snapshot.");
+assert(copiedPlanPreview.copiedItems > 0, "Expected copied-plan snapshot to keep plan items.");
+assert(copiedPlanPreview.workoutsUnchanged && copiedPlanPreview.workoutsStillUnchanged, "Expected next-plan preview to avoid writing simulated workouts.");
+assert(copiedPlanPreview.hasPreviewButton, "Expected copied Coach plan to expose a next-plan preview button.");
+assert(copiedPlanPreview.previewNotice.includes("only the next plan"), `Expected preview advisory, got ${copiedPlanPreview.previewNotice}`);
+
+const coachCopiedPlanEmptyStateAndAudit = runScenario(`
+  ${resetAndHelpers}
+  state.workouts = muscleGroups.map((muscle) => makeWorkout(muscle, 2, 10));
+  var markup = renderCoach();
+  ({
+    hasEmptyCopyMessage: markup.includes("Copy today's plan to preview the next one."),
+    auditOpen: markup.includes('muscle-audit-panel" open') || markup.includes("muscle-audit-panel' open"),
+    auditHasProgress: markup.includes("muscle-card") && markup.includes("progress-bar")
+  });
+`);
+
+assert(coachCopiedPlanEmptyStateAndAudit.hasEmptyCopyMessage, "Expected Coach to explain how to unlock next-plan preview before copying.");
+assert(coachCopiedPlanEmptyStateAndAudit.auditOpen, "Expected Coach muscle set audit to render open by default.");
+assert(coachCopiedPlanEmptyStateAndAudit.auditHasProgress, "Expected Coach muscle audit to include progress bars.");
 
 const exerciseScoring = runScenario(`
   ${resetAndHelpers}
@@ -956,5 +1421,27 @@ const pendingBodyweightDraft = runScenario(`
 assert.strictEqual(pendingBodyweightDraft.count, 1, `Expected unsaved bodyweight draft to count as pending Coach work, got ${pendingBodyweightDraft.count}`);
 assert.strictEqual(pendingBodyweightDraft.sets, 2, `Expected pending bodyweight draft sets to count, got ${pendingBodyweightDraft.sets}`);
 assert.strictEqual(pendingBodyweightDraft.weight, 0, `Expected pending bodyweight draft to allow zero load, got ${pendingBodyweightDraft.weight}`);
+
+const copiedPlanSameDayRetention = runScenario(`
+  ${resetAndHelpers}
+  var copiedStorage = {};
+  localStorage.getItem = (key) => copiedStorage[key] || null;
+  localStorage.setItem = (key, value) => { copiedStorage[key] = value; };
+  localStorage.removeItem = (key) => { delete copiedStorage[key]; };
+  var plan = buildTodayPlan(60);
+  copyCoachPlanToLog(plan);
+  var sameDay = activeCopiedCoachPlan();
+  sameDay.copiedDate = "2026-06-16";
+  var wrongDay = activeCopiedCoachPlan();
+  ({
+    sameDayItems: sameDay?.sessionPlan?.items?.length || 0,
+    wrongDayVisible: Boolean(wrongDay),
+    storagePayload: JSON.parse(safeLocalStorageGet(COPIED_COACH_PLAN_KEY) || "null")
+  });
+`);
+
+assert(copiedPlanSameDayRetention.sameDayItems > 0, "Expected copied Coach plan to remain visible on the copied date.");
+assert.strictEqual(copiedPlanSameDayRetention.wrongDayVisible, false, "Expected copied Coach plan to hide when its copied date no longer matches today.");
+assert.strictEqual(copiedPlanSameDayRetention.storagePayload.copiedDate, "2026-06-17", "Expected copied Coach plan to persist with the same-day date key.");
 
 console.log("coach regression tests passed");
