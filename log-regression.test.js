@@ -160,9 +160,29 @@ assert(!appCode.includes('selectedExercise: "Push-up"'), "Expected Log startup n
 assert(!appCode.includes('showBanner("Unsaved draft restored."'), "Expected startup draft recovery not to show a top banner.");
 assert(appCode.includes("notifyMetricSaved"), "Expected metrics saves to use a dedicated bottom-only notification helper.");
 assert(!stylesCode.includes(".mobile-quick-toggle"), "Expected floating quick action button styling to be removed.");
-assert(indexCode.includes("v=1.5.34"), "Expected index shell references to use bumped app version.");
+assert(indexCode.includes("v=1.5.35"), "Expected index shell references to use bumped app version.");
 assert(!indexCode.includes('id="app" class="app-content" aria-live'), "Expected broad app aria-live to be removed in favor of targeted live regions.");
-assert(serviceWorkerCode.includes("trainwise-cache-v56"), "Expected service worker cache version bump.");
+assert(serviceWorkerCode.includes("trainwise-cache-v57"), "Expected service worker cache version bump.");
+assert(appCode.includes("data-settings-panel"), "Expected Settings panels to preserve open state with stable panel ids.");
+assert(appCode.includes('forceSettingsPanelOpen("supabase-sync")'), "Expected Supabase actions to keep the Supabase panel open after rendering.");
+
+const settingsPanelOpenState = runScenario(`
+  state.settingsOpenPanels = [];
+  var closed = renderSettingsPanel("Supabase sync", "offline", "<p>Body</p>", { id: "supabase-sync" });
+  forceSettingsPanelOpen("supabase-sync");
+  var open = renderSettingsPanel("Supabase sync", "offline", "<p>Body</p>", { id: "supabase-sync" });
+  setSettingsPanelOpen("supabase-sync", false);
+  var closedAgain = renderSettingsPanel("Supabase sync", "offline", "<p>Body</p>", { id: "supabase-sync" });
+  ({
+    closedHasOpen: closed.includes(" open"),
+    openHasOpen: open.includes(" open"),
+    closedAgainHasOpen: closedAgain.includes(" open")
+  });
+`);
+
+assert.strictEqual(settingsPanelOpenState.closedHasOpen, false, "Expected Supabase settings panel to start collapsed without session state.");
+assert.strictEqual(settingsPanelOpenState.openHasOpen, true, "Expected Supabase settings panel to render open after session preservation.");
+assert.strictEqual(settingsPanelOpenState.closedAgainHasOpen, false, "Expected Supabase settings panel to respect user collapse.");
 
 const nutritionQuickTotals = runScenario(`
   ${reset}

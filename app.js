@@ -3,7 +3,7 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 2;
 const STORES = ["workouts", "metrics", "settings"];
-const APP_VERSION = "1.5.34";
+const APP_VERSION = "1.5.35";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 const DRAFT_RECOVERY_KEY = "trainwise-draft-recovery-v1";
 const COPIED_COACH_PLAN_KEY = "trainwise-copied-coach-plan-v1";
@@ -146,6 +146,7 @@ const state = {
   coachGrowthModes: {},
   copiedCoachPlan: null,
   previewNextCoachPlan: false,
+  settingsOpenPanels: [],
   draggingDraftId: null,
   dragPendingDraftId: null,
   appBanner: null,
@@ -2393,15 +2394,35 @@ function buildSessionPlan(limitMinutes = SESSION_LIMIT_MINUTES, options = {}) {
     if (items.length >= caps.maxItems) break;
   }
 
-  if (!restart && (optimumCandidates.length || targetMuscles.length)) {
-    const supplementalTargets = allStats.filter((target) => (
-      planSetGap(target, false, growthModeFor(target.id)) > 0
+  if (!restart && targetMuscles.length) {
+    const targetSupplemental = allStats.filter((target) => (
+      isCoachTargetMuscle(target.id, targetMuscles)
+      && planSetGap(target, false, growthModeFor(target.id)) > 0
       && target.sets < HYPERTROPHY.growthHigh
       && !items.some((item) => item.muscle.id === target.id)
       && isMuscleAvailableForPlanning(target)
     )).sort((a, b) => (
-      Number(isCoachTargetMuscle(b.id, targetMuscles)) - Number(isCoachTargetMuscle(a.id, targetMuscles))
-    ) || (optimumSetGap(b) - optimumSetGap(a)) || coachMusclePrioritySort(a, b));
+      (planSetGap(b, false, growthModeFor(b.id)) - planSetGap(a, false, growthModeFor(a.id)))
+      || (coachGrowthModeRank(growthModeFor(b.id)) - coachGrowthModeRank(growthModeFor(a.id)))
+      || coachMusclePrioritySort(a, b)
+    ));
+
+    for (const target of targetSupplemental) {
+      if (items.length >= caps.maxItems) break;
+      addTargetToPlan(target, { phase: "optimum", trackMissing: stats.length === 0, growthMode: growthModeFor(target.id) });
+    }
+  }
+
+  if (!restart && (optimumCandidates.length || targetMuscles.length)) {
+    const supplementalTargets = allStats.filter((target) => (
+      planSetGap(target, false, growthModeFor(target.id)) > 0
+      && target.sets < HYPERTROPHY.growthHigh
+      && !isCoachTargetMuscle(target.id, targetMuscles)
+      && !items.some((item) => item.muscle.id === target.id)
+      && isMuscleAvailableForPlanning(target)
+    )).sort((a, b) => (
+      (optimumSetGap(b) - optimumSetGap(a)) || coachMusclePrioritySort(a, b)
+    ));
     const freshSupplemental = balancedCoverageTargets(supplementalTargets);
 
     for (const target of freshSupplemental) {
@@ -2562,11 +2583,31 @@ function buildSessionPlan(limitMinutes = SESSION_LIMIT_MINUTES, options = {}) {
   const deprioritized = stats
     .filter((target) => !isMuscleAvailableForPlanning(target) && !plannedIds.has(target.id))
     .map((target) => ({ muscle: target, reason: muscleDateGapReason(target) }));
+  const targetLimitations = targetMuscles
+    .map((muscleId) => allStats.find((stat) => stat.id === muscleId))
+    .filter(Boolean)
+    .filter((target) => !plannedIds.has(target.id) && !missingIds.has(target.id))
+    .map((target) => {
+      const mode = growthModeFor(target.id);
+      const targetSets = planSetCeilingForTarget(target, false, mode);
+      let reason;
+      if (planSetGap(target, false, mode) <= 0) {
+        reason = `${target.label} is already at its ${coachGrowthModeLabel(mode)} target (${fmt(target.sets, 1)}/${targetSets}).`;
+      } else if (!isMuscleAvailableForPlanning(target)) {
+        reason = `${target.label} target was held back because ${muscleDateGapReason(target)}`;
+      } else if (items.length >= caps.maxItems || totalMinutes >= hardLimit) {
+        reason = `${target.label} target was limited by the selected timeframe.`;
+      } else {
+        reason = `${target.label} target was limited after weekly floor work was protected.`;
+      }
+      return { muscle: target, reason };
+    });
 
   return {
     items: items.map((item) => ({ ...item, reason: planPriorityReason(item) })),
     missing,
     deprioritized,
+    targetLimitations,
     performanceNotes,
     contractNotes,
     totalMinutes,
@@ -2623,11 +2664,17 @@ function buildTodayPlan(limitMinutes = selectedCoachTimeframeMinutes()) {
       const targetLabels = muscleGroups
         .filter((muscle) => targetMuscles.includes(muscle.id))
         .map((muscle) => growthModes[muscle.id]
-          ? `${muscle.label} ${coachGrowthModeLabel(growthModes[muscle.id])} override`
-          : `${muscle.label} inherits ${coachGrowthModeLabel(globalGrowthMode)}`);
-      selectedReasons.unshift(`Target focus: ${targetLabels.join(", ")} after weekly floors are covered.`);
+          ? `${muscle.label} ${coachGrowthModeLabel(growthModes[muscle.id])}`
+          : `${muscle.label} ${coachGrowthModeLabel(globalGrowthMode)}`);
+      selectedReasons.unshift(`Targets selected: ${targetLabels.join(", ")}. Soft targets get conservative priority after weekly floors.`);
     }
     why.push(...selectedReasons.slice(0, 3));
+  }
+  if (sessionPlan.targetLimitations?.length) {
+    const targetLimitReasons = sessionPlan.targetLimitations.map((item) => item.reason);
+    skippedReasons.push(...targetLimitReasons);
+    notes.push(...targetLimitReasons);
+    why.push(...targetLimitReasons.slice(0, 2));
   }
   if (sessionPlan.deprioritized.length) {
     skippedReasons.push(...sessionPlan.deprioritized.map((item) => `${item.reason} Coach picked another gap first.`));
@@ -4683,7 +4730,17 @@ function renderCoachWhy(plan) {
 
 function renderCopiedCoachPlan() {
   const copied = activeCopiedCoachPlan();
-  if (!copied) return "";
+  if (!copied) {
+    return `
+      <section class="section card coach-copied-plan-card compact-empty">
+        <div class="chart-header">
+          <h3>Next plan preview</h3>
+          <span class="muted small">locked</span>
+        </div>
+        <p class="muted small">Copy today's plan to preview the next one.</p>
+      </section>
+    `;
+  }
   const itemCount = copied.sessionPlan?.items?.length || 0;
   const preview = state.previewNextCoachPlan ? buildNextCoachPlanPreview(copied) : null;
   return `
@@ -4730,7 +4787,7 @@ function renderCoach() {
     ${renderCopiedCoachPlan()}
     ${renderTodayPlan(todayPlan)}
     ${renderCoachWhy(todayPlan)}
-    <details class="section chart-panel collapsible-panel muscle-audit-panel">
+    <details class="section chart-panel collapsible-panel muscle-audit-panel" open>
       <summary><span>Muscle set audit</span><small>10 set floor, 12-20 growth zone</small></summary>
       ${muscleProgressMarkup(coachMuscleSetStats())}
     </details>
@@ -4929,9 +4986,35 @@ function renderDashboardWidgetSelector() {
   `;
 }
 
-function renderSettingsPanel(title, detail, body) {
+function settingsPanelIdFromTitle(title) {
+  return String(title || "panel")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "") || "panel";
+}
+
+function isSettingsPanelOpen(panelId) {
+  return Array.isArray(state.settingsOpenPanels) && state.settingsOpenPanels.includes(panelId);
+}
+
+function setSettingsPanelOpen(panelId, open) {
+  if (!panelId) return;
+  if (!Array.isArray(state.settingsOpenPanels)) state.settingsOpenPanels = [];
+  const panels = new Set(state.settingsOpenPanels);
+  if (open) panels.add(panelId);
+  else panels.delete(panelId);
+  state.settingsOpenPanels = [...panels];
+}
+
+function forceSettingsPanelOpen(panelId) {
+  setSettingsPanelOpen(panelId, true);
+}
+
+function renderSettingsPanel(title, detail, body, options = {}) {
+  const panelId = options.id || settingsPanelIdFromTitle(title);
+  const open = options.open || isSettingsPanelOpen(panelId);
   return `
-    <details class="section settings-panel collapsible-panel">
+    <details class="section settings-panel collapsible-panel" data-settings-panel="${escapeHtml(panelId)}" ${open ? "open" : ""}>
       <summary><span>${escapeHtml(title)}</span><small>${escapeHtml(detail)}</small></summary>
       ${body}
     </details>
@@ -4951,27 +5034,27 @@ async function renderSettings() {
         <span>Protein floor <strong>${HYPERTROPHY.proteinFloorGPerKg} g/kg/day</strong></span>
       </div>
       <p class="muted small">This is training guidance for personal tracking, not medical advice.</p>
-    `)}
+    `, { id: "hypertrophy-defaults" })}
 
     ${renderSettingsPanel("Nutrition goal", nutritionGoalLabel(selectedNutritionGoal()), `
       <p class="muted small">Coach uses this to interpret calories and body-weight trend.</p>
       ${renderNutritionGoalSelector()}
-    `)}
+    `, { id: "nutrition-goal" })}
 
     ${renderSettingsPanel("Today widgets", `${selectedDashboardWidgets().length} shown`, `
       <p class="muted small">Choose what appears below the Today summary and put the most useful cards first.</p>
       ${renderDashboardWidgetSelector()}
-    `)}
+    `, { id: "today-widgets" })}
 
     ${renderSettingsPanel("Data safety", "backup status", `
       <p class="muted small">A quick confidence check before imports, cloud sync, or app updates.</p>
       ${dataSafetySummaryMarkup()}
-    `)}
+    `, { id: "data-safety" })}
 
     ${renderSettingsPanel("Troubleshooting", "Coach debug", `
       <p class="muted small">Export a safe diagnostic report when Coach advice looks wrong. It separates submitted workouts from unsaved drafts and never includes sync secrets.</p>
       <button class="ghost-button full-button" type="button" data-action="export-coach-debug">Export Coach debug report</button>
-    `)}
+    `, { id: "troubleshooting" })}
 
     ${renderSettingsPanel("Storage", "backup/import", `
       ${estimate}
@@ -4980,7 +5063,7 @@ async function renderSettings() {
         <button class="ghost-button" type="button" data-action="import-click">Import backup</button>
       </div>
       <input class="hidden" id="import-file" type="file" accept="application/json">
-    `)}
+    `, { id: "storage" })}
 
     ${renderSettingsPanel("Sample chart data", sampleWorkouts + sampleMetrics ? `${sampleWorkouts} lifts/metrics loaded` : "optional", `
       <p class="muted small">${sampleWorkouts + sampleMetrics ? `${sampleWorkouts} sample lifts and ${sampleMetrics} sample metrics are loaded.` : "Load demo logs to test every chart and recommendation without touching your real backups."}</p>
@@ -4988,7 +5071,7 @@ async function renderSettings() {
         <button class="primary-button" type="button" data-action="load-sample-data">Load sample data</button>
         <button class="ghost-button" type="button" data-action="remove-sample-data">Remove sample data</button>
       </div>
-    `)}
+    `, { id: "sample-chart-data" })}
 
     ${renderSettingsPanel("App update", `v${APP_VERSION}`, `
       <div class="settings-list">
@@ -4996,7 +5079,7 @@ async function renderSettings() {
       </div>
       <p class="muted small">Refresh the app shell if iPhone Safari keeps showing an older screen. This clears cached app files only; workouts and metrics stay in browser storage.</p>
       <button class="ghost-button full-button" type="button" data-action="refresh-app-shell">Refresh app shell</button>
-    `)}
+    `, { id: "app-update" })}
 
     ${renderSettingsPanel("Supabase sync", supabaseStatus(), `
       <p class="muted small">Status: ${escapeHtml(supabaseStatus())}</p>
@@ -5028,12 +5111,12 @@ async function renderSettings() {
         <button class="ghost-button" type="button" data-action="push-supabase">Push backup</button>
         <button class="ghost-button" type="button" data-action="pull-supabase">Pull latest</button>
       </div>
-    `)}
+    `, { id: "supabase-sync" })}
 
     ${renderSettingsPanel("Danger zone", "destructive", `
       <p class="muted small">Export a backup before clearing data.</p>
       <button class="danger-button" type="button" data-action="clear-all">Clear local data</button>
-    `)}
+    `, { id: "danger-zone" })}
   `;
 }
 
@@ -6608,11 +6691,26 @@ async function handleAction(action, target) {
       syncLegacyDraftFromFirst();
       await render();
     },
-    async "save-supabase"() { await saveSupabaseSettings(); },
-    async "signup-supabase"() { await supabaseAuth("signup"); },
-    async "signin-supabase"() { await supabaseAuth("signin"); },
-    async "push-supabase"() { await pushSupabaseBackup(); },
-    async "pull-supabase"() { await pullSupabaseBackup(); },
+    async "save-supabase"() {
+      forceSettingsPanelOpen("supabase-sync");
+      await saveSupabaseSettings();
+    },
+    async "signup-supabase"() {
+      forceSettingsPanelOpen("supabase-sync");
+      await supabaseAuth("signup");
+    },
+    async "signin-supabase"() {
+      forceSettingsPanelOpen("supabase-sync");
+      await supabaseAuth("signin");
+    },
+    async "push-supabase"() {
+      forceSettingsPanelOpen("supabase-sync");
+      await pushSupabaseBackup();
+    },
+    async "pull-supabase"() {
+      forceSettingsPanelOpen("supabase-sync");
+      await pullSupabaseBackup();
+    },
     async "nutrition-goal"() {
       const goal = target.dataset.nutritionGoal;
       if (!NUTRITION_GOAL_OPTIONS.some((option) => option.id === goal)) return;
@@ -6765,6 +6863,13 @@ function restoreCoachTargetScroll(scrollLeft) {
   if (typeof requestAnimationFrame === "function") requestAnimationFrame(restore);
   else restore();
 }
+
+document.addEventListener("toggle", (event) => {
+  const panel = event.target?.closest?.("details[data-settings-panel]");
+  if (panel && state.activeTab === "settings") {
+    setSettingsPanelOpen(panel.dataset.settingsPanel, panel.open);
+  }
+}, true);
 
 document.addEventListener("click", async (event) => {
   const tab = event.target.closest("[data-tab]");

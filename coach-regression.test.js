@@ -594,7 +594,31 @@ const targetedMuscles = runScenario(`
 assert.strictEqual(targetedMuscles.mode, "session", `Expected target focus to create a session, got ${targetedMuscles.mode}`);
 assert(targetedMuscles.muscles.includes("biceps"), `Expected biceps target in plan, got ${targetedMuscles.muscles.join(", ")}`);
 assert(targetedMuscles.bicepsSets > 0, `Expected biceps target to receive work, got ${targetedMuscles.bicepsSets}`);
-assert(targetedMuscles.why.includes("Target focus"), `Expected target focus explanation, got ${targetedMuscles.why}`);
+assert(targetedMuscles.why.includes("Targets selected") && targetedMuscles.why.includes("conservative priority"), `Expected target priority explanation, got ${targetedMuscles.why}`);
+
+const targetsPrioritizeBeforeGeneralFill = runScenario(`
+  ${resetAndHelpers}
+  state.coachTargetMuscles = ["biceps"];
+  state.coachGrowthModes = { biceps: "soft" };
+  state.coachGlobalGrowthMode = "medium";
+  state.workouts = muscleGroups.map((muscle) => makeWorkout(muscle, 2, muscle.id === "biceps" ? 12 : 10));
+  var plan = buildTodayPlan(60);
+  var muscles = plan.sessionPlan.items.map((item) => item.muscle.id);
+  var bicepsIndex = muscles.indexOf("biceps");
+  var firstNonTargetIndex = muscles.findIndex((id) => id !== "biceps");
+  ({
+    muscles,
+    bicepsIndex,
+    firstNonTargetIndex,
+    bicepsSets: plan.sessionPlan.items.find((item) => item.muscle.id === "biceps")?.sets || 0,
+    why: plan.why.join(" ")
+  });
+`);
+
+assert(targetsPrioritizeBeforeGeneralFill.bicepsIndex >= 0, `Expected selected Biceps target in plan, got ${targetsPrioritizeBeforeGeneralFill.muscles.join(", ")}`);
+assert(targetsPrioritizeBeforeGeneralFill.firstNonTargetIndex < 0 || targetsPrioritizeBeforeGeneralFill.bicepsIndex < targetsPrioritizeBeforeGeneralFill.firstNonTargetIndex, `Expected selected target before non-target optional fill, got ${targetsPrioritizeBeforeGeneralFill.muscles.join(", ")}`);
+assert(targetsPrioritizeBeforeGeneralFill.bicepsSets > 0, "Expected Soft target to receive conservative work before non-target optional work.");
+assert(targetsPrioritizeBeforeGeneralFill.why.includes("Soft targets get conservative priority"), `Expected Soft target wording, got ${targetsPrioritizeBeforeGeneralFill.why}`);
 
 const globalGrowthModeSelector = runScenario(`
   ${resetAndHelpers}
@@ -800,7 +824,7 @@ const perMuscleGrowthModes = runScenario(`
 assert.strictEqual(perMuscleGrowthModes.chestMode, "aggressive", `Expected Chest to use aggressive mode, got ${perMuscleGrowthModes.chestMode}`);
 assert.strictEqual(perMuscleGrowthModes.quadsMode, "soft", `Expected Quads to use soft mode, got ${perMuscleGrowthModes.quadsMode}`);
 assert(perMuscleGrowthModes.chestProjected > perMuscleGrowthModes.quadsProjected, `Expected aggressive Chest to receive more upper-zone volume than soft Quads, got chest=${perMuscleGrowthModes.chestProjected} quads=${perMuscleGrowthModes.quadsProjected}`);
-assert(perMuscleGrowthModes.why.includes("Chest Aggressive override") && perMuscleGrowthModes.why.includes("Quads Soft override"), `Expected Why this? to include per-muscle overrides, got ${perMuscleGrowthModes.why}`);
+assert(perMuscleGrowthModes.why.includes("Chest Aggressive") && perMuscleGrowthModes.why.includes("Quads Soft"), `Expected Why this? to include per-muscle modes, got ${perMuscleGrowthModes.why}`);
 
 const targetModeContractsStayMonotonic = runScenario(`
   ${resetAndHelpers}
@@ -1218,6 +1242,21 @@ assert(copiedPlanPreview.copiedItems > 0, "Expected copied-plan snapshot to keep
 assert(copiedPlanPreview.workoutsUnchanged && copiedPlanPreview.workoutsStillUnchanged, "Expected next-plan preview to avoid writing simulated workouts.");
 assert(copiedPlanPreview.hasPreviewButton, "Expected copied Coach plan to expose a next-plan preview button.");
 assert(copiedPlanPreview.previewNotice.includes("only the next plan"), `Expected preview advisory, got ${copiedPlanPreview.previewNotice}`);
+
+const coachCopiedPlanEmptyStateAndAudit = runScenario(`
+  ${resetAndHelpers}
+  state.workouts = muscleGroups.map((muscle) => makeWorkout(muscle, 2, 10));
+  var markup = renderCoach();
+  ({
+    hasEmptyCopyMessage: markup.includes("Copy today's plan to preview the next one."),
+    auditOpen: markup.includes('muscle-audit-panel" open') || markup.includes("muscle-audit-panel' open"),
+    auditHasProgress: markup.includes("muscle-card") && markup.includes("progress-bar")
+  });
+`);
+
+assert(coachCopiedPlanEmptyStateAndAudit.hasEmptyCopyMessage, "Expected Coach to explain how to unlock next-plan preview before copying.");
+assert(coachCopiedPlanEmptyStateAndAudit.auditOpen, "Expected Coach muscle set audit to render open by default.");
+assert(coachCopiedPlanEmptyStateAndAudit.auditHasProgress, "Expected Coach muscle audit to include progress bars.");
 
 const exerciseScoring = runScenario(`
   ${resetAndHelpers}
