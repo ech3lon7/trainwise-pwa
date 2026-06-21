@@ -620,6 +620,77 @@ assert(targetsPrioritizeBeforeGeneralFill.firstNonTargetIndex < 0 || targetsPrio
 assert(targetsPrioritizeBeforeGeneralFill.bicepsSets > 0, "Expected Soft target to receive conservative work before non-target optional work.");
 assert(targetsPrioritizeBeforeGeneralFill.why.includes("Soft targets get conservative priority"), `Expected Soft target wording, got ${targetsPrioritizeBeforeGeneralFill.why}`);
 
+const targetSelectionRecoveryWarning = runScenario(`
+  ${resetAndHelpers}
+  var triceps = muscleGroups.find((muscle) => muscle.id === "triceps");
+  state.workouts = [makeWorkout(triceps, 1, 3)];
+  var directWarning = coachTargetSelectionWarning("triceps");
+  state.workouts = [makeWorkout(muscleGroups.find((muscle) => muscle.id === "chest"), 1, 3, { secondaryMuscles: ["triceps"] })];
+  var secondaryWarning = coachTargetSelectionWarning("triceps");
+  state.workouts = [makeWorkout(triceps, 2, 3)];
+  var readyWarning = coachTargetSelectionWarning("triceps");
+  ({
+    directWarning,
+    secondaryWarning,
+    readyWarning
+  });
+`);
+
+assert(targetSelectionRecoveryWarning.directWarning.includes("Triceps was directly trained yesterday"), `Expected direct recent target warning, got ${targetSelectionRecoveryWarning.directWarning}`);
+assert(targetSelectionRecoveryWarning.directWarning.includes("Coach will protect recovery and skip direct Triceps work today"), `Expected firm recovery wording, got ${targetSelectionRecoveryWarning.directWarning}`);
+assert.strictEqual(targetSelectionRecoveryWarning.secondaryWarning, "", `Expected secondary-only work not to warn, got ${targetSelectionRecoveryWarning.secondaryWarning}`);
+assert.strictEqual(targetSelectionRecoveryWarning.readyWarning, "", `Expected ready target not to warn, got ${targetSelectionRecoveryWarning.readyWarning}`);
+
+const targetSelectionBlocksRecoveryConflict = runScenario(`
+  ${resetAndHelpers}
+  var originalToast = toast;
+  var toastMessage = "";
+  toast = (message) => { toastMessage = message; };
+  var triceps = muscleGroups.find((muscle) => muscle.id === "triceps");
+  state.workouts = [makeWorkout(triceps, 1, 3)];
+  state.coachTargetMuscles = [];
+  var targetEl = {
+    dataset: { muscleId: "triceps" },
+    closest: () => ({ scrollLeft: 0 })
+  };
+  Promise.resolve(handleAction("coach-target-muscle", targetEl)).then(() => {});
+  toast = originalToast;
+  ({
+    selected: selectedCoachTargetMuscles(),
+    toastMessage
+  });
+`);
+
+assert(!targetSelectionBlocksRecoveryConflict.selected.includes("triceps"), `Expected recovery-conflicting Triceps target to stay unselected, got ${targetSelectionBlocksRecoveryConflict.selected.join(", ")}`);
+assert(targetSelectionBlocksRecoveryConflict.toastMessage.includes("skip direct Triceps work today"), `Expected blocked selection toast, got ${targetSelectionBlocksRecoveryConflict.toastMessage}`);
+
+const targetAboveGrowthZoneStillGetsReserve = runScenario(`
+  ${resetAndHelpers}
+  state.coachTargetMuscles = ["hamstrings"];
+  state.coachGlobalGrowthMode = "medium";
+  state.workouts = muscleGroups.map((muscle) => makeWorkout(muscle, 2, muscle.id === "hamstrings" ? 21 : 10));
+  var warning = coachTargetSelectionWarning("hamstrings");
+  var plan = buildTodayPlan(60);
+  var hamstrings = plan.sessionPlan.items.find((item) => item.muscle.id === "hamstrings");
+  ({
+    warning,
+    muscles: plan.sessionPlan.items.map((item) => item.muscle.id),
+    phase: hamstrings?.phase || "",
+    sets: hamstrings?.sets || 0,
+    projectedSets: hamstrings ? hamstrings.muscle.sets + hamstrings.sets : 0,
+    reason: hamstrings?.reason || "",
+    why: plan.why.join(" ")
+  });
+`);
+
+assert.strictEqual(targetAboveGrowthZoneStillGetsReserve.warning, "", `Expected high-volume but recovered target selection to be allowed, got ${targetAboveGrowthZoneStillGetsReserve.warning}`);
+assert(targetAboveGrowthZoneStillGetsReserve.muscles.includes("hamstrings"), `Expected selected Hamstrings above 20 to receive target reserve work, got ${targetAboveGrowthZoneStillGetsReserve.muscles.join(", ")}`);
+assert.strictEqual(targetAboveGrowthZoneStillGetsReserve.phase, "target-extra", `Expected Hamstrings to be target-extra, got ${targetAboveGrowthZoneStillGetsReserve.phase}`);
+assert(targetAboveGrowthZoneStillGetsReserve.sets > 0, `Expected target reserve sets for Hamstrings, got ${targetAboveGrowthZoneStillGetsReserve.sets}`);
+assert(targetAboveGrowthZoneStillGetsReserve.projectedSets > 20, `Expected selected target to be allowed above 20, got ${targetAboveGrowthZoneStillGetsReserve.projectedSets}`);
+assert(targetAboveGrowthZoneStillGetsReserve.reason.includes("selected extra volume"), `Expected target-extra reason, got ${targetAboveGrowthZoneStillGetsReserve.reason}`);
+assert(!targetAboveGrowthZoneStillGetsReserve.why.includes("already at its Medium target"), `Expected Why this? not to deny above-20 target by mode cap, got ${targetAboveGrowthZoneStillGetsReserve.why}`);
+
 const globalGrowthModeSelector = runScenario(`
   ${resetAndHelpers}
   state.coachGlobalGrowthMode = "";

@@ -3,7 +3,7 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 2;
 const STORES = ["workouts", "metrics", "settings"];
-const APP_VERSION = "1.5.35";
+const APP_VERSION = "1.5.37";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 const DRAFT_RECOVERY_KEY = "trainwise-draft-recovery-v1";
 const COPIED_COACH_PLAN_KEY = "trainwise-copied-coach-plan-v1";
@@ -1879,6 +1879,13 @@ function muscleDateGapReason(target) {
   return `${target.label} was directly trained ${when}; Coach uses a 2-day gap by date before direct work returns.`;
 }
 
+function coachTargetSelectionWarning(muscleId, context = coachPlanningContext()) {
+  const target = context.rankedStats.find((stat) => stat.id === muscleId);
+  if (!target || isMuscleAvailableForPlanning(target)) return "";
+  const when = target.primaryDaysSince === 0 ? "today" : "yesterday";
+  return `${target.label} was directly trained ${when}. Coach will protect recovery and skip direct ${target.label} work today.`;
+}
+
 function scoreExerciseForMuscle(exercise, muscleId, options = {}) {
   const workouts = options.workouts || coachWorkoutEntries();
   const memory = coachExerciseMemory(exercise, workouts);
@@ -2081,6 +2088,15 @@ function plannedSetGap(item, allowHighVolume = false, growthMode = item.growthMo
 }
 
 function planPriorityReason(item) {
+  if (item.phase === "target-extra") {
+    const modeLabel = item.growthMode ? `${coachGrowthModeLabel(item.growthMode)} target: ` : "";
+    const parts = [
+      `${modeLabel}${item.muscle.label} is ${fmt(item.muscle.sets, 1)}/${HYPERTROPHY.growthHigh}+; adding selected extra volume`,
+      `${item.muscle.sessions}/2 touches`
+    ];
+    if (item.muscle.daysSince !== null) parts.push(`last hit ${item.muscle.daysSince}d ago`);
+    return parts.join(" - ");
+  }
   const highVolume = item.phase === "high-volume";
   const targetSets = planSetCeilingForTarget(item.muscle, highVolume, item.growthMode);
   const modeLabel = item.growthMode ? `${coachGrowthModeLabel(item.growthMode)} mode: ` : "";
@@ -2242,6 +2258,14 @@ function maxSetsForPlanTarget(target, caps, fillToTime = false, allowHighVolume 
   return Math.max(1, Math.min(modeMaxSets, Math.max(1, Math.ceil(target.deficit))));
 }
 
+function targetReserveSetCount(target, growthMode, limitMinutes = selectedCoachTimeframeMinutes()) {
+  const mode = coachGrowthModeOption(growthMode).id;
+  const base = mode === "soft" ? 2 : mode === "aggressive" ? 4 : 3;
+  const timed = limitMinutes <= 40 ? Math.min(base, 2) : limitMinutes >= 75 && mode === "aggressive" ? 5 : base;
+  const highVolumeRoom = Math.max(0, Math.floor(HYPERTROPHY.highVolumeFillMax - target.sets));
+  return Math.min(timed, highVolumeRoom);
+}
+
 function mediumComparisonGrowthModes(growthModes = {}) {
   return Object.fromEntries(Object.entries(growthModes).map(([muscleId, mode]) => [
     muscleId,
@@ -2371,7 +2395,10 @@ function buildSessionPlan(limitMinutes = SESSION_LIMIT_MINUTES, options = {}) {
     const performanceSignal = coachExercisePerformanceSignal(exercise, coachWorkouts);
     const planTarget = coachPlanTargetForExercise(exercise, performanceSignal);
     addPerformanceNote(performanceSignal);
-    let sets = initialSetsForPlanTarget(target, caps, allowHighVolume, growthMode);
+    let sets = Number.isFinite(addOptions.setCount)
+      ? Math.max(1, addOptions.setCount)
+      : initialSetsForPlanTarget(target, caps, allowHighVolume, growthMode);
+    if (Number.isFinite(addOptions.setCap)) sets = Math.min(sets, Math.max(1, addOptions.setCap));
     if (planTarget.kind === "deload") sets = Math.max(1, sets - 1);
     if (!sets) return false;
     let minutes = estimateExerciseMinutes(exercise, sets);
@@ -2410,6 +2437,31 @@ function buildSessionPlan(limitMinutes = SESSION_LIMIT_MINUTES, options = {}) {
     for (const target of targetSupplemental) {
       if (items.length >= caps.maxItems) break;
       addTargetToPlan(target, { phase: "optimum", trackMissing: stats.length === 0, growthMode: growthModeFor(target.id) });
+    }
+
+    const targetReserve = allStats.filter((target) => (
+      isCoachTargetMuscle(target.id, targetMuscles)
+      && !items.some((item) => item.muscle.id === target.id)
+      && isMuscleAvailableForPlanning(target)
+      && target.sets < HYPERTROPHY.highVolumeFillMax
+    )).sort((a, b) => (
+      (coachGrowthModeRank(growthModeFor(b.id)) - coachGrowthModeRank(growthModeFor(a.id)))
+      || (a.sets - b.sets)
+      || coachMusclePrioritySort(a, b)
+    ));
+
+    for (const target of targetReserve) {
+      if (items.length >= caps.maxItems) break;
+      const growthMode = growthModeFor(target.id);
+      const setCount = targetReserveSetCount(target, growthMode, cappedLimit);
+      if (!setCount) continue;
+      addTargetToPlan(target, {
+        phase: "target-extra",
+        trackMissing: stats.length === 0,
+        growthMode,
+        allowHighVolume: true,
+        setCount
+      });
     }
   }
 
@@ -2591,10 +2643,10 @@ function buildSessionPlan(limitMinutes = SESSION_LIMIT_MINUTES, options = {}) {
       const mode = growthModeFor(target.id);
       const targetSets = planSetCeilingForTarget(target, false, mode);
       let reason;
-      if (planSetGap(target, false, mode) <= 0) {
-        reason = `${target.label} is already at its ${coachGrowthModeLabel(mode)} target (${fmt(target.sets, 1)}/${targetSets}).`;
-      } else if (!isMuscleAvailableForPlanning(target)) {
+      if (!isMuscleAvailableForPlanning(target)) {
         reason = `${target.label} target was held back because ${muscleDateGapReason(target)}`;
+      } else if (planSetGap(target, false, mode) <= 0) {
+        reason = `${target.label} target was limited by the selected timeframe or exercise slots after already reaching ${fmt(target.sets, 1)}/${targetSets}.`;
       } else if (items.length >= caps.maxItems || totalMinutes >= hardLimit) {
         reason = `${target.label} target was limited by the selected timeframe.`;
       } else {
@@ -6392,6 +6444,12 @@ async function handleAction(action, target) {
       if (!muscleGroups.some((muscle) => muscle.id === muscleId)) return;
       const scrollLeft = target.closest(".coach-target-options")?.scrollLeft || 0;
       const selected = selectedCoachTargetMuscles();
+      const wasSelected = selected.includes(muscleId);
+      const warning = wasSelected ? "" : coachTargetSelectionWarning(muscleId);
+      if (warning) {
+        toast(warning);
+        return;
+      }
       state.coachTargetMuscles = selected.includes(muscleId)
         ? selected.filter((id) => id !== muscleId)
         : [...selected, muscleId];
