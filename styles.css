@@ -1710,6 +1710,7 @@ textarea {
   color: var(--muted);
   font-size: 12px;
   font-weight: 800;
+  text-align: center;
 }
 
 .set-table tr:last-child td {
@@ -1726,6 +1727,41 @@ textarea {
 .set-table input[data-set-field="rest"] {
   min-width: 82px;
   font-size: 18px;
+}
+
+.rir-stepper {
+  display: grid;
+  grid-template-columns: 38px 60px 38px;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+
+.rir-stepper-btn {
+  min-width: 0;
+  min-height: 42px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text);
+  font-size: 18px;
+  font-weight: 900;
+}
+
+.rir-stepper-input {
+  min-width: 0 !important;
+  width: 100%;
+  padding: 0;
+  text-align: center;
+  appearance: textfield;
+  pointer-events: none;
+}
+
+.rir-stepper-input::-webkit-outer-spin-button,
+.rir-stepper-input::-webkit-inner-spin-button {
+  margin: 0;
+  appearance: none;
 }
 
 .mobile-set-meta {
@@ -2717,8 +2753,8 @@ textarea {
 
   .set-table tr {
     display: grid;
-    grid-template-columns: minmax(0, 1.2fr) minmax(0, 1.1fr) minmax(0, 0.8fr) minmax(0, 1fr) 38px;
-    column-gap: 6px;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 0.95fr) minmax(88px, 0.9fr) minmax(0, 0.95fr) 38px;
+    column-gap: 8px;
     row-gap: 6px;
     align-items: center;
     width: 100%;
@@ -2797,6 +2833,22 @@ textarea {
 
   .set-table input[data-set-field="rest"] {
     min-width: 0;
+    font-size: 14px;
+  }
+
+  .rir-stepper {
+    grid-template-columns: 24px minmax(28px, 1fr) 24px;
+    gap: 4px;
+  }
+
+  .rir-stepper-btn {
+    min-height: 36px;
+    border-radius: 7px;
+    font-size: 14px;
+  }
+
+  .set-table .rir-stepper-input {
+    padding: 5px 0;
     font-size: 14px;
   }
 

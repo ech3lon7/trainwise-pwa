@@ -3,7 +3,7 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 2;
 const STORES = ["workouts", "metrics", "settings"];
-const APP_VERSION = "1.5.37";
+const APP_VERSION = "1.5.38";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 const DRAFT_RECOVERY_KEY = "trainwise-draft-recovery-v1";
 const COPIED_COACH_PLAN_KEY = "trainwise-copied-coach-plan-v1";
@@ -53,6 +53,9 @@ const HYPERTROPHY = {
   proteinFloorGPerKg: 1.6,
   proteinUpperGPerKg: 2.2
 };
+
+const RIR_MIN = 0;
+const RIR_MAX = 100;
 
 const COACH_GROWTH_MODE_OPTIONS = [
   { id: "soft", label: "Soft", targetSets: 16, allowHighVolume: false, startSets: 2, rank: 0 },
@@ -808,7 +811,7 @@ function setRowsFromWorkout(workout) {
     return workout.setRows.map((row) => ({
       weight: parseNum(row.weight),
       reps: Math.max(1, parseNum(row.reps)),
-      rir: row.rir === null || row.rir === undefined || row.rir === "" ? null : parseNum(row.rir),
+      rir: row.rir === null || row.rir === undefined || row.rir === "" ? null : Math.min(RIR_MAX, Math.max(RIR_MIN, parseNum(row.rir))),
       restSeconds: parseRestSeconds(row.restSeconds ?? row.rest ?? row.restTime)
     }));
   }
@@ -816,7 +819,7 @@ function setRowsFromWorkout(workout) {
   return Array.from({ length: sets }, () => ({
     weight: Math.max(0, parseNum(workout.weight)),
     reps: Math.max(1, parseNum(workout.reps)),
-    rir: workout.rir === null || workout.rir === undefined || workout.rir === "" ? null : parseNum(workout.rir),
+    rir: workout.rir === null || workout.rir === undefined || workout.rir === "" ? null : Math.min(RIR_MAX, Math.max(RIR_MIN, parseNum(workout.rir))),
     restSeconds: parseRestSeconds(workout.restSeconds ?? workout.rest ?? workout.restTime)
   }));
 }
@@ -826,11 +829,15 @@ function normalizeSetRows(rows) {
     .map((row) => ({
       weight: Math.max(0, parseNum(row.weight)),
       reps: Math.max(1, parseNum(row.reps)),
-      rir: row.rir === "" || row.rir === null || row.rir === undefined ? null : Math.max(0, parseNum(row.rir)),
+      rir: row.rir === "" || row.rir === null || row.rir === undefined ? null : Math.min(RIR_MAX, Math.max(RIR_MIN, parseNum(row.rir))),
       restSeconds: parseRestSeconds(row.restSeconds ?? row.rest ?? row.restTime)
     }))
     .filter((row) => row.reps > 0);
   return cleaned.length ? cleaned : [{ weight: 0, reps: 10, rir: 2, restSeconds: null }];
+}
+
+function clampRirValue(value) {
+  return Math.min(RIR_MAX, Math.max(RIR_MIN, Math.round(parseNum(value))));
 }
 
 function workoutVolume(workout) {
@@ -2090,9 +2097,12 @@ function plannedSetGap(item, allowHighVolume = false, growthMode = item.growthMo
 function planPriorityReason(item) {
   if (item.phase === "target-extra") {
     const modeLabel = item.growthMode ? `${coachGrowthModeLabel(item.growthMode)} target: ` : "";
+    const touchLabel = item.muscle.sessions >= 2
+      ? "Touches satisfied; adding selected target volume because recovery is clear"
+      : `${item.muscle.sessions}/2 touches`;
     const parts = [
       `${modeLabel}${item.muscle.label} is ${fmt(item.muscle.sets, 1)}/${HYPERTROPHY.growthHigh}+; adding selected extra volume`,
-      `${item.muscle.sessions}/2 touches`
+      touchLabel
     ];
     if (item.muscle.daysSince !== null) parts.push(`last hit ${item.muscle.daysSince}d ago`);
     return parts.join(" - ");
@@ -2101,9 +2111,15 @@ function planPriorityReason(item) {
   const targetSets = planSetCeilingForTarget(item.muscle, highVolume, item.growthMode);
   const modeLabel = item.growthMode ? `${coachGrowthModeLabel(item.growthMode)} mode: ` : "";
   const targetLabel = item.muscle.sets < HYPERTROPHY.minimumSets ? "weekly floor" : "upper growth target";
+  const prefix = highVolume && isCoachTargetMuscle(item.muscle.id)
+    ? "Target selected; above default growth zone: "
+    : highVolume ? "High-volume filler: " : modeLabel;
+  const touchLabel = isCoachTargetMuscle(item.muscle.id) && item.muscle.sessions >= 2
+    ? "Touches satisfied; adding selected target volume because recovery is clear"
+    : `${item.muscle.sessions}/2 touches`;
   const parts = [
-    `${highVolume ? "High-volume filler: " : modeLabel}${item.muscle.label} is ${fmt(item.muscle.sets, 1)}/${targetSets} ${targetLabel}`,
-    `${item.muscle.sessions}/2 touches`
+    `${prefix}${item.muscle.label} is ${fmt(item.muscle.sets, 1)}/${targetSets} ${targetLabel}`,
+    touchLabel
   ];
   if (item.muscle.daysSince !== null) parts.push(`last hit ${item.muscle.daysSince}d ago`);
   return parts.join(" - ");
@@ -2462,6 +2478,36 @@ function buildSessionPlan(limitMinutes = SESSION_LIMIT_MINUTES, options = {}) {
         allowHighVolume: true,
         setCount
       });
+    }
+
+    let targetFillChanged = true;
+    while (targetFillChanged) {
+      targetFillChanged = false;
+      const eligibleTargetItems = items
+        .filter((item) => isCoachTargetMuscle(item.muscle.id, targetMuscles))
+        .map((item) => {
+          const allowHighVolume = coachGrowthModeOption(item.growthMode).allowHighVolume;
+          const maxSets = maxSetsForPlanTarget(item.muscle, caps, true, allowHighVolume, item.growthMode, true);
+          return { item, allowHighVolume, maxSets };
+        })
+        .filter(({ item, maxSets }) => item.sets < maxSets)
+        .sort((a, b) => (
+          (coachGrowthModeRank(b.item.growthMode) - coachGrowthModeRank(a.item.growthMode))
+          || (plannedSetGap(b.item, b.allowHighVolume, b.item.growthMode) - plannedSetGap(a.item, a.allowHighVolume, a.item.growthMode))
+          || (a.item.sets - b.item.sets)
+        ));
+
+      for (const { item, allowHighVolume } of eligibleTargetItems) {
+        const nextMinutes = plannedExerciseMinutes(item, item.sets + 1);
+        const extraMinutes = nextMinutes - item.minutes;
+        if (totalMinutes + extraMinutes > hardLimit) continue;
+        item.sets += 1;
+        item.minutes = nextMinutes;
+        if (allowHighVolume && item.muscle.sets + item.sets > HYPERTROPHY.growthHigh) item.phase = "high-volume";
+        totalMinutes += extraMinutes;
+        targetFillChanged = true;
+        break;
+      }
     }
   }
 
@@ -3652,6 +3698,7 @@ function renderSetRows(draft = draftExerciseFromState()) {
   const recordStats = exerciseRecordStats(draft.exercise, draft.editingWorkoutId);
   return rows.map((row, index) => {
     const previousLabel = previousSetLabel(draft.exercise, index, draft.editingWorkoutId);
+    const rirValue = clampRirValue(row.rir ?? 2);
     return `
     <tr class="set-row" data-index="${index}">
       <td class="mobile-set-meta" colspan="7">
@@ -3665,7 +3712,13 @@ function renderSetRows(draft = draftExerciseFromState()) {
       <td class="prev-cell">${escapeHtml(previousLabel)}</td>
       <td><input data-set-field="weight" type="number" inputmode="decimal" min="0" step="2.5" value="${escapeHtml(row.weight)}" aria-label="Set ${index + 1} weight"></td>
       <td><input data-set-field="reps" type="number" inputmode="numeric" min="1" step="1" value="${escapeHtml(row.reps)}" aria-label="Set ${index + 1} reps"></td>
-      <td><input data-set-field="rir" type="number" inputmode="numeric" min="0" max="5" step="1" value="${row.rir ?? ""}" aria-label="Set ${index + 1} RIR"></td>
+      <td>
+        <div class="rir-stepper" aria-label="Set ${index + 1} RIR">
+          <button class="rir-stepper-btn" type="button" data-action="decrement-rir" data-draft-id="${escapeHtml(draft.draftId)}" data-index="${index}" aria-label="Decrease set ${index + 1} RIR">-</button>
+          <input class="rir-stepper-input" data-set-field="rir" type="number" inputmode="none" min="${RIR_MIN}" max="${RIR_MAX}" step="1" value="${rirValue}" aria-label="Set ${index + 1} RIR" readonly>
+          <button class="rir-stepper-btn" type="button" data-action="increment-rir" data-draft-id="${escapeHtml(draft.draftId)}" data-index="${index}" aria-label="Increase set ${index + 1} RIR">+</button>
+        </div>
+      </td>
       <td><input data-set-field="rest" type="text" inputmode="text" value="${escapeHtml(restInputValue(row.restSeconds))}" placeholder="1:30" aria-label="Set ${index + 1} rest"></td>
       <td><button class="ghost-mini delete-set-btn" type="button" data-action="remove-set" data-draft-id="${escapeHtml(draft.draftId)}" data-index="${index}" ${rows.length <= 1 ? "disabled" : ""}>x</button></td>
     </tr>
@@ -6313,6 +6366,16 @@ async function moveExerciseDraft(draftId, direction) {
   await render();
 }
 
+function updateDraftRowRir(draftId, index, delta) {
+  const draft = state.workoutDraft.find((item) => item.draftId === draftId);
+  if (!draft) return null;
+  draft.setRows = normalizeSetRows(draft.setRows);
+  const row = draft.setRows[Number(index)];
+  if (!row) return null;
+  row.rir = clampRirValue((row.rir ?? 2) + delta);
+  return row.rir;
+}
+
 async function handleAction(action, target) {
   const actions = {
     async "app-retry"() { await init(); },
@@ -6673,6 +6736,36 @@ async function handleAction(action, target) {
       if (draft.setRows.length > 1) draft.setRows.splice(index, 1);
       syncLegacyDraftFromFirst();
       await render();
+    },
+    async "decrement-rir"() {
+      readDraftFromForm();
+      const value = updateDraftRowRir(target.dataset.draftId, target.dataset.index, -1);
+      if (value === null) return;
+      syncLegacyDraftFromFirst();
+      if (saveDraftRecovery("strength-input")) {
+        showLogDraftNotice();
+        syncLogDraftNoticeDom();
+      }
+      target.closest(".rir-stepper")?.querySelector('[data-set-field="rir"]')?.setAttribute("value", value);
+      const input = target.closest(".rir-stepper")?.querySelector('[data-set-field="rir"]');
+      if (input) input.value = value;
+      const section = target.closest(".exercise-draft");
+      if (section?.dataset.draftId) refreshDraftRecordTrophies(section.dataset.draftId);
+    },
+    async "increment-rir"() {
+      readDraftFromForm();
+      const value = updateDraftRowRir(target.dataset.draftId, target.dataset.index, 1);
+      if (value === null) return;
+      syncLegacyDraftFromFirst();
+      if (saveDraftRecovery("strength-input")) {
+        showLogDraftNotice();
+        syncLogDraftNoticeDom();
+      }
+      target.closest(".rir-stepper")?.querySelector('[data-set-field="rir"]')?.setAttribute("value", value);
+      const input = target.closest(".rir-stepper")?.querySelector('[data-set-field="rir"]');
+      if (input) input.value = value;
+      const section = target.closest(".exercise-draft");
+      if (section?.dataset.draftId) refreshDraftRecordTrophies(section.dataset.draftId);
     },
     async "use-last-session"() {
       readDraftFromForm();

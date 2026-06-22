@@ -620,6 +620,43 @@ assert(targetsPrioritizeBeforeGeneralFill.firstNonTargetIndex < 0 || targetsPrio
 assert(targetsPrioritizeBeforeGeneralFill.bicepsSets > 0, "Expected Soft target to receive conservative work before non-target optional work.");
 assert(targetsPrioritizeBeforeGeneralFill.why.includes("Soft targets get conservative priority"), `Expected Soft target wording, got ${targetsPrioritizeBeforeGeneralFill.why}`);
 
+const targetTouchesSatisfiedStillAddsVolume = runScenario(`
+  ${resetAndHelpers}
+  var OriginalDate = Date;
+  Date = class ScenarioDate extends OriginalDate {
+    constructor(...args) {
+      return args.length ? new OriginalDate(...args) : new OriginalDate("2026-06-19T12:00:00");
+    }
+    static now() { return new OriginalDate("2026-06-19T12:00:00").getTime(); }
+    static parse(value) { return OriginalDate.parse(value); }
+    static UTC(...args) { return OriginalDate.UTC(...args); }
+  };
+  var biceps = muscleGroups.find((muscle) => muscle.id === "biceps");
+  state.coachTargetMuscles = ["biceps"];
+  state.coachGlobalGrowthMode = "medium";
+  state.workouts = [
+    makeWorkout(biceps, 2, 5, { id: "biceps-a" }),
+    makeWorkout(biceps, 4, 5, { id: "biceps-b" }),
+    ...muscleGroups.filter((muscle) => muscle.id !== "biceps").map((muscle) => makeWorkout(muscle, 2, 10))
+  ];
+  var plan = buildTodayPlan(60);
+  var bicepsItem = plan.sessionPlan.items.find((item) => item.muscle.id === "biceps");
+  Date = OriginalDate;
+  ({
+    muscles: plan.sessionPlan.items.map((item) => item.muscle.id),
+    bicepsSets: bicepsItem?.sets || 0,
+    bicepsSessions: bicepsItem?.muscle.sessions || 0,
+    reason: bicepsItem?.reason || "",
+    limitations: plan.sessionPlan.targetLimitations.map((item) => item.reason).join(" ")
+  });
+`);
+
+assert(targetTouchesSatisfiedStillAddsVolume.muscles.includes("biceps"), `Expected selected Biceps with 2/2 touches to receive volume, got ${targetTouchesSatisfiedStillAddsVolume.muscles.join(", ")}`);
+assert(targetTouchesSatisfiedStillAddsVolume.bicepsSets > 0, `Expected selected Biceps to receive sets despite satisfied touches, got ${targetTouchesSatisfiedStillAddsVolume.bicepsSets}`);
+assert.strictEqual(targetTouchesSatisfiedStillAddsVolume.bicepsSessions, 2, `Expected Biceps touches to be satisfied, got ${targetTouchesSatisfiedStillAddsVolume.bicepsSessions}`);
+assert(targetTouchesSatisfiedStillAddsVolume.reason.includes("Touches satisfied"), `Expected target reason to explain satisfied touches as informational, got ${targetTouchesSatisfiedStillAddsVolume.reason}`);
+assert(!targetTouchesSatisfiedStillAddsVolume.limitations.includes("touch"), `Expected touches not to limit selected target, got ${targetTouchesSatisfiedStillAddsVolume.limitations}`);
+
 const targetSelectionRecoveryWarning = runScenario(`
   ${resetAndHelpers}
   var triceps = muscleGroups.find((muscle) => muscle.id === "triceps");

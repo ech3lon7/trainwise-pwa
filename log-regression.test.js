@@ -118,7 +118,7 @@ assert(mobileCss.includes(".set-table th.prev-cell"), "Expected mobile set table
 assert(mobileCss.includes(".set-table td.prev-cell"), "Expected mobile set table to hide Prev values at the 720px breakpoint.");
 assert(mobileCss.includes("table-layout: fixed"), "Expected mobile set table to use fixed columns.");
 assert(mobileCss.includes(".set-table tr"), "Expected mobile set table rows to use explicit grid layout.");
-assert(mobileCss.includes("grid-template-columns: minmax(0, 1.2fr)"), "Expected mobile set table to define visible input columns.");
+assert(mobileCss.includes("grid-template-columns: minmax(0, 1fr) minmax(0, 0.95fr) minmax(88px, 0.9fr)"), "Expected mobile set table to define visible input columns with RIR stepper room.");
 assert(mobileCss.includes(".set-table td.mobile-set-meta"), "Expected mobile row metadata to be visible on mobile.");
 assert(/\.mobile-set-meta\s*{\s*display:\s*none;/.test(stylesCode), "Expected mobile row metadata to be hidden by default.");
 assert(!appCode.includes("exercise-title-dumbbell"), "Expected extra dumbbell icon next to record/muscle icons to be removed.");
@@ -160,9 +160,9 @@ assert(!appCode.includes('selectedExercise: "Push-up"'), "Expected Log startup n
 assert(!appCode.includes('showBanner("Unsaved draft restored."'), "Expected startup draft recovery not to show a top banner.");
 assert(appCode.includes("notifyMetricSaved"), "Expected metrics saves to use a dedicated bottom-only notification helper.");
 assert(!stylesCode.includes(".mobile-quick-toggle"), "Expected floating quick action button styling to be removed.");
-assert(indexCode.includes("v=1.5.37"), "Expected index shell references to use bumped app version.");
+assert(indexCode.includes("v=1.5.38"), "Expected index shell references to use bumped app version.");
 assert(!indexCode.includes('id="app" class="app-content" aria-live'), "Expected broad app aria-live to be removed in favor of targeted live regions.");
-assert(serviceWorkerCode.includes("trainwise-cache-v59"), "Expected service worker cache version bump.");
+assert(serviceWorkerCode.includes("trainwise-cache-v60"), "Expected service worker cache version bump.");
 assert(appCode.includes("data-settings-panel"), "Expected Settings panels to preserve open state with stable panel ids.");
 assert(appCode.includes('forceSettingsPanelOpen("supabase-sync")'), "Expected Supabase actions to keep the Supabase panel open after rendering.");
 
@@ -594,6 +594,44 @@ const mobileMetaMarkup = runScenario(`
 assert(mobileMetaMarkup.includes("mobile-set-meta"), "Expected set rows to include mobile metadata.");
 assert(mobileMetaMarkup.includes("Prev 100 x 11"), "Expected mobile metadata to include previous set label.");
 assert(mobileMetaMarkup.includes("<strong>Set</strong>"), "Expected mobile metadata to include Set label.");
+
+const rirStepper = runScenario(`
+  ${reset}
+  var draft = {
+    draftId: "rir-draft",
+    exercise: "Bench Press",
+    editingWorkoutId: null,
+    setRows: [
+      { weight: 100, reps: 10, rir: 2, restSeconds: 120 },
+      { weight: 95, reps: 10, rir: 100, restSeconds: 120 }
+    ]
+  };
+  state.workoutDraft = [draft];
+  var markup = renderSetRows(draft);
+  var incremented = updateDraftRowRir("rir-draft", 0, 1);
+  var decremented = updateDraftRowRir("rir-draft", 0, -1);
+  var minClamped = updateDraftRowRir("rir-draft", 0, -50);
+  var maxClamped = updateDraftRowRir("rir-draft", 1, 1);
+  ({
+    hasStepper: markup.includes("rir-stepper"),
+    hasMinus: markup.includes('data-action="decrement-rir"'),
+    hasPlus: markup.includes('data-action="increment-rir"'),
+    readonly: markup.includes("readonly"),
+    inputModeNone: markup.includes('inputmode="none"'),
+    incremented,
+    decremented,
+    minClamped,
+    maxClamped
+  });
+`);
+
+assert(rirStepper.hasStepper, "Expected set rows to render RIR stepper markup.");
+assert(rirStepper.hasMinus && rirStepper.hasPlus, "Expected RIR stepper to include decrement and increment actions.");
+assert(rirStepper.readonly && rirStepper.inputModeNone, "Expected RIR value to be read-only and not manually typed.");
+assert.strictEqual(rirStepper.incremented, 3, `Expected RIR increment to produce 3, got ${rirStepper.incremented}`);
+assert.strictEqual(rirStepper.decremented, 2, `Expected RIR decrement to return to 2, got ${rirStepper.decremented}`);
+assert.strictEqual(rirStepper.minClamped, 0, `Expected RIR decrement to clamp at 0, got ${rirStepper.minClamped}`);
+assert.strictEqual(rirStepper.maxClamped, 100, `Expected RIR increment to clamp at 100, got ${rirStepper.maxClamped}`);
 
 const volumeRecord = runScenario(`
   ${reset}
