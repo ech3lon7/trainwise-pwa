@@ -113,7 +113,7 @@ const reset = `
 const mobileStart = stylesCode.indexOf("@media (max-width: 720px)");
 const mobileEnd = stylesCode.indexOf("@media (max-width: 420px)");
 const mobileCss = mobileStart >= 0 && mobileEnd > mobileStart ? stylesCode.slice(mobileStart, mobileEnd) : "";
-assert(mobileCss.includes('"drag record muscles spacer"'), "Expected mobile exercise header to keep icons left of the field.");
+assert(mobileCss.includes('"drag record direction muscles spacer"'), "Expected mobile exercise header to keep icons left of the field.");
 assert(mobileCss.includes(".set-table th.prev-cell"), "Expected mobile set table to hide Prev header at the 720px breakpoint.");
 assert(mobileCss.includes(".set-table td.prev-cell"), "Expected mobile set table to hide Prev values at the 720px breakpoint.");
 assert(mobileCss.includes("table-layout: fixed"), "Expected mobile set table to use fixed columns.");
@@ -160,9 +160,9 @@ assert(!appCode.includes('selectedExercise: "Push-up"'), "Expected Log startup n
 assert(!appCode.includes('showBanner("Unsaved draft restored."'), "Expected startup draft recovery not to show a top banner.");
 assert(appCode.includes("notifyMetricSaved"), "Expected metrics saves to use a dedicated bottom-only notification helper.");
 assert(!stylesCode.includes(".mobile-quick-toggle"), "Expected floating quick action button styling to be removed.");
-assert(indexCode.includes("v=1.5.38"), "Expected index shell references to use bumped app version.");
+assert(indexCode.includes("v=1.5.39"), "Expected index shell references to use bumped app version.");
 assert(!indexCode.includes('id="app" class="app-content" aria-live'), "Expected broad app aria-live to be removed in favor of targeted live regions.");
-assert(serviceWorkerCode.includes("trainwise-cache-v60"), "Expected service worker cache version bump.");
+assert(serviceWorkerCode.includes("trainwise-cache-v61"), "Expected service worker cache version bump.");
 assert(appCode.includes("data-settings-panel"), "Expected Settings panels to preserve open state with stable panel ids.");
 assert(appCode.includes('forceSettingsPanelOpen("supabase-sync")'), "Expected Supabase actions to keep the Supabase panel open after rendering.");
 
@@ -547,6 +547,27 @@ assert(!setRecords.lowRepWeight.some((reason) => reason.includes("Weight record"
 assert(setRecords.markup.includes("&#127942;"), "Expected trophy markup to use an ASCII-safe HTML entity.");
 assert(setRecords.markup.includes('data-action="dismiss-record-trophy"'), "Expected trophy markup to be dismissible.");
 
+const setPositionRecords = runScenario(`
+  ${reset}
+  state.workouts = [
+    makeWorkout({ id: "prior-slot", setRows: [
+      { weight: 25, reps: 14, rir: 1, restSeconds: 120 },
+      { weight: 25, reps: 8, rir: 1, restSeconds: 120 },
+      { weight: 20, reps: 10, rir: 1, restSeconds: 120 }
+    ] })
+  ];
+  var stats = exerciseRecordStats("Bench Press");
+  ({
+    secondSetRepPr: setRecordReasons({ weight: 25, reps: 9 }, stats, 1),
+    thirdSetWeightPr: setRecordReasons({ weight: 25, reps: 8 }, stats, 2),
+    thirdSetLowRepWeight: setRecordReasons({ weight: 25, reps: 7 }, stats, 2)
+  });
+`);
+
+assert(setPositionRecords.secondSetRepPr.some((reason) => reason.includes("Set 2 rep record")), `Expected set-position rep PR, got ${setPositionRecords.secondSetRepPr.join(", ")}`);
+assert(setPositionRecords.thirdSetWeightPr.some((reason) => reason.includes("Set 3 weight record")), `Expected set-position weight PR, got ${setPositionRecords.thirdSetWeightPr.join(", ")}`);
+assert(!setPositionRecords.thirdSetLowRepWeight.some((reason) => reason.includes("Set 3 weight record")), `Expected low-rep set-position weight PR to be ignored, got ${setPositionRecords.thirdSetLowRepWeight.join(", ")}`);
+
 const setTrophyDismissal = runScenario(`
   ${reset}
   state.workouts = [
@@ -718,6 +739,43 @@ const liveTrophySlots = runScenario(`
 assert(liveTrophySlots.hasSlot, "Expected set rows to include live trophy slots.");
 assert(liveTrophySlots.hasTrophy, "Expected live trophy slot to render a set trophy when row is a record.");
 assert(liveTrophySlots.removedAfterEdit, "Expected live trophy helper to remove trophy when edited below record.");
+
+const logLoadDirectionIndicator = runScenario(`
+  ${reset}
+  state.workouts = [
+    makeWorkout({ id: "bench-current", date: "2026-06-22", createdAt: "2026-06-22T12:00:00.000Z", setRows: [
+      { weight: 145, reps: 12, rir: 0, restSeconds: 31 },
+      { weight: 145, reps: 5, rir: 0, restSeconds: 31 }
+    ] }),
+    makeWorkout({ id: "bench-prior", date: "2026-06-15", createdAt: "2026-06-15T12:00:00.000Z", setRows: [
+      { weight: 145, reps: 14, rir: 0, restSeconds: 31 },
+      { weight: 145, reps: 7, rir: 0, restSeconds: 31 }
+    ] })
+  ];
+  var down = logLoadDirectionForExercise(resolveExerciseMeta("Bench Press"));
+  state.workouts = [
+    makeWorkout({ id: "bench-good", date: "2026-06-22", createdAt: "2026-06-22T12:00:00.000Z", setRows: [
+      { weight: 100, reps: 12, rir: 1, restSeconds: 31 }
+    ] }),
+    makeWorkout({ id: "bench-base", date: "2026-06-15", createdAt: "2026-06-15T12:00:00.000Z", setRows: [
+      { weight: 100, reps: 11, rir: 1, restSeconds: 31 }
+    ] })
+  ];
+  var up = logLoadDirectionForExercise(resolveExerciseMeta("Bench Press"));
+  var markup = exerciseDraftTable({
+    draftId: "direction-draft",
+    editingWorkoutId: null,
+    exercise: "Bench Press",
+    targetMuscle: "chest",
+    notes: "",
+    setRows: [{ weight: 100, reps: 10, rir: 2, restSeconds: 120 }]
+  }, 0, 1);
+  ({ down, up, markup });
+`);
+
+assert.strictEqual(logLoadDirectionIndicator.down.direction, "down", `Expected failed bench signal to recommend lowering load, got ${JSON.stringify(logLoadDirectionIndicator.down)}`);
+assert.strictEqual(logLoadDirectionIndicator.up.direction, "up", `Expected progressing bench signal to recommend raising load, got ${JSON.stringify(logLoadDirectionIndicator.up)}`);
+assert(logLoadDirectionIndicator.markup.includes("load-direction-indicator"), "Expected log table to render Coach load direction indicator.");
 
 const editExclusion = runScenario(`
   ${reset}

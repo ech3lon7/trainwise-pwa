@@ -1556,7 +1556,7 @@ textarea {
 
 .exercise-table-title {
   display: grid;
-  grid-template-columns: auto auto auto minmax(0, 1fr);
+  grid-template-columns: auto auto auto auto minmax(0, 1fr);
   gap: 12px;
   align-items: center;
   min-width: 0;
@@ -1827,6 +1827,31 @@ textarea {
   width: 24px;
   height: 24px;
   font-size: 16px;
+}
+
+.load-direction-indicator {
+  display: inline-grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  min-height: 24px;
+  padding: 0;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.05);
+  font-size: 15px;
+  font-weight: 900;
+  line-height: 1;
+}
+
+.load-direction-indicator.up {
+  color: var(--green);
+  background: rgba(53, 213, 140, 0.12);
+}
+
+.load-direction-indicator.down {
+  color: var(--coral);
+  background: rgba(255, 107, 95, 0.12);
 }
 
 .record-trophy:focus-visible {
@@ -2711,10 +2736,10 @@ textarea {
 
   .exercise-table-title {
     display: grid;
-    grid-template-columns: 42px auto auto minmax(0, 1fr);
+    grid-template-columns: 42px auto auto auto minmax(0, 1fr);
     grid-template-areas:
-      "drag record muscles spacer"
-      "field field field field";
+      "drag record direction muscles spacer"
+      "field field field field field";
     gap: 8px;
     align-items: center;
   }
@@ -2725,6 +2750,11 @@ textarea {
 
   .volume-record-trophy {
     grid-area: record;
+    justify-self: start;
+  }
+
+  .load-direction-indicator {
+    grid-area: direction;
     justify-self: start;
   }
 

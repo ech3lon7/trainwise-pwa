@@ -3,7 +3,7 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 2;
 const STORES = ["workouts", "metrics", "settings"];
-const APP_VERSION = "1.5.38";
+const APP_VERSION = "1.5.39";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 const DRAFT_RECOVERY_KEY = "trainwise-draft-recovery-v1";
 const COPIED_COACH_PLAN_KEY = "trainwise-copied-coach-plan-v1";
@@ -1877,6 +1877,45 @@ function coachPlanTargetForExercise(exercise, signal = coachExercisePerformanceS
   };
 }
 
+function logLoadDirectionForExercise(exercise, options = {}) {
+  const workouts = options.excludeId
+    ? state.workouts.filter((entry) => entry.id !== options.excludeId)
+    : state.workouts;
+  const signal = coachExercisePerformanceSignal(exercise, workouts);
+  if (signal.status === "progressing") {
+    return {
+      direction: "up",
+      symbol: "\u2191",
+      label: "Coach recommends raising workload",
+      message: signal.message || `${exercise.name} progressed last session; use the next small overload target.`
+    };
+  }
+  if (signal.status === "isolated-failure" || signal.status === "repeated-failure") {
+    return {
+      direction: "down",
+      symbol: "\u2193",
+      label: "Coach recommends lowering workload",
+      message: signal.message || `${exercise.name} dipped last session; reduce load and rebuild with controlled reps.`
+    };
+  }
+  return {
+    direction: "neutral",
+    symbol: "",
+    label: "Coach recommends holding workload",
+    message: signal.message || ""
+  };
+}
+
+function logLoadDirectionIndicator(exercise, draft = {}) {
+  const direction = logLoadDirectionForExercise(exercise, { excludeId: draft.editingWorkoutId });
+  if (direction.direction === "neutral") return "";
+  return `
+    <button class="load-direction-indicator ${direction.direction}" type="button" data-action="show-load-direction" data-message="${escapeHtml(direction.message)}" aria-label="${escapeHtml(direction.label)}" title="${escapeHtml(direction.message || direction.label)}">
+      ${escapeHtml(direction.symbol)}
+    </button>
+  `;
+}
+
 function isMuscleAvailableForPlanning(target) {
   return target.primaryDaysSince === null || target.primaryDaysSince >= COACH_MUSCLE_RECOVERY_DAYS;
 }
@@ -3596,28 +3635,35 @@ function recordWeightKey(weight) {
 function exerciseRecordStats(exercise, excludeId = null) {
   const entries = exerciseHistoryForIdentity(exercise, state.workouts, true).filter((entry) => entry.id !== excludeId);
   const bestRepsByWeight = new Map();
+  const setBestRepsByWeight = new Map();
+  const setMaxWeight = new Map();
   let maxWeight = 0;
   let bestVolume = 0;
 
   for (const entry of entries) {
     bestVolume = Math.max(bestVolume, workoutVolume(entry));
-    for (const row of setRowsFromWorkout(entry)) {
+    for (const [index, row] of setRowsFromWorkout(entry).entries()) {
       if (row.weight <= 0 || row.reps <= 0) continue;
       maxWeight = Math.max(maxWeight, row.weight);
       const key = recordWeightKey(row.weight);
       bestRepsByWeight.set(key, Math.max(bestRepsByWeight.get(key) || 0, row.reps));
+      const setWeightKey = `${index}|${key}`;
+      setBestRepsByWeight.set(setWeightKey, Math.max(setBestRepsByWeight.get(setWeightKey) || 0, row.reps));
+      setMaxWeight.set(index, Math.max(setMaxWeight.get(index) || 0, row.weight));
     }
   }
 
   return {
     hasHistory: entries.length > 0,
     bestRepsByWeight,
+    setBestRepsByWeight,
+    setMaxWeight,
     maxWeight,
     bestVolume
   };
 }
 
-function setRecordReasons(row, stats) {
+function setRecordReasons(row, stats, index = null) {
   const reasons = [];
   const weight = parseNum(row.weight);
   const reps = parseNum(row.reps);
@@ -3629,6 +3675,18 @@ function setRecordReasons(row, stats) {
   }
   if (stats.maxWeight > 0 && weight > stats.maxWeight && reps >= 8) {
     reasons.push(`Weight record: ${fmt(weight, 1)} lb for ${fmt(reps)} reps`);
+  }
+  if (Number.isInteger(index) && index >= 0) {
+    const setNumber = index + 1;
+    const setWeightKey = `${index}|${recordWeightKey(weight)}`;
+    const priorSetReps = stats.setBestRepsByWeight?.get(setWeightKey) || 0;
+    const priorSetMaxWeight = stats.setMaxWeight?.get(index) || 0;
+    if (priorSetReps > 0 && reps > priorSetReps) {
+      reasons.push(`Set ${setNumber} rep record at ${fmt(weight, 1)} lb: ${fmt(priorSetReps)} to ${fmt(reps)}`);
+    }
+    if (priorSetMaxWeight > 0 && weight > priorSetMaxWeight && reps >= 8) {
+      reasons.push(`Set ${setNumber} weight record: ${fmt(weight, 1)} lb for ${fmt(reps)} reps`);
+    }
   }
   return reasons;
 }
@@ -3647,8 +3705,7 @@ function setRecordTrophyKey(draft, index, row, reasons) {
     draft.draftId,
     index,
     recordWeightKey(row.weight),
-    parseNum(row.reps),
-    reasons.join("/")
+    parseNum(row.reps)
   ]);
 }
 
@@ -3674,7 +3731,7 @@ function recordTrophyMarkup(label, className = "", key = "") {
 }
 
 function setRecordTrophyMarkupForRow(draft, row, index, recordStats = exerciseRecordStats(draft.exercise, draft.editingWorkoutId)) {
-  const reasons = setRecordReasons(row, recordStats);
+  const reasons = setRecordReasons(row, recordStats, index);
   const trophyKey = setRecordTrophyKey(draft, index, row, reasons);
   return recordTrophyMarkup(reasons.join(" / "), "set-record-trophy", trophyKey);
 }
@@ -4221,6 +4278,7 @@ function exerciseDraftTable(draft, index, total) {
           <button class="drag-handle" type="button" aria-label="Drag exercise table" data-drag-handle data-draft-id="${escapeHtml(draft.draftId)}">::</button>
           ${exerciseMuscleIcons(meta)}
           ${volumeRecordTrophySlot(draft, recordStats)}
+          ${logLoadDirectionIndicator(meta, draft)}
           <div>
             <label for="exercise-${escapeHtml(draft.draftId)}">Exercise</label>
             <select id="exercise-${escapeHtml(draft.draftId)}" data-draft-field="exercise" data-action="draft-exercise-change" data-draft-id="${escapeHtml(draft.draftId)}">
@@ -6554,6 +6612,9 @@ async function handleAction(action, target) {
       const key = target.dataset.recordKey;
       if (key) state.dismissedRecordTrophies.add(key);
       await render();
+    },
+    async "show-load-direction"() {
+      toast(target.dataset.message || "Coach load direction is based on your last comparable sessions.");
     },
     async "return-to-today"() {
       readDraftFromForm();
