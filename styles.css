@@ -75,6 +75,16 @@ summary:focus-visible,
   100% { opacity: 1; transform: translate(-50%, 0) scale(1); }
 }
 
+@keyframes backdropFadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes panelSlideUp {
+  from { opacity: 0; transform: translateY(20px) scale(0.97); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
 .app-shell {
   min-height: 100svh;
   padding: max(14px, env(safe-area-inset-top)) 14px calc(88px + env(safe-area-inset-bottom));
@@ -174,6 +184,7 @@ h3 {
   place-items: end center;
   padding: 16px 14px calc(104px + env(safe-area-inset-bottom));
   background: rgba(0, 0, 0, 0.48);
+  animation: backdropFadeIn 0.22s ease-out both;
 }
 
 .modal-panel {
@@ -183,6 +194,7 @@ h3 {
   border-radius: 8px;
   background: rgba(23, 27, 23, 0.98);
   box-shadow: 0 22px 60px rgba(0, 0, 0, 0.36);
+  animation: panelSlideUp 0.26s cubic-bezier(0.2, 0.9, 0.24, 1) both;
 }
 
 .import-preview-grid {
@@ -258,6 +270,18 @@ h3 {
   border-radius: 8px;
   box-shadow: 0 12px 34px rgba(0, 0, 0, 0.18);
   overflow: hidden;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease;
+}
+
+.card:hover,
+.stat:hover,
+.form-panel:hover,
+.chart-panel:hover,
+.list-item:hover,
+.coach-card:hover,
+.settings-panel:hover {
+  border-color: rgba(255, 255, 255, 0.14);
+  box-shadow: 0 14px 38px rgba(0, 0, 0, 0.22);
 }
 
 .card,
@@ -402,6 +426,7 @@ h3 {
   background: transparent;
   color: var(--muted);
   font-size: 11px;
+  transition: transform 0.16s ease, box-shadow 0.16s ease, filter 0.16s ease, background 0.2s ease, color 0.2s ease;
 }
 
 .tab.is-active {
@@ -413,6 +438,7 @@ h3 {
   padding: 0 14px;
   border: 1px solid rgba(255, 255, 255, 0.12);
   background: rgba(255, 255, 255, 0.04);
+  transition: transform 0.16s ease, box-shadow 0.16s ease, filter 0.16s ease, background 0.2s ease, border-color 0.2s ease;
 }
 
 .primary-button {
@@ -421,6 +447,18 @@ h3 {
   background: var(--green);
   color: #09110b;
   font-weight: 800;
+  transition: transform 0.16s ease, box-shadow 0.16s ease, filter 0.16s ease, background 0.2s ease;
+}
+
+.primary-button:hover {
+  filter: brightness(1.1);
+  transform: translateY(-1px);
+  box-shadow: 0 6px 18px rgba(53, 213, 140, 0.2);
+}
+
+.primary-button:active {
+  transform: scale(0.97);
+  filter: brightness(0.95);
 }
 
 .full-button {
@@ -432,6 +470,18 @@ h3 {
   padding: 0 16px;
   background: rgba(255, 107, 95, 0.16);
   color: #ffbbb6;
+  transition: transform 0.16s ease, box-shadow 0.16s ease, filter 0.16s ease, background 0.2s ease;
+}
+
+.danger-button:hover {
+  filter: brightness(1.1);
+  transform: translateY(-1px);
+  box-shadow: 0 6px 18px rgba(255, 107, 95, 0.15);
+}
+
+.danger-button:active {
+  transform: scale(0.97);
+  filter: brightness(0.9);
 }
 
 .segment {
@@ -447,6 +497,7 @@ h3 {
 .segment button {
   background: transparent;
   color: var(--muted);
+  transition: background 0.2s ease, color 0.2s ease;
 }
 
 .segment button.is-active {
@@ -475,6 +526,15 @@ textarea {
   padding: 10px 12px;
   background: #101510;
   color: var(--text);
+  transition: border-color 0.2s ease, box-shadow 0.2s ease, background 0.2s ease;
+}
+
+input:focus,
+select:focus,
+textarea:focus {
+  border-color: rgba(53, 213, 140, 0.45);
+  box-shadow: 0 0 0 3px rgba(53, 213, 140, 0.1);
+  background: #0e130e;
 }
 
 textarea {
@@ -751,11 +811,13 @@ textarea {
   background: rgba(255, 255, 255, 0.04);
   color: var(--muted);
   white-space: nowrap;
+  transition: transform 0.16s ease, box-shadow 0.16s ease, filter 0.16s ease, background 0.2s ease, color 0.2s ease, border-color 0.2s ease;
 }
 
 .pill.is-active {
   color: #09110b;
   background: var(--gold);
+  border-color: var(--gold);
 }
 
 .list {
@@ -1108,6 +1170,7 @@ textarea {
   color: var(--muted);
   font-weight: 800;
   white-space: nowrap;
+  transition: transform 0.16s ease, background 0.2s ease, color 0.2s ease, border-color 0.2s ease;
 }
 
 .timeframe-chip.is-active,
@@ -1156,6 +1219,7 @@ textarea {
   color: var(--muted);
   font-size: 12px;
   font-weight: 850;
+  transition: background 0.2s ease, color 0.2s ease, border-color 0.2s ease;
 }
 
 .growth-mode-chip.is-active {
@@ -1222,6 +1286,7 @@ textarea {
   font-weight: 800;
   text-transform: uppercase;
   letter-spacing: 0;
+  transition: background 0.2s ease, border-color 0.2s ease;
 }
 
 .action-grid {
@@ -1273,6 +1338,15 @@ textarea {
   padding: 10px;
   border-radius: 8px;
   background: rgba(255, 255, 255, 0.035);
+  transition: background 0.2s ease, transform 0.18s ease;
+}
+
+.muscle-card:hover {
+  background: rgba(255, 255, 255, 0.055);
+}
+
+.muscle-card:active {
+  transform: scale(0.98);
 }
 
 .muscle-card.hot .progress-bar span {
@@ -1872,9 +1946,49 @@ textarea {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .record-trophy,
-  .record-trophy::after {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+
+  .app-content.content-enter {
     animation: none;
+  }
+
+  .app-content.content-exit {
+    animation: none;
+  }
+
+  .content-enter .card,
+  .content-enter .chart-panel,
+  .content-enter .stat,
+  .content-enter .coach-card,
+  .content-enter .exercise-definition,
+  .content-enter .exercise-draft,
+  .content-enter .history-exercise-card,
+  .content-enter .history-session-card,
+  .content-enter .form-panel,
+  .content-enter .settings-panel {
+    animation: none;
+  }
+
+  .progress-bar span {
+    animation: none;
+  }
+
+  .toast.show {
+    animation: none;
+  }
+
+  .table-menu {
+    animation: none;
+  }
+
+  .scroll-top-button {
+    transition: none;
   }
 }
 
@@ -1939,6 +2053,11 @@ textarea {
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 8px;
   background: rgba(23, 27, 23, 0.88);
+  transition: border-color 0.2s ease, background 0.2s ease;
+}
+
+.history-session-card:hover {
+  border-color: rgba(255, 255, 255, 0.14);
 }
 
 .history-session-card summary {
@@ -2003,6 +2122,11 @@ textarea {
   border-radius: 8px;
   background: rgba(255, 255, 255, 0.04);
   color: var(--muted);
+  transition: background 0.2s ease, border-color 0.2s ease;
+}
+
+.check-card:hover {
+  background: rgba(255, 255, 255, 0.06);
 }
 
 .check-card input {
@@ -2033,6 +2157,11 @@ textarea {
   border: 1px solid rgba(53, 213, 140, 0.16);
   border-radius: 8px;
   background: rgba(53, 213, 140, 0.07);
+  transition: background 0.2s ease;
+}
+
+.coverage-row:hover {
+  background: rgba(53, 213, 140, 0.09);
 }
 
 .coverage-row.is-missing {
@@ -2182,10 +2311,21 @@ textarea {
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 8px;
   background: rgba(255, 255, 255, 0.035);
+  transition: border-color 0.2s ease, background 0.2s ease;
+}
+
+.exercise-definition:hover {
+  border-color: rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.05);
 }
 
 .exercise-definition.custom {
   border-color: rgba(53, 213, 140, 0.18);
+}
+
+.exercise-form-panel.is-editing {
+  border-color: rgba(53, 213, 140, 0.24);
+  box-shadow: 0 0 0 3px rgba(53, 213, 140, 0.08);
 }
 
 .exercise-definition.removed-exercise {
@@ -2363,6 +2503,7 @@ textarea {
   color: var(--muted);
   font-weight: 800;
   white-space: nowrap;
+  transition: transform 0.16s ease, background 0.2s ease, color 0.2s ease, border-color 0.2s ease;
 }
 
 .date-chip.is-active {
@@ -2644,6 +2785,8 @@ textarea {
 @media (max-width: 720px) {
   .app-shell {
     padding-bottom: calc(120px + env(safe-area-inset-bottom));
+    padding-left: 12px;
+    padding-right: 12px;
   }
 
   .app-banner {
@@ -2913,6 +3056,57 @@ textarea {
   .hero-title {
     font-size: 25px;
   }
+
+  .section {
+    margin-top: 12px;
+  }
+
+  .card,
+  .form-panel,
+  .chart-panel,
+  .settings-panel {
+    padding: 12px;
+  }
+
+  .stat {
+    padding: 12px;
+  }
+
+  .coach-card {
+    padding: 12px;
+  }
+
+  .today-plan-item {
+    padding: 8px;
+  }
+
+  .nutrition-quick-card {
+    padding: 10px;
+  }
+
+  .nutrition-meal-card {
+    padding: 10px;
+  }
+
+  .exercise-draft {
+    padding: 10px;
+  }
+
+  .history-exercise-card {
+    padding: 12px;
+  }
+
+  .history-session-card {
+    padding: 10px;
+  }
+
+  .coverage-row summary {
+    padding: 8px;
+  }
+
+  .coverage-detail-list {
+    padding: 0 8px 8px;
+  }
 }
 
 @media (max-width: 420px) {
@@ -3042,4 +3236,80 @@ textarea {
     margin-right: 4px;
   }
 
+  .card,
+  .form-panel,
+  .chart-panel,
+  .settings-panel {
+    padding: 10px;
+  }
+
+  .stat {
+    padding: 10px;
+  }
+
+  .coach-card {
+    padding: 10px;
+  }
+
+  .section {
+    margin-top: 10px;
+  }
+}
+
+@media (min-width: 1024px) {
+  .app-shell {
+    padding-left: 24px;
+    padding-right: 24px;
+  }
+
+  .section {
+    margin-top: 18px;
+  }
+
+  .card,
+  .form-panel,
+  .chart-panel,
+  .settings-panel {
+    padding: 18px;
+  }
+
+  .stat {
+    padding: 18px;
+  }
+
+  .coach-card {
+    padding: 18px;
+  }
+
+  .today-plan-item {
+    padding: 12px;
+  }
+
+  .exercise-draft {
+    padding: 14px;
+  }
+
+  .history-exercise-card {
+    padding: 16px;
+  }
+
+  .history-session-card {
+    padding: 14px;
+  }
+
+  .hero {
+    padding: 22px;
+  }
+
+  .hero-title {
+    font-size: 32px;
+  }
+
+  .coverage-row summary {
+    padding: 12px;
+  }
+
+  .coverage-detail-list {
+    padding: 0 12px 12px;
+  }
 }

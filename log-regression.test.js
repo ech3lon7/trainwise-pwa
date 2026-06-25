@@ -160,9 +160,9 @@ assert(!appCode.includes('selectedExercise: "Push-up"'), "Expected Log startup n
 assert(!appCode.includes('showBanner("Unsaved draft restored."'), "Expected startup draft recovery not to show a top banner.");
 assert(appCode.includes("notifyMetricSaved"), "Expected metrics saves to use a dedicated bottom-only notification helper.");
 assert(!stylesCode.includes(".mobile-quick-toggle"), "Expected floating quick action button styling to be removed.");
-assert(indexCode.includes("v=1.5.39"), "Expected index shell references to use bumped app version.");
+assert(indexCode.includes("v=1.5.40"), "Expected index shell references to use bumped app version.");
 assert(!indexCode.includes('id="app" class="app-content" aria-live'), "Expected broad app aria-live to be removed in favor of targeted live regions.");
-assert(serviceWorkerCode.includes("trainwise-cache-v61"), "Expected service worker cache version bump.");
+assert(serviceWorkerCode.includes("trainwise-cache-v62"), "Expected service worker cache version bump.");
 assert(appCode.includes("data-settings-panel"), "Expected Settings panels to preserve open state with stable panel ids.");
 assert(appCode.includes('forceSettingsPanelOpen("supabase-sync")'), "Expected Supabase actions to keep the Supabase panel open after rendering.");
 
@@ -1311,6 +1311,71 @@ assert.strictEqual(exerciseCoverageAndFilters.showsBenchUnderChest, true, "Expec
 assert.strictEqual(exerciseCoverageAndFilters.showsRowUnderBack, true, "Expected covered Back row to list primary exercises.");
 assert.strictEqual(exerciseCoverageAndFilters.coverageRowsHaveStandardArrowOnly, true, "Expected coverage rows to avoid redundant inner collapse arrows.");
 assert.strictEqual(exerciseCoverageAndFilters.hasArchiveSection, true, "Expected Exercises markup to include archived section.");
+
+const exerciseEditVisibleState = runScenario(`
+  ${reset}
+  state.activeTab = "exercises";
+  state.settings.customExercises = [
+    {
+      id: "custom-bench",
+      name: "Bench Press",
+      primaryMuscles: ["chest"],
+      secondaryMuscles: ["triceps"],
+      equipment: "barbell",
+      reps: "6-12",
+      rest: "90-180 sec",
+      cue: "Test bench."
+    }
+  ];
+  state.editingExerciseId = "custom-bench";
+  state.exerciseFormDraft = null;
+  state.exerciseFormErrors = {};
+  state.openExerciseActionMenu = "custom-bench";
+  var markup = renderExercises();
+  ({
+    editSummary: markup.includes('<summary><span>Edit exercise</span><small>Bench Press</small></summary>'),
+    formValue: markup.includes('value="Bench Press"'),
+    formTarget: markup.includes('id="exercise-form"'),
+    focusTarget: markup.includes('data-edit-focus-target')
+  });
+`);
+
+assert.strictEqual(exerciseEditVisibleState.editSummary, true, "Expected Exercises edit mode to render the selected exercise in the form summary.");
+assert.strictEqual(exerciseEditVisibleState.formValue, true, "Expected Exercises edit mode to populate selected exercise values.");
+assert.strictEqual(exerciseEditVisibleState.formTarget, true, "Expected Exercises edit form to expose a stable form target.");
+assert.strictEqual(exerciseEditVisibleState.focusTarget, true, "Expected Exercises edit form to expose a visible focus/scroll target.");
+
+const bodyWeightAverage = runScenario(`
+  ${reset}
+  state.metrics = [
+    { id: "m1", date: "2026-06-01", bodyWeight: 180, calories: 2500, protein: 170 },
+    { id: "m2", date: "2026-06-02", bodyWeight: 182, calories: 2500, protein: 170 },
+    { id: "m3", date: "2026-06-03", bodyWeight: 181, calories: 2500, protein: 170 },
+    { id: "m4", date: "2026-06-04", bodyWeight: 183, calories: 2500, protein: 170 },
+    { id: "m5", date: "2026-06-05", bodyWeight: 184, calories: 2500, protein: 170 },
+    { id: "m6", date: "2026-06-06", bodyWeight: 186, calories: 2500, protein: 170 },
+    { id: "m7", date: "2026-06-07", bodyWeight: 185, calories: 2500, protein: 170 },
+    { id: "m8", date: "2026-06-08", bodyWeight: 187, calories: 2500, protein: 170 }
+  ];
+  state.settings.dashboardWidgets = ["bodyWeight"];
+  state.settings.dashboardWidgetOrder = ["bodyWeight"];
+  var series = seriesFromMetrics("bodyWeight");
+  var avgSeries = rollingAverageSeries(series, 7);
+  var latestAvg = latestRollingAverage(series, 7);
+  var dashboard = renderDashboard();
+  var trends = renderTrends();
+  ({
+    avgValues: avgSeries.map((point) => Math.round(point.value * 10) / 10),
+    latestAvg: Math.round(latestAvg * 10) / 10,
+    dashboardHasAvg: dashboard.includes("7d avg"),
+    trendsHasOverlay: trends.includes("comparison-polyline")
+  });
+`);
+
+assert.deepEqual(bodyWeightAverage.avgValues.slice(-2), [183, 184], `Expected rolling average values, got ${bodyWeightAverage.avgValues.join(", ")}`);
+assert.strictEqual(bodyWeightAverage.latestAvg, 184, `Expected latest 7-day average weight, got ${bodyWeightAverage.latestAvg}`);
+assert.strictEqual(bodyWeightAverage.dashboardHasAvg, true, "Expected Today body weight card to include 7d avg label.");
+assert.strictEqual(bodyWeightAverage.trendsHasOverlay, true, "Expected Trends body weight chart to include average overlay.");
 
 const mobileQolMarkup = runScenario(`
   ${reset}

@@ -145,6 +145,38 @@ assert(coverage.regions.includes("push") && coverage.regions.includes("pull") &&
 assert(coverage.noteTitle.includes("Today's Plan"), `Expected Coach note to summarize Today's Plan, got ${coverage.noteTitle}`);
 assert(coverage.noteBody.includes(`${coverage.total}/60`), `Expected Coach note to use active plan estimate, got ${coverage.noteBody}`);
 
+const coachExerciseSequencing = runScenario(`
+  ${resetAndHelpers}
+  state.settings.customExercises = [
+    { id: "curl", name: "Bicep Curl", primaryMuscles: ["biceps"], secondaryMuscles: [], equipment: "dumbbells", reps: "8-15", rest: "60 sec", cue: "Curl.", userCreated: true },
+    { id: "hammer", name: "Hammer Curl", primaryMuscles: ["biceps"], secondaryMuscles: [], equipment: "dumbbells", reps: "8-15", rest: "60 sec", cue: "Hammer.", userCreated: true },
+    { id: "bench", name: "Bench Press", primaryMuscles: ["chest"], secondaryMuscles: ["triceps", "shoulders"], equipment: "barbell", reps: "6-12", rest: "120 sec", cue: "Bench.", userCreated: true },
+    { id: "row", name: "Cable Row", primaryMuscles: ["back"], secondaryMuscles: ["biceps"], equipment: "cable", reps: "8-15", rest: "90 sec", cue: "Row.", userCreated: true }
+  ];
+  var biceps = muscleGroups.find((muscle) => muscle.id === "biceps");
+  var chest = muscleGroups.find((muscle) => muscle.id === "chest");
+  var back = muscleGroups.find((muscle) => muscle.id === "back");
+  var items = [
+    { muscle: biceps, exercise: resolveExerciseMeta("Bicep Curl"), sets: 3, minutes: 6 },
+    { muscle: biceps, exercise: resolveExerciseMeta("Hammer Curl"), sets: 3, minutes: 6 },
+    { muscle: chest, exercise: resolveExerciseMeta("Bench Press"), sets: 3, minutes: 9 },
+    { muscle: back, exercise: resolveExerciseMeta("Cable Row"), sets: 3, minutes: 8 }
+  ];
+  var ordered = orderCoachSessionItems(items);
+  ({
+    names: ordered.map((item) => item.exercise.name),
+    firstType: exercisePlanType(ordered[0].exercise),
+    adjacentSamePrimary: ordered.some((item, index) => index > 0 && item.muscle.id === ordered[index - 1].muscle.id),
+    setTotal: ordered.reduce((sum, item) => sum + item.sets, 0),
+    minuteTotal: ordered.reduce((sum, item) => sum + item.minutes, 0)
+  });
+`);
+
+assert.strictEqual(coachExerciseSequencing.firstType, "compound", `Expected first ordered Coach exercise to be compound, got ${coachExerciseSequencing.firstType}: ${coachExerciseSequencing.names.join(", ")}`);
+assert.strictEqual(coachExerciseSequencing.adjacentSamePrimary, false, `Expected Coach sequencing to gap repeated muscles, got ${coachExerciseSequencing.names.join(", ")}`);
+assert.strictEqual(coachExerciseSequencing.setTotal, 12, `Expected Coach ordering not to change sets, got ${coachExerciseSequencing.setTotal}`);
+assert.strictEqual(coachExerciseSequencing.minuteTotal, 29, `Expected Coach ordering not to change minutes, got ${coachExerciseSequencing.minuteTotal}`);
+
 const mondayWeekBoundary = runScenario(`
   ${resetAndHelpers}
   var RealDate = Date;

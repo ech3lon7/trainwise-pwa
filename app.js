@@ -3,7 +3,7 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 2;
 const STORES = ["workouts", "metrics", "settings"];
-const APP_VERSION = "1.5.39";
+const APP_VERSION = "1.5.40";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 const DRAFT_RECOVERY_KEY = "trainwise-draft-recovery-v1";
 const COPIED_COACH_PLAN_KEY = "trainwise-copied-coach-plan-v1";
@@ -2002,6 +2002,47 @@ function estimateExerciseMinutes(exercise, sets) {
   return Math.ceil(3 + sets * perSetMinutes);
 }
 
+function exercisePlanType(exercise = {}) {
+  const primaryCount = (exercise.primaryMuscles || []).length;
+  const secondaryCount = (exercise.secondaryMuscles || []).length;
+  return primaryCount > 1 || secondaryCount > 0 ? "compound" : "isolation";
+}
+
+function coachItemPrimaryMuscle(item = {}) {
+  return item.muscle?.id || item.exercise?.primaryMuscles?.[0] || "";
+}
+
+function orderCoachSessionItems(items = []) {
+  const remaining = items.map((item, index) => ({ item, index }));
+  const ordered = [];
+
+  while (remaining.length) {
+    const lastMuscle = coachItemPrimaryMuscle(ordered[ordered.length - 1]);
+    const canGap = remaining.some(({ item }) => coachItemPrimaryMuscle(item) !== lastMuscle);
+    const muscleCounts = remaining.reduce((counts, { item }) => {
+      const muscle = coachItemPrimaryMuscle(item);
+      counts.set(muscle, (counts.get(muscle) || 0) + 1);
+      return counts;
+    }, new Map());
+
+    const [next] = remaining
+      .map((entry) => {
+        const muscle = coachItemPrimaryMuscle(entry.item);
+        const targetPenalty = isCoachTargetMuscle(muscle) ? 0 : 20;
+        const sameMusclePenalty = canGap && muscle === lastMuscle ? 100 : 0;
+        const spacingPriority = muscleCounts.get(muscle) > 1 && ordered.length ? -2 : 0;
+        const typeRank = exercisePlanType(entry.item.exercise) === "compound" ? 0 : 1;
+        return { ...entry, rank: targetPenalty + sameMusclePenalty + spacingPriority + typeRank };
+      })
+      .sort((a, b) => a.rank - b.rank || a.index - b.index);
+
+    ordered.push(next.item);
+    remaining.splice(remaining.findIndex((entry) => entry.index === next.index), 1);
+  }
+
+  return ordered;
+}
+
 function averageRestSecondsForExercise(exercise) {
   const values = exerciseHistoryForDefinition(exercise)
     .map(averageRestSeconds)
@@ -2739,9 +2780,10 @@ function buildSessionPlan(limitMinutes = SESSION_LIMIT_MINUTES, options = {}) {
       }
       return { muscle: target, reason };
     });
+  const orderedItems = orderCoachSessionItems(items);
 
   return {
-    items: items.map((item) => ({ ...item, reason: planPriorityReason(item) })),
+    items: orderedItems.map((item) => ({ ...item, reason: planPriorityReason(item) })),
     missing,
     deprioritized,
     targetLimitations,
@@ -2946,6 +2988,20 @@ function seriesFromMetrics(field) {
     }));
 }
 
+function rollingAverageSeries(points = [], windowSize = 7) {
+  if (points.length < 2) return [];
+  return points.map((point, index) => {
+    const window = points.slice(Math.max(0, index - windowSize + 1), index + 1);
+    const value = window.reduce((sum, item) => sum + item.value, 0) / window.length;
+    return { label: point.label, value };
+  });
+}
+
+function latestRollingAverage(points = [], windowSize = 7) {
+  const series = rollingAverageSeries(points, windowSize);
+  return series.length ? series[series.length - 1].value : 0;
+}
+
 function aggregateByDate(entries, valueForEntry) {
   const byDate = new Map();
   for (const entry of entries) {
@@ -2978,24 +3034,33 @@ function chartReadout(point, unit) {
   return `${point.label}: ${fmt(point.value, 1)}${unit}`;
 }
 
-function lineChart(points, color = "#35d58c", unit = "") {
+function lineChart(points, color = "#35d58c", unit = "", options = {}) {
   if (!points.length) {
     return `<div class="empty">No data yet. Your chart will appear after the first few logs.</div>`;
   }
+  const comparisonPoints = Array.isArray(options.comparisonPoints) ? options.comparisonPoints : [];
+  const comparisonColor = options.comparisonColor || "rgba(255,255,255,0.68)";
 
   const chartPoints = points.length > 1 ? points : [
     { label: points[0].label, value: points[0].value - 1, hidden: true },
     points[0]
   ];
-  const min = Math.min(...chartPoints.map((point) => point.value));
-  const max = Math.max(...chartPoints.map((point) => point.value));
+  const rangePoints = [...chartPoints, ...comparisonPoints];
+  const min = Math.min(...rangePoints.map((point) => point.value));
+  const max = Math.max(...rangePoints.map((point) => point.value));
   const range = max - min || 1;
   const coords = chartPoints.map((point, index) => {
     const x = 8 + (index / Math.max(chartPoints.length - 1, 1)) * 84;
     const y = 84 - ((point.value - min) / range) * 68;
     return { x, y, ...point };
   });
+  const comparisonCoords = comparisonPoints.map((point, index) => {
+    const x = 8 + (index / Math.max(comparisonPoints.length - 1, 1)) * 84;
+    const y = 84 - ((point.value - min) / range) * 68;
+    return { x, y, ...point };
+  });
   const polyline = coords.map((point) => `${point.x},${point.y}`).join(" ");
+  const comparisonPolyline = comparisonCoords.map((point) => `${point.x},${point.y}`).join(" ");
   const area = `8,92 ${polyline} 92,92`;
   const visibleCoords = coords.filter((point) => !point.hidden);
   const last = visibleCoords[visibleCoords.length - 1];
@@ -3024,6 +3089,7 @@ function lineChart(points, color = "#35d58c", unit = "") {
           <line x1="8" y1="84" x2="92" y2="84" stroke="rgba(255,255,255,0.08)" stroke-width="0.4"></line>
           <polygon points="${area}" fill="url(#${gradientId})"></polygon>
           <polyline points="${polyline}" fill="none" stroke="${color}" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"></polyline>
+          ${comparisonPolyline ? `<polyline class="comparison-polyline" points="${comparisonPolyline}" fill="none" stroke="${escapeHtml(comparisonColor)}" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="3 2"></polyline>` : ""}
           ${visibleCoords.map((point) => `<circle cx="${point.x}" cy="${point.y}" r="1.7" fill="${color}"></circle>`).join("")}
         </svg>
         <div class="chart-marker" style="left:${last.x}%; top:${last.y}%"></div>
@@ -3159,6 +3225,9 @@ function recommendations(todayPlan = null) {
 function renderDashboard() {
   const weeklyVolume = getWeeklyVolume();
   const bodyWeight = lastMetric("bodyWeight")?.bodyWeight || 0;
+  const bodyWeightSeries = seriesFromMetrics("bodyWeight");
+  const bodyWeightAverage = latestRollingAverage(bodyWeightSeries, 7);
+  const bodyWeightAverageSeries = rollingAverageSeries(bodyWeightSeries, 7);
   const proteinAvg = getAverage("protein", 7);
   const protein = proteinTargets();
   const health = healthCoachSummary();
@@ -3207,8 +3276,8 @@ function renderDashboard() {
     `,
     bodyWeight: `
       <details class="section chart-panel dashboard-widget collapsible-panel dashboard-bodyWeight-panel" data-dashboard-widget="bodyWeight" open>
-        <summary><span>Body weight</span><small>${bodyWeight ? "logged" : "preview"}</small></summary>
-        ${lineChart(seriesFromMetrics("bodyWeight").length ? seriesFromMetrics("bodyWeight") : previewSeries("bodyWeight"), "#f2d06b", " lb")}
+        <summary><span>Body weight</span><small>${bodyWeight ? `${fmt(bodyWeight, 1)} lb${bodyWeightAverage ? ` - ${fmt(bodyWeightAverage, 1)} 7d avg` : ""}` : "preview"}</small></summary>
+        ${lineChart(bodyWeightSeries.length ? bodyWeightSeries : previewSeries("bodyWeight"), "#f2d06b", " lb", { comparisonPoints: bodyWeightAverageSeries, comparisonColor: "rgba(255,255,255,0.62)" })}
       </details>
     `,
     protein: `
@@ -4156,9 +4225,9 @@ function renderExercises() {
 
     ${exerciseCoverageMarkup()}
 
-    <details class="section form-panel collapsible-panel exercise-form-panel" open>
+    <details class="section form-panel collapsible-panel exercise-form-panel ${editing ? "is-editing" : ""}" data-edit-focus-target open>
       <summary><span>${editing ? "Edit exercise" : "Add exercise"}</span><small>${editing ? escapeHtml(editing.name) : "custom movement"}</small></summary>
-      <form id="exercise-form">
+      <form id="exercise-form" data-edit-focus-target>
         <div class="field-row exercise-form-grid">
           <div class="field">
             <label for="exercise-name">Exercise name</label>
@@ -4654,6 +4723,9 @@ function renderTrends() {
   const muscleSetSeries = seriesFromMuscle(state.selectedMuscle, "sets");
   const muscleVolumeSeries = seriesFromMuscle(state.selectedMuscle, "volume");
   const health = healthCoachSummary();
+  const bodyWeightSeries = seriesFromMetrics("bodyWeight");
+  const bodyWeightAverageSeries = rollingAverageSeries(bodyWeightSeries, 7);
+  const bodyWeightAverage = latestRollingAverage(bodyWeightSeries, 7);
 
   return `
     <details class="section trend-section collapsible-panel muscle-trends-panel" open>
@@ -4715,8 +4787,8 @@ function renderTrends() {
       ${healthCoachStatMarkup(health)}
       <div class="grid two">
         <div class="chart-panel">
-          <div class="chart-header"><h3>Body weight</h3><span class="muted small">daily weight</span></div>
-          ${lineChart(seriesFromMetrics("bodyWeight"), "#f2d06b", " lb")}
+          <div class="chart-header"><h3>Body weight</h3><span class="muted small">${bodyWeightAverage ? `${fmt(bodyWeightAverage, 1)} lb 7d avg` : "daily weight"}</span></div>
+          ${lineChart(bodyWeightSeries, "#f2d06b", " lb", { comparisonPoints: bodyWeightAverageSeries, comparisonColor: "rgba(255,255,255,0.62)" })}
         </div>
         <div class="chart-panel">
           <div class="chart-header"><h3>Protein</h3><span class="muted small">daily grams</span></div>
@@ -5295,6 +5367,15 @@ async function flashSelection(target) {
   if (!element) return;
   element.classList.add("is-selecting");
   await sleep(90);
+}
+
+function focusExerciseEditForm() {
+  const target = document.querySelector("[data-edit-focus-target]");
+  const input = document.getElementById("exercise-name");
+  target?.scrollIntoView?.({ behavior: "smooth", block: "start" });
+  target?.classList?.add?.("is-selecting");
+  input?.focus?.();
+  input?.select?.();
 }
 
 async function render({ animate = false } = {}) {
@@ -6666,6 +6747,7 @@ async function handleAction(action, target) {
       state.exerciseFormErrors = {};
       state.openExerciseActionMenu = null;
       await render();
+      focusExerciseEditForm();
     },
     async "cancel-exercise-edit"() {
       state.editingExerciseId = null;
