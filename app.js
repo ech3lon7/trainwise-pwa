@@ -3,7 +3,7 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 2;
 const STORES = ["workouts", "metrics", "settings"];
-const APP_VERSION = "1.5.40";
+const APP_VERSION = "1.5.42";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 const DRAFT_RECOVERY_KEY = "trainwise-draft-recovery-v1";
 const COPIED_COACH_PLAN_KEY = "trainwise-copied-coach-plan-v1";
@@ -143,6 +143,7 @@ const state = {
   historyExercise: "",
   historySearch: "",
   historyDate: "",
+  weeklyMuscleDetail: null,
   coachTimeframeMinutes: SESSION_LIMIT_MINUTES,
   coachGlobalGrowthMode: "medium",
   coachTargetMuscles: [],
@@ -836,6 +837,43 @@ function normalizeSetRows(rows) {
   return cleaned.length ? cleaned : [{ weight: 0, reps: 10, rir: 2, restSeconds: null }];
 }
 
+function copiedRowSnapshot(row = {}) {
+  const normalized = normalizeSetRows([row])[0];
+  return {
+    weight: normalized.weight,
+    reps: normalized.reps,
+    rir: normalized.rir,
+    restSeconds: normalized.restSeconds
+  };
+}
+
+function copiedRowMatches(row = {}, snapshot = {}) {
+  const current = copiedRowSnapshot(row);
+  return current.weight === Number(snapshot.weight)
+    && current.reps === Number(snapshot.reps)
+    && current.rir === (snapshot.rir === null || snapshot.rir === undefined ? null : Number(snapshot.rir))
+    && current.restSeconds === (snapshot.restSeconds === null || snapshot.restSeconds === undefined ? null : Number(snapshot.restSeconds));
+}
+
+function isCoachCopiedRowUnchanged(draft = {}, row = {}, index = 0) {
+  if (!Array.isArray(draft.coachCopiedRows) || !draft.coachCopiedRows[index]) return false;
+  if ((draft.coachCopiedDirtyRows || []).includes(index)) return false;
+  return copiedRowMatches(row, draft.coachCopiedRows[index]);
+}
+
+function clearCoachCopiedDraftMarkers(draft = {}) {
+  delete draft.coachCopiedRows;
+  delete draft.coachCopiedDirtyRows;
+}
+
+function markCoachCopiedRowDirty(draftId, index) {
+  const draft = state.workoutDraft.find((item) => item.draftId === draftId);
+  if (!draft || !Array.isArray(draft.coachCopiedRows)) return;
+  const rowIndex = Number(index);
+  if (!Number.isFinite(rowIndex)) return;
+  draft.coachCopiedDirtyRows = [...new Set([...(draft.coachCopiedDirtyRows || []), rowIndex])];
+}
+
 function clampRirValue(value) {
   return Math.min(RIR_MAX, Math.max(RIR_MIN, Math.round(parseNum(value))));
 }
@@ -1451,6 +1489,48 @@ function muscleSetStats(workouts = weeklyWorkouts()) {
       deficit: Math.max(0, HYPERTROPHY.minimumSets - sets)
     };
   }).map((stat) => ({ ...stat, highRir, unknown }));
+}
+
+function weeklyMuscleContributionRows(muscleId) {
+  return weeklyWorkouts()
+    .map((workout) => {
+      const factor = muscleCreditFactor(workout, muscleId);
+      if (!factor) return null;
+      const rows = setRowsFromWorkout(workout).map((row, index) => {
+        const hardSet = rowEffortMultiplier(row);
+        return {
+          ...row,
+          index,
+          hardSet,
+          creditedSets: hardSet * factor
+        };
+      });
+      const meta = workoutMeta(workout);
+      const role = (meta.primaryMuscles || []).includes(muscleId) ? "primary" : "secondary";
+      const rawSets = rows.reduce((sum, row) => sum + row.hardSet, 0);
+      const creditedSets = rows.reduce((sum, row) => sum + row.creditedSets, 0);
+      return {
+        workout,
+        role,
+        factor,
+        rows,
+        rawSets,
+        creditedSets,
+        volume: workoutVolume(workout),
+        avgRir: averageRir(workout)
+      };
+    })
+    .filter(Boolean)
+    .sort((a, b) => a.workout.date.localeCompare(b.workout.date) || (a.workout.order || 0) - (b.workout.order || 0));
+}
+
+function weeklyMuscleDetailSummary(muscleId) {
+  const muscle = muscleGroups.find((item) => item.id === muscleId) || muscleGroups[0];
+  const entries = weeklyMuscleContributionRows(muscle.id);
+  const primarySets = entries.filter((entry) => entry.role === "primary").reduce((sum, entry) => sum + entry.creditedSets, 0);
+  const secondarySets = entries.filter((entry) => entry.role === "secondary").reduce((sum, entry) => sum + entry.creditedSets, 0);
+  const totalSets = primarySets + secondarySets;
+  return { muscle, entries, primarySets, secondarySets, totalSets };
 }
 
 function setZone(sets) {
@@ -3102,7 +3182,7 @@ function lineChart(points, color = "#35d58c", unit = "", options = {}) {
 
 function muscleProgressMarkup(stats = muscleSetStats(), compact = false) {
   const rows = stats.map((stat) => `
-    <div class="muscle-card ${stat.zone.tone}">
+    <button class="muscle-card ${stat.zone.tone}" type="button" data-action="open-weekly-muscle-detail" data-muscle="${escapeHtml(stat.id)}">
       <div class="muscle-card-top">
         <strong>${escapeHtml(stat.label)}</strong>
         <span>${fmt(stat.sets, 1)}/${HYPERTROPHY.growthHigh}</span>
@@ -3112,9 +3192,70 @@ function muscleProgressMarkup(stats = muscleSetStats(), compact = false) {
         <span>${escapeHtml(stat.zone.label)}</span>
         <span>${stat.sessions}/2 touches</span>
       </div>
-    </div>
+    </button>
   `).join("");
   return `<div class="muscle-grid ${compact ? "compact" : ""}">${rows}</div>`;
+}
+
+function weeklyMuscleDetailScreen(detail = state.weeklyMuscleDetail) {
+  const summary = weeklyMuscleDetailSummary(detail?.muscleId || "chest");
+  const entriesMarkup = summary.entries.length ? summary.entries.map((entry) => {
+    const setRows = entry.rows.map((row) => `
+      <tr>
+        <td>${row.index + 1}</td>
+        <td>${fmt(row.weight, 1)}</td>
+        <td>${fmt(row.reps)}</td>
+        <td>${row.rir === null ? "--" : fmt(row.rir, 1)}</td>
+        <td>${escapeHtml(restInputValue(row.restSeconds) || "--")}</td>
+        <td>${fmt(row.creditedSets, 1)}</td>
+      </tr>
+    `).join("");
+    return `
+      <section class="weekly-muscle-entry">
+        <div class="weekly-muscle-entry-top">
+          <div>
+            <strong>${escapeHtml(entry.workout.exercise)}</strong>
+            <span class="muted small">${escapeHtml(formatShortDate(entry.workout.date))} - ${entry.role} ${fmt(entry.factor, 1)}x stimulus</span>
+          </div>
+          <span class="exercise-status-pill ${entry.role === "primary" ? "active" : "archived"}">${fmt(entry.creditedSets, 1)} sets</span>
+        </div>
+        <div class="action-grid weekly-muscle-stats">
+          <div><strong>${fmt(entry.rawSets, 1)}</strong><small>raw hard sets</small></div>
+          <div><strong>${fmt(entry.volume)}</strong><small>load volume</small></div>
+          <div><strong>${escapeHtml(bestSetLabel(entry.workout))}</strong><small>best set</small></div>
+          <div><strong>${entry.avgRir === null ? "--" : fmt(entry.avgRir, 1)}</strong><small>avg RIR</small></div>
+        </div>
+        <div class="set-table-wrap weekly-muscle-set-wrap">
+          <table class="weekly-set-table">
+            <thead>
+              <tr><th>Set</th><th>lbs</th><th>Reps</th><th>RIR</th><th>Rest</th><th>Credit</th></tr>
+            </thead>
+            <tbody>${setRows}</tbody>
+          </table>
+        </div>
+      </section>
+    `;
+  }).join("") : `
+    <div class="empty compact-empty">No ${escapeHtml(summary.muscle.label)} work has been logged in this Monday-start week.</div>
+  `;
+  return `
+    <section class="hero weekly-muscle-detail-hero">
+      <div>
+        <p class="eyebrow">Weekly set detail</p>
+        <h2 class="hero-title">${escapeHtml(summary.muscle.label)}</h2>
+        <p class="hero-copy">Monday-start week credits primary work at 1.0x and secondary work at 0.5x, with existing RIR hard-set discounts.</p>
+      </div>
+      <button class="ghost-button" type="button" data-action="close-weekly-muscle-detail">Back</button>
+    </section>
+    <section class="section weekly-muscle-summary">
+      <div class="grid three">
+        <div class="stat"><span class="label">Total</span><span class="value">${fmt(summary.totalSets, 1)}</span><span class="hint">credited sets</span></div>
+        <div class="stat"><span class="label">Primary</span><span class="value">${fmt(summary.primarySets, 1)}</span><span class="hint">direct work</span></div>
+        <div class="stat"><span class="label">Secondary</span><span class="value">${fmt(summary.secondarySets, 1)}</span><span class="hint">support work</span></div>
+      </div>
+    </section>
+    <section class="weekly-muscle-entry-list">${entriesMarkup}</section>
+  `;
 }
 
 function topUnderTargetMuscles(limit = 4) {
@@ -3223,6 +3364,7 @@ function recommendations(todayPlan = null) {
 }
 
 function renderDashboard() {
+  if (state.weeklyMuscleDetail?.returnTab === "dashboard") return weeklyMuscleDetailScreen();
   const weeklyVolume = getWeeklyVolume();
   const bodyWeight = lastMetric("bodyWeight")?.bodyWeight || 0;
   const bodyWeightSeries = seriesFromMetrics("bodyWeight");
@@ -3512,6 +3654,8 @@ function readWorkoutDraftFromForm() {
         rir: row.querySelector('[data-set-field="rir"]')?.value,
         rest: row.querySelector('[data-set-field="rest"]')?.value
       }))),
+      coachCopiedRows: existing.coachCopiedRows,
+      coachCopiedDirtyRows: existing.coachCopiedDirtyRows,
       order: index
     };
   });
@@ -3675,14 +3819,19 @@ function copyCoachPlanToLog(plan = buildTodayPlan(selectedCoachTimeframeMinutes(
   state.copiedCoachPlan = copiedCoachPlanSnapshot(plan);
   persistCopiedCoachPlan(state.copiedCoachPlan);
   state.previewNextCoachPlan = false;
-  state.workoutDraft = items.map((item) => ({
-    draftId: uid(),
-    editingWorkoutId: null,
-    exercise: item.exercise.name,
-    targetMuscle: item.muscle.id,
-    notes: `Coach plan: ${item.reason}${item.growthMode ? ` ${coachGrowthModeLabel(item.growthMode)} mode.` : ""}${item.planTarget ? ` ${item.planTarget.label}.` : ""}`,
-    setRows: plannedSetRowsFromPreviousSession(item.exercise, item.sets, item.planTarget)
-  }));
+  state.workoutDraft = items.map((item) => {
+    const setRows = plannedSetRowsFromPreviousSession(item.exercise, item.sets, item.planTarget);
+    return {
+      draftId: uid(),
+      editingWorkoutId: null,
+      exercise: item.exercise.name,
+      targetMuscle: item.muscle.id,
+      notes: `Coach plan: ${item.reason}${item.growthMode ? ` ${coachGrowthModeLabel(item.growthMode)} mode.` : ""}${item.planTarget ? ` ${item.planTarget.label}.` : ""}`,
+      setRows,
+      coachCopiedRows: setRows.map(copiedRowSnapshot),
+      coachCopiedDirtyRows: []
+    };
+  });
   state.templateQueue = state.workoutDraft.map((draft) => ({
     exercise: draft.exercise,
     targetMuscle: draft.targetMuscle,
@@ -3825,8 +3974,9 @@ function renderSetRows(draft = draftExerciseFromState()) {
   return rows.map((row, index) => {
     const previousLabel = previousSetLabel(draft.exercise, index, draft.editingWorkoutId);
     const rirValue = clampRirValue(row.rir ?? 2);
+    const copiedClass = isCoachCopiedRowUnchanged(draft, row, index) ? " coach-copied-row" : "";
     return `
-    <tr class="set-row" data-index="${index}">
+    <tr class="set-row${copiedClass}" data-index="${index}">
       <td class="mobile-set-meta" colspan="7">
         <span class="mobile-set-type"><span class="set-number">${index + 1}</span><strong>Set</strong>${setRecordTrophySlot(draft, row, index, recordStats)}</span>
         <span class="mobile-prev-label">Prev ${escapeHtml(previousLabel)}</span>
@@ -4097,7 +4247,7 @@ function exerciseCardActions(exercise, editable = false) {
   if (!editable) return "";
   const archived = !!exercise.archivedAt;
   const removalMode = exerciseRemovalMode(exercise);
-  const secondary = archived
+  const actions = archived
     ? `
       <button class="ghost-mini" type="button" data-action="restore-exercise" data-id="${escapeHtml(exercise.id)}">Restore</button>
       ${removalMode === "delete" ? `<button class="delete-small text-delete" type="button" data-action="delete-exercise" data-id="${escapeHtml(exercise.id)}">Delete</button>` : ""}
@@ -4108,15 +4258,10 @@ function exerciseCardActions(exercise, editable = false) {
       <button class="ghost-mini" type="button" data-action="open-exercise-history-global" data-exercise="${escapeHtml(exercise.name)}">History</button>
       <button class="ghost-mini" type="button" data-action="archive-exercise" data-id="${escapeHtml(exercise.id)}">${removalMode === "archive" ? "Archive" : "Delete"}</button>
     `;
-  const menuOpen = state.openExerciseActionMenu === exercise.id;
   return `
     <div class="row-actions exercise-card-actions">
       ${archived ? "" : `<button class="ghost-mini primary-card-action" type="button" data-action="log-exercise" data-exercise="${escapeHtml(exercise.name)}">Log</button>`}
-      <div class="exercise-secondary-actions">${secondary}</div>
-      <div class="exercise-action-menu-wrap">
-        <button class="icon-button" type="button" aria-label="Exercise actions" data-action="toggle-exercise-action-menu" data-id="${escapeHtml(exercise.id)}">...</button>
-        ${menuOpen ? `<div class="exercise-action-menu">${secondary}</div>` : ""}
-      </div>
+      <div class="exercise-secondary-actions">${actions}</div>
     </div>
   `;
 }
@@ -5006,6 +5151,7 @@ function renderCopiedCoachPlan() {
 }
 
 function renderCoach() {
+  if (state.weeklyMuscleDetail?.returnTab === "coach") return weeklyMuscleDetailScreen();
   const timeframeMinutes = selectedCoachTimeframeMinutes();
   const todayPlan = buildTodayPlan(timeframeMinutes);
   const recs = recommendations(todayPlan);
@@ -6478,6 +6624,20 @@ async function applySharedDateInput(input) {
   }
 }
 
+function applyStrengthTodayShortcut() {
+  if (state.logMode !== "strength") return false;
+  readDraftFromForm();
+  const hasSavedWorkoutDraft = (state.workoutDraft || []).some((draft) => draft.editingWorkoutId);
+  if (hasSavedWorkoutDraft || state.editingWorkoutId) return false;
+  const hasMeaningfulDraft = (state.workoutDraft || []).some((draft) => !draft.editingWorkoutId && draftHasMeaningfulWorkoutInput(draft));
+  if (!hasMeaningfulDraft) return false;
+  state.draftDate = todayISO();
+  state.loadedWorkoutDateIds = [];
+  syncLegacyDraftFromFirst();
+  saveDraftRecovery("date-today");
+  return true;
+}
+
 function applyLogModeSwitch(nextMode) {
   if (nextMode === "metrics") {
     const date = state.draftDate || state.metricDate || todayISO();
@@ -6562,6 +6722,12 @@ async function handleAction(action, target) {
     async "date-today"() {
       const input = document.getElementById(target.dataset.dateInput);
       if (!input) return;
+      if (input.id === "workout-date" && state.logMode === "strength") {
+        if (applyStrengthTodayShortcut()) {
+          await render();
+          return;
+        }
+      }
       input.value = todayISO();
       await applySharedDateInput(input);
     },
@@ -6616,6 +6782,16 @@ async function handleAction(action, target) {
     },
     async "history-set-mode"() {
       state.historyMode = target.dataset.historyMode === "dates" ? "dates" : "exercises";
+      await render({ animate: true });
+    },
+    async "open-weekly-muscle-detail"() {
+      const muscleId = target.dataset.muscle || "";
+      if (!muscleGroups.some((muscle) => muscle.id === muscleId)) return;
+      state.weeklyMuscleDetail = { muscleId, returnTab: state.activeTab };
+      await render({ animate: true });
+    },
+    async "close-weekly-muscle-detail"() {
+      state.weeklyMuscleDetail = null;
       await render({ animate: true });
     },
     async "history-date-chip"() {
@@ -6869,6 +7045,7 @@ async function handleAction(action, target) {
       const draft = state.workoutDraft.find((item) => item.draftId === target.dataset.draftId) || state.workoutDraft[0];
       const last = draft.setRows[draft.setRows.length - 1] || { weight: "", reps: 10, rir: 2 };
       draft.setRows.push({ ...last });
+      clearCoachCopiedDraftMarkers(draft);
       syncLegacyDraftFromFirst();
       await render();
     },
@@ -6877,11 +7054,14 @@ async function handleAction(action, target) {
       const index = Number(target.dataset.index);
       const draft = state.workoutDraft.find((item) => item.draftId === target.dataset.draftId) || state.workoutDraft[0];
       if (draft.setRows.length > 1) draft.setRows.splice(index, 1);
+      clearCoachCopiedDraftMarkers(draft);
       syncLegacyDraftFromFirst();
       await render();
     },
     async "decrement-rir"() {
       readDraftFromForm();
+      markCoachCopiedRowDirty(target.dataset.draftId, target.dataset.index);
+      target.closest(".set-row")?.classList.remove("coach-copied-row");
       const value = updateDraftRowRir(target.dataset.draftId, target.dataset.index, -1);
       if (value === null) return;
       syncLegacyDraftFromFirst();
@@ -6897,6 +7077,8 @@ async function handleAction(action, target) {
     },
     async "increment-rir"() {
       readDraftFromForm();
+      markCoachCopiedRowDirty(target.dataset.draftId, target.dataset.index);
+      target.closest(".set-row")?.classList.remove("coach-copied-row");
       const value = updateDraftRowRir(target.dataset.draftId, target.dataset.index, 1);
       if (value === null) return;
       syncLegacyDraftFromFirst();
@@ -6917,6 +7099,7 @@ async function handleAction(action, target) {
       if (!last) throw new Error("No previous session for this exercise yet.");
       draft.setRows = setRowsFromWorkout(last);
       draft.notes = last.notes || draft.notes;
+      clearCoachCopiedDraftMarkers(draft);
       syncLegacyDraftFromFirst();
       await render();
       toast("Last session loaded.");
@@ -7174,6 +7357,7 @@ document.addEventListener("click", async (event) => {
     if (tab) {
       if (tab.dataset.tab !== state.activeTab) preserveVisibleDraft("tab-change");
       state.activeTab = tab.dataset.tab;
+      state.weeklyMuscleDetail = null;
       await render({ animate: true });
     }
     if (logMode) {
@@ -7201,6 +7385,7 @@ document.addEventListener("change", async (event) => {
       if (draft) {
         const meta = resolveExerciseMeta(draft.exercise, draft.targetMuscle);
         draft.targetMuscle = meta.primaryMuscles[0] || draft.targetMuscle || "chest";
+        clearCoachCopiedDraftMarkers(draft);
       }
       syncLegacyDraftFromFirst();
       saveDraftRecovery("strength-change");
@@ -7249,6 +7434,8 @@ document.addEventListener("input", async (event) => {
     }
     if (event.target.matches("[data-set-field]")) {
       const section = event.target.closest(".exercise-draft");
+      if (section?.dataset.draftId) markCoachCopiedRowDirty(section.dataset.draftId, event.target.closest(".set-row")?.dataset.index);
+      event.target.closest(".set-row")?.classList.remove("coach-copied-row");
       readDraftFromForm();
       if (saveDraftRecovery("strength-input")) {
         showLogDraftNotice();

@@ -1335,9 +1335,14 @@ textarea {
   display: grid;
   gap: 8px;
   min-height: 86px;
+  width: 100%;
   padding: 10px;
+  border: 0;
   border-radius: 8px;
   background: rgba(255, 255, 255, 0.035);
+  color: inherit;
+  font: inherit;
+  text-align: left;
   transition: background 0.2s ease, transform 0.18s ease;
 }
 
@@ -1387,6 +1392,63 @@ textarea {
 .muscle-card-meta {
   color: var(--muted);
   font-size: 11px;
+}
+
+.weekly-muscle-detail-hero {
+  align-items: flex-start;
+}
+
+.weekly-muscle-summary {
+  border-color: rgba(53, 213, 140, 0.18);
+}
+
+.weekly-muscle-entry-list {
+  display: grid;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.weekly-muscle-entry {
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.weekly-muscle-entry-top {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+  margin-bottom: 12px;
+}
+
+.weekly-muscle-stats {
+  margin-bottom: 12px;
+}
+
+.weekly-muscle-set-wrap {
+  overflow-x: auto;
+}
+
+.weekly-set-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.weekly-set-table th,
+.weekly-set-table td {
+  padding: 8px 6px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+  color: var(--text);
+  font-size: 13px;
+  text-align: center;
+}
+
+.weekly-set-table th {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
 }
 
 .progress-bar {
@@ -1840,6 +1902,22 @@ textarea {
 
 .mobile-set-meta {
   display: none;
+}
+
+.set-row.coach-copied-row,
+.set-row.coach-copied-row input,
+.set-row.coach-copied-row .rir-stepper-btn,
+.set-row.coach-copied-row .rir-stepper-input,
+.set-row.coach-copied-row .delete-set-btn {
+  background: rgba(242, 208, 107, 0.1);
+  border-color: rgba(242, 208, 107, 0.34);
+  box-shadow: inset 0 0 0 1px rgba(242, 208, 107, 0.08);
+}
+
+.set-row.coach-copied-row .mobile-set-meta,
+.set-row.coach-copied-row .set-type,
+.set-row.coach-copied-row .prev-cell {
+  color: #f2d06b;
 }
 
 .set-type {
@@ -2392,6 +2470,7 @@ textarea {
 .exercise-card-actions {
   position: relative;
   justify-content: flex-end;
+  width: 100%;
 }
 
 .exercise-secondary-actions {
@@ -2399,6 +2478,12 @@ textarea {
   gap: 6px;
   flex-wrap: wrap;
   justify-content: flex-end;
+}
+
+.exercise-card-actions .ghost-mini,
+.exercise-card-actions .delete-small {
+  min-height: 34px;
+  white-space: nowrap;
 }
 
 .exercise-action-menu-wrap {
@@ -3046,11 +3131,9 @@ textarea {
   }
 
   .exercise-secondary-actions {
-    display: none;
-  }
-
-  .exercise-action-menu-wrap {
-    display: block;
+    display: flex;
+    width: 100%;
+    justify-content: flex-start;
   }
 
   .hero-title {
