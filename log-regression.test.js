@@ -23,11 +23,17 @@ const context = {
   Promise,
   setTimeout,
   clearTimeout,
+  requestAnimationFrame: (callback) => {
+    callback();
+    return 1;
+  },
   navigator: { storage: {} },
   localStorage: { getItem() { return null; }, setItem() {}, removeItem() {} },
   window: {
     clearTimeout,
     setTimeout,
+    scrollY: 0,
+    scrollTo() {},
     location: { reload() {} },
     matchMedia: () => ({ matches: false, addEventListener() {}, removeEventListener() {} })
   },
@@ -89,6 +95,7 @@ const reset = `
   state.workoutDraft = [];
   state.dismissedRecordTrophies = new Set();
   state.weeklyMuscleDetail = null;
+  state.returnStack = [];
   var makeWorkout = (overrides = {}) => ({
     id: overrides.id || "workout-" + Math.random(),
     date: overrides.date || "2026-06-10",
@@ -161,9 +168,9 @@ assert(!appCode.includes('selectedExercise: "Push-up"'), "Expected Log startup n
 assert(!appCode.includes('showBanner("Unsaved draft restored."'), "Expected startup draft recovery not to show a top banner.");
 assert(appCode.includes("notifyMetricSaved"), "Expected metrics saves to use a dedicated bottom-only notification helper.");
 assert(!stylesCode.includes(".mobile-quick-toggle"), "Expected floating quick action button styling to be removed.");
-assert(indexCode.includes("v=1.5.42"), "Expected index shell references to use bumped app version.");
+assert(indexCode.includes("v=1.5.43"), "Expected index shell references to use bumped app version.");
 assert(!indexCode.includes('id="app" class="app-content" aria-live'), "Expected broad app aria-live to be removed in favor of targeted live regions.");
-assert(serviceWorkerCode.includes("trainwise-cache-v64"), "Expected service worker cache version bump.");
+assert(serviceWorkerCode.includes("trainwise-cache-v65"), "Expected service worker cache version bump.");
 assert(appCode.includes("data-settings-panel"), "Expected Settings panels to preserve open state with stable panel ids.");
 assert(appCode.includes('forceSettingsPanelOpen("supabase-sync")'), "Expected Supabase actions to keep the Supabase panel open after rendering.");
 
@@ -1805,5 +1812,177 @@ assert.strictEqual(coachDebugReport.hasSubmitted, 1, `Expected Coach debug repor
 assert.strictEqual(coachDebugReport.hasDraftOnly, 1, `Expected Coach debug report to include draft-only entries separately, got ${coachDebugReport.hasDraftOnly}`);
 assert(appCode.includes('data-action="export-coach-debug"'), "Expected Settings to expose a Coach debug export action.");
 assert.strictEqual(coachDebugReport.hasSecret, false, "Expected Coach debug report to exclude Supabase secrets and sessions.");
+
+const returnStackWeeklyDetail = runScenario(`
+  ${reset}
+  state.activeTab = "coach";
+  window.scrollY = 642;
+  var context = pushReturnContext("weekly-muscle-detail", { sourceAction: "open-weekly-muscle-detail", muscleId: "abs" });
+  state.weeklyMuscleDetail = { muscleId: "abs", returnTab: "coach" };
+  ({
+    depth: state.returnStack.length,
+    kind: state.returnStack[0].kind,
+    activeTab: state.returnStack[0].activeTab,
+    scrollY: state.returnStack[0].scrollY,
+    muscleId: state.returnStack[0].muscleId,
+    contextScroll: context.scrollY
+  });
+`);
+
+assert.strictEqual(returnStackWeeklyDetail.depth, 1, "Expected opening weekly muscle detail to store one return context.");
+assert.strictEqual(returnStackWeeklyDetail.kind, "weekly-muscle-detail", `Expected weekly detail return kind, got ${returnStackWeeklyDetail.kind}`);
+assert.strictEqual(returnStackWeeklyDetail.activeTab, "coach", `Expected weekly detail source tab to be Coach, got ${returnStackWeeklyDetail.activeTab}`);
+assert.strictEqual(returnStackWeeklyDetail.scrollY, 642, `Expected weekly detail source scroll to be captured, got ${returnStackWeeklyDetail.scrollY}`);
+assert.strictEqual(returnStackWeeklyDetail.muscleId, "abs", `Expected weekly detail context to record muscle, got ${returnStackWeeklyDetail.muscleId}`);
+
+const returnStackWeeklyCloseRestores = runScenario(`
+  ${reset}
+  var restored = [];
+  window.scrollTo = (options) => restored.push(options);
+  state.activeTab = "coach";
+  state.weeklyMuscleDetail = { muscleId: "abs", returnTab: "coach" };
+  state.returnStack = [{
+    kind: "weekly-muscle-detail",
+    activeTab: "dashboard",
+    scrollY: 518,
+    historyMode: "exercises",
+    historyExercise: "",
+    historyDate: "",
+    logHistoryExercise: "",
+    weeklyMuscleDetail: null,
+    selectedExercise: "Bench Press",
+    selectedMuscle: "chest"
+  }];
+  var context = popReturnContext("weekly-muscle-detail");
+  restoreReturnViewContext(context);
+  state.weeklyMuscleDetail = null;
+  restoreScrollAfterRender(context.scrollY);
+  ({
+    activeTab: state.activeTab,
+    detail: state.weeklyMuscleDetail,
+    restoredTop: restored[0]?.top,
+    behavior: restored[0]?.behavior,
+    remaining: state.returnStack.length
+  });
+`);
+
+assert.strictEqual(returnStackWeeklyCloseRestores.activeTab, "dashboard", `Expected weekly detail back to restore source tab, got ${returnStackWeeklyCloseRestores.activeTab}`);
+assert.strictEqual(returnStackWeeklyCloseRestores.detail, null, "Expected weekly detail back to clear the detail screen.");
+assert.strictEqual(returnStackWeeklyCloseRestores.restoredTop, 518, `Expected weekly detail back to restore scroll, got ${returnStackWeeklyCloseRestores.restoredTop}`);
+assert.strictEqual(returnStackWeeklyCloseRestores.behavior, "auto", `Expected scroll restoration to be instant, got ${returnStackWeeklyCloseRestores.behavior}`);
+assert.strictEqual(returnStackWeeklyCloseRestores.remaining, 0, "Expected weekly detail return context to be popped.");
+
+const returnStackLogHistory = runScenario(`
+  ${reset}
+  var restored = [];
+  window.scrollTo = (options) => restored.push(options);
+  state.activeTab = "log";
+  state.logHistoryExercise = "Bench Press";
+  state.returnStack = [{
+    kind: "log-exercise-history",
+    activeTab: "log",
+    scrollY: 901,
+    historyMode: "exercises",
+    historyExercise: "",
+    historyDate: "",
+    logHistoryExercise: "",
+    weeklyMuscleDetail: null,
+    selectedExercise: "Bench Press",
+    selectedMuscle: "chest"
+  }];
+  var context = popReturnContext("log-exercise-history");
+  restoreReturnViewContext(context);
+  restoreScrollAfterRender(context.scrollY);
+  ({
+    activeTab: state.activeTab,
+    logHistoryExercise: state.logHistoryExercise,
+    restoredTop: restored[0]?.top
+  });
+`);
+
+assert.strictEqual(returnStackLogHistory.activeTab, "log", `Expected Log history back to restore Log tab, got ${returnStackLogHistory.activeTab}`);
+assert.strictEqual(returnStackLogHistory.logHistoryExercise, "", "Expected Log history back to clear temporary history screen.");
+assert.strictEqual(returnStackLogHistory.restoredTop, 901, `Expected Log history back to restore scroll, got ${returnStackLogHistory.restoredTop}`);
+
+const returnStackHistoryDetail = runScenario(`
+  ${reset}
+  var restored = [];
+  window.scrollTo = (options) => restored.push(options);
+  state.activeTab = "history";
+  state.historyMode = "exercises";
+  state.historyExercise = "Bench Press";
+  state.returnStack = [{
+    kind: "history-exercise-detail",
+    activeTab: "history",
+    scrollY: 734,
+    historyMode: "exercises",
+    historyExercise: "",
+    historyDate: "",
+    logHistoryExercise: "",
+    weeklyMuscleDetail: null,
+    selectedExercise: "Bench Press",
+    selectedMuscle: "chest"
+  }];
+  var context = popReturnContext("history-exercise-detail");
+  restoreReturnViewContext(context);
+  restoreScrollAfterRender(context.scrollY);
+  ({
+    activeTab: state.activeTab,
+    historyMode: state.historyMode,
+    historyExercise: state.historyExercise,
+    restoredTop: restored[0]?.top
+  });
+`);
+
+assert.strictEqual(returnStackHistoryDetail.activeTab, "history", `Expected History detail back to stay in History, got ${returnStackHistoryDetail.activeTab}`);
+assert.strictEqual(returnStackHistoryDetail.historyMode, "exercises", `Expected History detail back to restore exercise list mode, got ${returnStackHistoryDetail.historyMode}`);
+assert.strictEqual(returnStackHistoryDetail.historyExercise, "", "Expected History detail back to clear selected exercise.");
+assert.strictEqual(returnStackHistoryDetail.restoredTop, 734, `Expected History detail back to restore list scroll, got ${returnStackHistoryDetail.restoredTop}`);
+
+const returnStackGlobalHistoryRestoresSource = runScenario(`
+  ${reset}
+  var restored = [];
+  window.scrollTo = (options) => restored.push(options);
+  state.activeTab = "exercises";
+  window.scrollY = 477;
+  pushReturnContext("history-exercise-detail", { sourceAction: "open-exercise-history-global", exercise: "Bench Press" });
+  state.activeTab = "history";
+  state.historyMode = "exercises";
+  state.historyExercise = "Bench Press";
+  var context = popReturnContext("history-exercise-detail");
+  restoreReturnViewContext(context);
+  restoreScrollAfterRender(context.scrollY);
+  ({
+    activeTab: state.activeTab,
+    historyExercise: state.historyExercise,
+    sourceAction: context.sourceAction,
+    restoredTop: restored[0]?.top
+  });
+`);
+
+assert.strictEqual(returnStackGlobalHistoryRestoresSource.activeTab, "exercises", `Expected global History back to restore source Exercises tab, got ${returnStackGlobalHistoryRestoresSource.activeTab}`);
+assert.strictEqual(returnStackGlobalHistoryRestoresSource.historyExercise, "", "Expected global History back to restore the prior source state.");
+assert.strictEqual(returnStackGlobalHistoryRestoresSource.sourceAction, "open-exercise-history-global", `Expected global History context to preserve source action, got ${returnStackGlobalHistoryRestoresSource.sourceAction}`);
+assert.strictEqual(returnStackGlobalHistoryRestoresSource.restoredTop, 477, `Expected global History back to restore source scroll, got ${returnStackGlobalHistoryRestoresSource.restoredTop}`);
+
+const returnStackNormalTabClears = runScenario(`
+  ${reset}
+  state.returnStack = [{ kind: "history-exercise-detail", scrollY: 400 }];
+  clearReturnContexts();
+  state.returnStack.length;
+`);
+
+assert.strictEqual(returnStackNormalTabClears, 0, "Expected normal tab changes to clear stale return contexts.");
+
+const invalidScrollFallsBack = runScenario(`
+  ${reset}
+  var restored = [];
+  window.scrollTo = (options) => restored.push(options);
+  restoreScrollAfterRender(-20);
+  restoreScrollAfterRender("not-a-number");
+  restored.map((entry) => entry.top);
+`);
+
+assert.deepEqual(invalidScrollFallsBack, [0, 0], `Expected invalid saved scroll positions to fall back to top, got ${invalidScrollFallsBack.join(", ")}`);
 
 console.log("log regression tests passed");

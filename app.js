@@ -3,7 +3,7 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 2;
 const STORES = ["workouts", "metrics", "settings"];
-const APP_VERSION = "1.5.42";
+const APP_VERSION = "1.5.43";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 const DRAFT_RECOVERY_KEY = "trainwise-draft-recovery-v1";
 const COPIED_COACH_PLAN_KEY = "trainwise-copied-coach-plan-v1";
@@ -144,6 +144,7 @@ const state = {
   historySearch: "",
   historyDate: "",
   weeklyMuscleDetail: null,
+  returnStack: [],
   coachTimeframeMinutes: SESSION_LIMIT_MINUTES,
   coachGlobalGrowthMode: "medium",
   coachTargetMuscles: [],
@@ -5554,6 +5555,74 @@ async function render({ animate = false } = {}) {
   else updateScrollTopButton();
 }
 
+function validScrollY(value) {
+  const next = Number(value);
+  return Number.isFinite(next) && next >= 0 ? next : 0;
+}
+
+function currentScrollY() {
+  return validScrollY(window.scrollY ?? document.documentElement?.scrollTop ?? document.body?.scrollTop ?? 0);
+}
+
+function pushReturnContext(kind, extra = {}) {
+  const context = {
+    kind,
+    activeTab: state.activeTab,
+    scrollY: currentScrollY(),
+    historyMode: state.historyMode,
+    historyExercise: state.historyExercise,
+    historyDate: state.historyDate,
+    logHistoryExercise: state.logHistoryExercise,
+    weeklyMuscleDetail: state.weeklyMuscleDetail ? { ...state.weeklyMuscleDetail } : null,
+    selectedExercise: state.selectedExercise,
+    selectedMuscle: state.selectedMuscle,
+    ...extra
+  };
+  const stack = Array.isArray(state.returnStack) ? state.returnStack : [];
+  state.returnStack = [...stack, context].slice(-8);
+  return context;
+}
+
+function popReturnContext(kind) {
+  const stack = Array.isArray(state.returnStack) ? [...state.returnStack] : [];
+  for (let index = stack.length - 1; index >= 0; index -= 1) {
+    if (!kind || stack[index].kind === kind) {
+      const [context] = stack.splice(index, 1);
+      state.returnStack = stack;
+      return context;
+    }
+  }
+  return null;
+}
+
+function clearReturnContexts() {
+  state.returnStack = [];
+}
+
+function restoreReturnViewContext(context) {
+  if (!context) return;
+  if (context.activeTab) state.activeTab = context.activeTab;
+  state.historyMode = context.historyMode || "exercises";
+  state.historyExercise = context.historyExercise || "";
+  state.historyDate = context.historyDate || "";
+  state.logHistoryExercise = context.logHistoryExercise || "";
+  state.weeklyMuscleDetail = context.weeklyMuscleDetail || null;
+  if (typeof context.selectedExercise === "string") state.selectedExercise = context.selectedExercise;
+  if (typeof context.selectedMuscle === "string") state.selectedMuscle = context.selectedMuscle;
+}
+
+function restoreScrollAfterRender(y) {
+  const top = validScrollY(y);
+  const restore = () => window.scrollTo?.({ top, left: 0, behavior: "auto" });
+  if (typeof requestAnimationFrame === "function") requestAnimationFrame(restore);
+  else setTimeout(restore, 0);
+}
+
+async function renderWithReturnScroll(context, options = { animate: true }) {
+  await render(options);
+  restoreScrollAfterRender(context?.scrollY);
+}
+
 async function saveExercise(form) {
   const formData = new FormData(form);
   const validation = validateExerciseFormInput(formData);
@@ -6771,11 +6840,18 @@ async function handleAction(action, target) {
     },
     async "history-select-exercise"() {
       await flashSelection(target);
+      pushReturnContext("history-exercise-detail", { sourceAction: "history-select-exercise" });
       state.historyExercise = target.dataset.exercise || "";
       state.historyMode = "exercises";
       await render({ animate: true });
     },
     async "history-back"() {
+      const context = popReturnContext("history-exercise-detail");
+      if (context) {
+        restoreReturnViewContext(context);
+        await renderWithReturnScroll(context);
+        return;
+      }
       state.historyExercise = "";
       state.historyMode = "exercises";
       await render({ animate: true });
@@ -6787,20 +6863,34 @@ async function handleAction(action, target) {
     async "open-weekly-muscle-detail"() {
       const muscleId = target.dataset.muscle || "";
       if (!muscleGroups.some((muscle) => muscle.id === muscleId)) return;
+      pushReturnContext("weekly-muscle-detail", { sourceAction: "open-weekly-muscle-detail", muscleId });
       state.weeklyMuscleDetail = { muscleId, returnTab: state.activeTab };
       await render({ animate: true });
     },
     async "close-weekly-muscle-detail"() {
+      const context = popReturnContext("weekly-muscle-detail");
+      if (context) {
+        restoreReturnViewContext(context);
+        await renderWithReturnScroll(context);
+        return;
+      }
       state.weeklyMuscleDetail = null;
       await render({ animate: true });
     },
     async "history-date-chip"() {
       await flashSelection(target);
+      pushReturnContext("history-date-filter", { sourceAction: "history-date-chip" });
       state.historyMode = "dates";
       state.historyDate = target.dataset.historyDateValue || "";
       await render({ animate: true });
     },
     async "clear-history-date"() {
+      const context = popReturnContext("history-date-filter");
+      if (context) {
+        restoreReturnViewContext(context);
+        await renderWithReturnScroll(context);
+        return;
+      }
       state.historyDate = "";
       await render({ animate: true });
     },
@@ -6908,11 +6998,18 @@ async function handleAction(action, target) {
     async "open-exercise-history"() {
       readDraftFromForm();
       await flashSelection(target);
+      pushReturnContext("log-exercise-history", { sourceAction: "open-exercise-history" });
       state.logHistoryExercise = target.dataset.exercise;
       state.openExerciseMenu = null;
       await render({ animate: true });
     },
     async "close-log-history"() {
+      const context = popReturnContext("log-exercise-history");
+      if (context) {
+        restoreReturnViewContext(context);
+        await renderWithReturnScroll(context);
+        return;
+      }
       state.logHistoryExercise = "";
       await render({ animate: true });
     },
@@ -7024,6 +7121,7 @@ async function handleAction(action, target) {
       if (!exercise) return;
       await flashSelection(target);
       preserveVisibleDraft("cross-tab");
+      pushReturnContext("exercise-trend", { sourceAction: "open-exercise-trend", exercise });
       state.selectedExercise = exercise;
       state.activeTab = "trends";
       await render({ animate: true });
@@ -7033,6 +7131,7 @@ async function handleAction(action, target) {
       if (!exercise) return;
       await flashSelection(target);
       preserveVisibleDraft("cross-tab");
+      pushReturnContext("history-exercise-detail", { sourceAction: "open-exercise-history-global", exercise });
       state.historyExercise = exercise;
       state.historyMode = "exercises";
       state.activeTab = "history";
@@ -7358,6 +7457,7 @@ document.addEventListener("click", async (event) => {
       if (tab.dataset.tab !== state.activeTab) preserveVisibleDraft("tab-change");
       state.activeTab = tab.dataset.tab;
       state.weeklyMuscleDetail = null;
+      clearReturnContexts();
       await render({ animate: true });
     }
     if (logMode) {
