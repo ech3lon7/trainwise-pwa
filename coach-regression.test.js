@@ -145,6 +145,38 @@ assert(coverage.regions.includes("push") && coverage.regions.includes("pull") &&
 assert(coverage.noteTitle.includes("Today's Plan"), `Expected Coach note to summarize Today's Plan, got ${coverage.noteTitle}`);
 assert(coverage.noteBody.includes(`${coverage.total}/60`), `Expected Coach note to use active plan estimate, got ${coverage.noteBody}`);
 
+const coachExerciseSequencing = runScenario(`
+  ${resetAndHelpers}
+  state.settings.customExercises = [
+    { id: "curl", name: "Bicep Curl", primaryMuscles: ["biceps"], secondaryMuscles: [], equipment: "dumbbells", reps: "8-15", rest: "60 sec", cue: "Curl.", userCreated: true },
+    { id: "hammer", name: "Hammer Curl", primaryMuscles: ["biceps"], secondaryMuscles: [], equipment: "dumbbells", reps: "8-15", rest: "60 sec", cue: "Hammer.", userCreated: true },
+    { id: "bench", name: "Bench Press", primaryMuscles: ["chest"], secondaryMuscles: ["triceps", "shoulders"], equipment: "barbell", reps: "6-12", rest: "120 sec", cue: "Bench.", userCreated: true },
+    { id: "row", name: "Cable Row", primaryMuscles: ["back"], secondaryMuscles: ["biceps"], equipment: "cable", reps: "8-15", rest: "90 sec", cue: "Row.", userCreated: true }
+  ];
+  var biceps = muscleGroups.find((muscle) => muscle.id === "biceps");
+  var chest = muscleGroups.find((muscle) => muscle.id === "chest");
+  var back = muscleGroups.find((muscle) => muscle.id === "back");
+  var items = [
+    { muscle: biceps, exercise: resolveExerciseMeta("Bicep Curl"), sets: 3, minutes: 6 },
+    { muscle: biceps, exercise: resolveExerciseMeta("Hammer Curl"), sets: 3, minutes: 6 },
+    { muscle: chest, exercise: resolveExerciseMeta("Bench Press"), sets: 3, minutes: 9 },
+    { muscle: back, exercise: resolveExerciseMeta("Cable Row"), sets: 3, minutes: 8 }
+  ];
+  var ordered = orderCoachSessionItems(items);
+  ({
+    names: ordered.map((item) => item.exercise.name),
+    firstType: exercisePlanType(ordered[0].exercise),
+    adjacentSamePrimary: ordered.some((item, index) => index > 0 && item.muscle.id === ordered[index - 1].muscle.id),
+    setTotal: ordered.reduce((sum, item) => sum + item.sets, 0),
+    minuteTotal: ordered.reduce((sum, item) => sum + item.minutes, 0)
+  });
+`);
+
+assert.strictEqual(coachExerciseSequencing.firstType, "compound", `Expected first ordered Coach exercise to be compound, got ${coachExerciseSequencing.firstType}: ${coachExerciseSequencing.names.join(", ")}`);
+assert.strictEqual(coachExerciseSequencing.adjacentSamePrimary, false, `Expected Coach sequencing to gap repeated muscles, got ${coachExerciseSequencing.names.join(", ")}`);
+assert.strictEqual(coachExerciseSequencing.setTotal, 12, `Expected Coach ordering not to change sets, got ${coachExerciseSequencing.setTotal}`);
+assert.strictEqual(coachExerciseSequencing.minuteTotal, 29, `Expected Coach ordering not to change minutes, got ${coachExerciseSequencing.minuteTotal}`);
+
 const mondayWeekBoundary = runScenario(`
   ${resetAndHelpers}
   var RealDate = Date;
@@ -619,6 +651,43 @@ assert(targetsPrioritizeBeforeGeneralFill.bicepsIndex >= 0, `Expected selected B
 assert(targetsPrioritizeBeforeGeneralFill.firstNonTargetIndex < 0 || targetsPrioritizeBeforeGeneralFill.bicepsIndex < targetsPrioritizeBeforeGeneralFill.firstNonTargetIndex, `Expected selected target before non-target optional fill, got ${targetsPrioritizeBeforeGeneralFill.muscles.join(", ")}`);
 assert(targetsPrioritizeBeforeGeneralFill.bicepsSets > 0, "Expected Soft target to receive conservative work before non-target optional work.");
 assert(targetsPrioritizeBeforeGeneralFill.why.includes("Soft targets get conservative priority"), `Expected Soft target wording, got ${targetsPrioritizeBeforeGeneralFill.why}`);
+
+const targetTouchesSatisfiedStillAddsVolume = runScenario(`
+  ${resetAndHelpers}
+  var OriginalDate = Date;
+  Date = class ScenarioDate extends OriginalDate {
+    constructor(...args) {
+      return args.length ? new OriginalDate(...args) : new OriginalDate("2026-06-19T12:00:00");
+    }
+    static now() { return new OriginalDate("2026-06-19T12:00:00").getTime(); }
+    static parse(value) { return OriginalDate.parse(value); }
+    static UTC(...args) { return OriginalDate.UTC(...args); }
+  };
+  var biceps = muscleGroups.find((muscle) => muscle.id === "biceps");
+  state.coachTargetMuscles = ["biceps"];
+  state.coachGlobalGrowthMode = "medium";
+  state.workouts = [
+    makeWorkout(biceps, 2, 5, { id: "biceps-a" }),
+    makeWorkout(biceps, 4, 5, { id: "biceps-b" }),
+    ...muscleGroups.filter((muscle) => muscle.id !== "biceps").map((muscle) => makeWorkout(muscle, 2, 10))
+  ];
+  var plan = buildTodayPlan(60);
+  var bicepsItem = plan.sessionPlan.items.find((item) => item.muscle.id === "biceps");
+  Date = OriginalDate;
+  ({
+    muscles: plan.sessionPlan.items.map((item) => item.muscle.id),
+    bicepsSets: bicepsItem?.sets || 0,
+    bicepsSessions: bicepsItem?.muscle.sessions || 0,
+    reason: bicepsItem?.reason || "",
+    limitations: plan.sessionPlan.targetLimitations.map((item) => item.reason).join(" ")
+  });
+`);
+
+assert(targetTouchesSatisfiedStillAddsVolume.muscles.includes("biceps"), `Expected selected Biceps with 2/2 touches to receive volume, got ${targetTouchesSatisfiedStillAddsVolume.muscles.join(", ")}`);
+assert(targetTouchesSatisfiedStillAddsVolume.bicepsSets > 0, `Expected selected Biceps to receive sets despite satisfied touches, got ${targetTouchesSatisfiedStillAddsVolume.bicepsSets}`);
+assert.strictEqual(targetTouchesSatisfiedStillAddsVolume.bicepsSessions, 2, `Expected Biceps touches to be satisfied, got ${targetTouchesSatisfiedStillAddsVolume.bicepsSessions}`);
+assert(targetTouchesSatisfiedStillAddsVolume.reason.includes("Touches satisfied"), `Expected target reason to explain satisfied touches as informational, got ${targetTouchesSatisfiedStillAddsVolume.reason}`);
+assert(!targetTouchesSatisfiedStillAddsVolume.limitations.includes("touch"), `Expected touches not to limit selected target, got ${targetTouchesSatisfiedStillAddsVolume.limitations}`);
 
 const targetSelectionRecoveryWarning = runScenario(`
   ${resetAndHelpers}

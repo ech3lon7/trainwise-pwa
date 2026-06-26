@@ -88,6 +88,7 @@ const reset = `
   state.editingWorkoutId = null;
   state.workoutDraft = [];
   state.dismissedRecordTrophies = new Set();
+  state.weeklyMuscleDetail = null;
   var makeWorkout = (overrides = {}) => ({
     id: overrides.id || "workout-" + Math.random(),
     date: overrides.date || "2026-06-10",
@@ -113,12 +114,12 @@ const reset = `
 const mobileStart = stylesCode.indexOf("@media (max-width: 720px)");
 const mobileEnd = stylesCode.indexOf("@media (max-width: 420px)");
 const mobileCss = mobileStart >= 0 && mobileEnd > mobileStart ? stylesCode.slice(mobileStart, mobileEnd) : "";
-assert(mobileCss.includes('"drag record muscles spacer"'), "Expected mobile exercise header to keep icons left of the field.");
+assert(mobileCss.includes('"drag record direction muscles spacer"'), "Expected mobile exercise header to keep icons left of the field.");
 assert(mobileCss.includes(".set-table th.prev-cell"), "Expected mobile set table to hide Prev header at the 720px breakpoint.");
 assert(mobileCss.includes(".set-table td.prev-cell"), "Expected mobile set table to hide Prev values at the 720px breakpoint.");
 assert(mobileCss.includes("table-layout: fixed"), "Expected mobile set table to use fixed columns.");
 assert(mobileCss.includes(".set-table tr"), "Expected mobile set table rows to use explicit grid layout.");
-assert(mobileCss.includes("grid-template-columns: minmax(0, 1.2fr)"), "Expected mobile set table to define visible input columns.");
+assert(mobileCss.includes("grid-template-columns: minmax(0, 1fr) minmax(0, 0.95fr) minmax(88px, 0.9fr)"), "Expected mobile set table to define visible input columns with RIR stepper room.");
 assert(mobileCss.includes(".set-table td.mobile-set-meta"), "Expected mobile row metadata to be visible on mobile.");
 assert(/\.mobile-set-meta\s*{\s*display:\s*none;/.test(stylesCode), "Expected mobile row metadata to be hidden by default.");
 assert(!appCode.includes("exercise-title-dumbbell"), "Expected extra dumbbell icon next to record/muscle icons to be removed.");
@@ -160,9 +161,9 @@ assert(!appCode.includes('selectedExercise: "Push-up"'), "Expected Log startup n
 assert(!appCode.includes('showBanner("Unsaved draft restored."'), "Expected startup draft recovery not to show a top banner.");
 assert(appCode.includes("notifyMetricSaved"), "Expected metrics saves to use a dedicated bottom-only notification helper.");
 assert(!stylesCode.includes(".mobile-quick-toggle"), "Expected floating quick action button styling to be removed.");
-assert(indexCode.includes("v=1.5.37"), "Expected index shell references to use bumped app version.");
+assert(indexCode.includes("v=1.5.42"), "Expected index shell references to use bumped app version.");
 assert(!indexCode.includes('id="app" class="app-content" aria-live'), "Expected broad app aria-live to be removed in favor of targeted live regions.");
-assert(serviceWorkerCode.includes("trainwise-cache-v59"), "Expected service worker cache version bump.");
+assert(serviceWorkerCode.includes("trainwise-cache-v64"), "Expected service worker cache version bump.");
 assert(appCode.includes("data-settings-panel"), "Expected Settings panels to preserve open state with stable panel ids.");
 assert(appCode.includes('forceSettingsPanelOpen("supabase-sync")'), "Expected Supabase actions to keep the Supabase panel open after rendering.");
 
@@ -547,6 +548,27 @@ assert(!setRecords.lowRepWeight.some((reason) => reason.includes("Weight record"
 assert(setRecords.markup.includes("&#127942;"), "Expected trophy markup to use an ASCII-safe HTML entity.");
 assert(setRecords.markup.includes('data-action="dismiss-record-trophy"'), "Expected trophy markup to be dismissible.");
 
+const setPositionRecords = runScenario(`
+  ${reset}
+  state.workouts = [
+    makeWorkout({ id: "prior-slot", setRows: [
+      { weight: 25, reps: 14, rir: 1, restSeconds: 120 },
+      { weight: 25, reps: 8, rir: 1, restSeconds: 120 },
+      { weight: 20, reps: 10, rir: 1, restSeconds: 120 }
+    ] })
+  ];
+  var stats = exerciseRecordStats("Bench Press");
+  ({
+    secondSetRepPr: setRecordReasons({ weight: 25, reps: 9 }, stats, 1),
+    thirdSetWeightPr: setRecordReasons({ weight: 25, reps: 8 }, stats, 2),
+    thirdSetLowRepWeight: setRecordReasons({ weight: 25, reps: 7 }, stats, 2)
+  });
+`);
+
+assert(setPositionRecords.secondSetRepPr.some((reason) => reason.includes("Set 2 rep record")), `Expected set-position rep PR, got ${setPositionRecords.secondSetRepPr.join(", ")}`);
+assert(setPositionRecords.thirdSetWeightPr.some((reason) => reason.includes("Set 3 weight record")), `Expected set-position weight PR, got ${setPositionRecords.thirdSetWeightPr.join(", ")}`);
+assert(!setPositionRecords.thirdSetLowRepWeight.some((reason) => reason.includes("Set 3 weight record")), `Expected low-rep set-position weight PR to be ignored, got ${setPositionRecords.thirdSetLowRepWeight.join(", ")}`);
+
 const setTrophyDismissal = runScenario(`
   ${reset}
   state.workouts = [
@@ -594,6 +616,44 @@ const mobileMetaMarkup = runScenario(`
 assert(mobileMetaMarkup.includes("mobile-set-meta"), "Expected set rows to include mobile metadata.");
 assert(mobileMetaMarkup.includes("Prev 100 x 11"), "Expected mobile metadata to include previous set label.");
 assert(mobileMetaMarkup.includes("<strong>Set</strong>"), "Expected mobile metadata to include Set label.");
+
+const rirStepper = runScenario(`
+  ${reset}
+  var draft = {
+    draftId: "rir-draft",
+    exercise: "Bench Press",
+    editingWorkoutId: null,
+    setRows: [
+      { weight: 100, reps: 10, rir: 2, restSeconds: 120 },
+      { weight: 95, reps: 10, rir: 100, restSeconds: 120 }
+    ]
+  };
+  state.workoutDraft = [draft];
+  var markup = renderSetRows(draft);
+  var incremented = updateDraftRowRir("rir-draft", 0, 1);
+  var decremented = updateDraftRowRir("rir-draft", 0, -1);
+  var minClamped = updateDraftRowRir("rir-draft", 0, -50);
+  var maxClamped = updateDraftRowRir("rir-draft", 1, 1);
+  ({
+    hasStepper: markup.includes("rir-stepper"),
+    hasMinus: markup.includes('data-action="decrement-rir"'),
+    hasPlus: markup.includes('data-action="increment-rir"'),
+    readonly: markup.includes("readonly"),
+    inputModeNone: markup.includes('inputmode="none"'),
+    incremented,
+    decremented,
+    minClamped,
+    maxClamped
+  });
+`);
+
+assert(rirStepper.hasStepper, "Expected set rows to render RIR stepper markup.");
+assert(rirStepper.hasMinus && rirStepper.hasPlus, "Expected RIR stepper to include decrement and increment actions.");
+assert(rirStepper.readonly && rirStepper.inputModeNone, "Expected RIR value to be read-only and not manually typed.");
+assert.strictEqual(rirStepper.incremented, 3, `Expected RIR increment to produce 3, got ${rirStepper.incremented}`);
+assert.strictEqual(rirStepper.decremented, 2, `Expected RIR decrement to return to 2, got ${rirStepper.decremented}`);
+assert.strictEqual(rirStepper.minClamped, 0, `Expected RIR decrement to clamp at 0, got ${rirStepper.minClamped}`);
+assert.strictEqual(rirStepper.maxClamped, 100, `Expected RIR increment to clamp at 100, got ${rirStepper.maxClamped}`);
 
 const volumeRecord = runScenario(`
   ${reset}
@@ -680,6 +740,43 @@ const liveTrophySlots = runScenario(`
 assert(liveTrophySlots.hasSlot, "Expected set rows to include live trophy slots.");
 assert(liveTrophySlots.hasTrophy, "Expected live trophy slot to render a set trophy when row is a record.");
 assert(liveTrophySlots.removedAfterEdit, "Expected live trophy helper to remove trophy when edited below record.");
+
+const logLoadDirectionIndicator = runScenario(`
+  ${reset}
+  state.workouts = [
+    makeWorkout({ id: "bench-current", date: "2026-06-22", createdAt: "2026-06-22T12:00:00.000Z", setRows: [
+      { weight: 145, reps: 12, rir: 0, restSeconds: 31 },
+      { weight: 145, reps: 5, rir: 0, restSeconds: 31 }
+    ] }),
+    makeWorkout({ id: "bench-prior", date: "2026-06-15", createdAt: "2026-06-15T12:00:00.000Z", setRows: [
+      { weight: 145, reps: 14, rir: 0, restSeconds: 31 },
+      { weight: 145, reps: 7, rir: 0, restSeconds: 31 }
+    ] })
+  ];
+  var down = logLoadDirectionForExercise(resolveExerciseMeta("Bench Press"));
+  state.workouts = [
+    makeWorkout({ id: "bench-good", date: "2026-06-22", createdAt: "2026-06-22T12:00:00.000Z", setRows: [
+      { weight: 100, reps: 12, rir: 1, restSeconds: 31 }
+    ] }),
+    makeWorkout({ id: "bench-base", date: "2026-06-15", createdAt: "2026-06-15T12:00:00.000Z", setRows: [
+      { weight: 100, reps: 11, rir: 1, restSeconds: 31 }
+    ] })
+  ];
+  var up = logLoadDirectionForExercise(resolveExerciseMeta("Bench Press"));
+  var markup = exerciseDraftTable({
+    draftId: "direction-draft",
+    editingWorkoutId: null,
+    exercise: "Bench Press",
+    targetMuscle: "chest",
+    notes: "",
+    setRows: [{ weight: 100, reps: 10, rir: 2, restSeconds: 120 }]
+  }, 0, 1);
+  ({ down, up, markup });
+`);
+
+assert.strictEqual(logLoadDirectionIndicator.down.direction, "down", `Expected failed bench signal to recommend lowering load, got ${JSON.stringify(logLoadDirectionIndicator.down)}`);
+assert.strictEqual(logLoadDirectionIndicator.up.direction, "up", `Expected progressing bench signal to recommend raising load, got ${JSON.stringify(logLoadDirectionIndicator.up)}`);
+assert(logLoadDirectionIndicator.markup.includes("load-direction-indicator"), "Expected log table to render Coach load direction indicator.");
 
 const editExclusion = runScenario(`
   ${reset}
@@ -770,6 +867,46 @@ assert.deepEqual(coachPlanCopy.setCounts, [3, 2], `Expected planned set counts, 
 assert.deepEqual(coachPlanCopy.firstWeights, [100, 120], `Expected copied previous weights, got ${coachPlanCopy.firstWeights.join(", ")}`);
 assert.strictEqual(coachPlanCopy.repeatedPrevious, 95, `Expected missing planned sets to repeat last previous row, got ${coachPlanCopy.repeatedPrevious}`);
 assert(coachPlanCopy.editingIds.every((id) => id === null), "Expected Coach copied drafts to be unsaved templates.");
+
+const coachCopiedRowHighlight = runScenario(`
+  ${reset}
+  state.workouts = [
+    makeWorkout({
+      exercise: "Bench Press",
+      exerciseId: "custom-bench",
+      primaryMuscles: ["chest"],
+      secondaryMuscles: ["triceps"],
+      setRows: [
+        { weight: 100, reps: 10, rir: 2, restSeconds: 120 },
+        { weight: 95, reps: 9, rir: 2, restSeconds: 120 }
+      ]
+    })
+  ];
+  copyCoachPlanToLog({
+    sessionPlan: {
+      items: [
+        { exercise: resolveExerciseMeta("Bench Press"), muscle: { id: "chest" }, sets: 2, reason: "Chest plan" }
+      ]
+    }
+  });
+  var before = renderSetRows(state.workoutDraft[0]);
+  markCoachCopiedRowDirty(state.workoutDraft[0].draftId, 1);
+  var afterDirty = renderSetRows(state.workoutDraft[0]);
+  var saved = {
+    exercise: state.workoutDraft[0].exercise,
+    targetMuscle: state.workoutDraft[0].targetMuscle,
+    setRows: normalizeSetRows(state.workoutDraft[0].setRows)
+  };
+  ({
+    beforeCount: (before.match(/coach-copied-row/g) || []).length,
+    afterCount: (afterDirty.match(/coach-copied-row/g) || []).length,
+    savedHasMetadata: Object.prototype.hasOwnProperty.call(saved, "coachCopiedRows")
+  });
+`);
+
+assert.strictEqual(coachCopiedRowHighlight.beforeCount, 2, `Expected both copied Coach rows to be highlighted, got ${coachCopiedRowHighlight.beforeCount}`);
+assert.strictEqual(coachCopiedRowHighlight.afterCount, 1, `Expected dirty copied row to lose highlight only for that row, got ${coachCopiedRowHighlight.afterCount}`);
+assert.strictEqual(coachCopiedRowHighlight.savedHasMetadata, false, "Expected Coach copied row metadata to stay draft-only.");
 
 const renamedExerciseIdentity = runScenario(`
   ${reset}
@@ -885,6 +1022,82 @@ assert.strictEqual(emptyDateReset.editingWorkoutId, null, "Expected empty date t
 assert.strictEqual(emptyDateReset.notes, "", "Expected empty date to clear stale notes.");
 assert.strictEqual(emptyDateReset.draftCount, 0, "Expected empty date to render no draft tables.");
 assert.strictEqual(emptyDateReset.selectedExercise, "", "Expected empty date not to select a default exercise.");
+
+const todayShortcutPreservesDraft = runScenario(`
+  ${reset}
+  document.getElementById = () => null;
+  state.logMode = "strength";
+  state.draftDate = "2026-06-10";
+  state.editingWorkoutId = null;
+  state.loadedWorkoutDateIds = [];
+  state.workoutDraft = [{
+    draftId: "draft-old",
+    editingWorkoutId: null,
+    exercise: "Bench Press",
+    targetMuscle: "chest",
+    notes: "move to today",
+    setRows: [{ weight: 135, reps: 8, rir: 1, restSeconds: 120 }]
+  }];
+  var applied = applyStrengthTodayShortcut();
+  ({
+    applied,
+    date: state.draftDate,
+    rows: state.workoutDraft[0].setRows,
+    editingWorkoutId: state.editingWorkoutId,
+    draftEditingId: state.workoutDraft[0].editingWorkoutId,
+    loadedIds: state.loadedWorkoutDateIds
+  });
+`);
+
+assert.strictEqual(todayShortcutPreservesDraft.applied, true, "Expected Today shortcut to handle meaningful strength drafts.");
+assert.strictEqual(todayShortcutPreservesDraft.date, runScenario("todayISO();"), "Expected Today shortcut to move the draft date to today.");
+assert.deepEqual(todayShortcutPreservesDraft.rows, [{ weight: 135, reps: 8, rir: 1, restSeconds: 120 }], "Expected Today shortcut to preserve visible strength rows.");
+assert.strictEqual(todayShortcutPreservesDraft.editingWorkoutId, null, "Expected Today shortcut to stay out of edit mode for unsaved drafts.");
+assert.strictEqual(todayShortcutPreservesDraft.draftEditingId, null, "Expected Today shortcut to preserve only unsaved draft rows.");
+assert.deepEqual(todayShortcutPreservesDraft.loadedIds, [], "Expected Today shortcut to clear loaded saved workout ids.");
+
+const todayShortcutDoesNotCarrySavedLogs = runScenario(`
+  ${reset}
+  document.getElementById = () => null;
+  state.logMode = "strength";
+  state.draftDate = "2026-06-22";
+  state.editingWorkoutId = "saved-monday";
+  state.loadedWorkoutDateIds = ["saved-monday"];
+  state.workoutDraft = [{
+    draftId: "draft-monday",
+    editingWorkoutId: "saved-monday",
+    exercise: "Bench Press",
+    targetMuscle: "chest",
+    notes: "locked monday",
+    setRows: [{ weight: 185, reps: 5, rir: 1, restSeconds: 180 }]
+  }];
+  var applied = applyStrengthTodayShortcut();
+  ({
+    applied,
+    date: state.draftDate,
+    rows: state.workoutDraft[0].setRows,
+    editingWorkoutId: state.editingWorkoutId,
+    draftEditingId: state.workoutDraft[0].editingWorkoutId,
+    loadedIds: state.loadedWorkoutDateIds
+  });
+`);
+
+assert.strictEqual(todayShortcutDoesNotCarrySavedLogs.applied, false, "Expected Today shortcut not to carry saved logs to today.");
+assert.strictEqual(todayShortcutDoesNotCarrySavedLogs.date, "2026-06-22", "Expected saved-date draft to remain on its original date until normal Today loading runs.");
+assert.deepEqual(todayShortcutDoesNotCarrySavedLogs.rows, [{ weight: 185, reps: 5, rir: 1, restSeconds: 180 }], "Expected saved Monday rows not to be converted into today's unsaved draft.");
+assert.strictEqual(todayShortcutDoesNotCarrySavedLogs.editingWorkoutId, "saved-monday", "Expected saved loaded edit mode to remain untouched when shortcut declines.");
+assert.strictEqual(todayShortcutDoesNotCarrySavedLogs.draftEditingId, "saved-monday", "Expected saved draft editing id to remain untouched when shortcut declines.");
+assert.deepEqual(todayShortcutDoesNotCarrySavedLogs.loadedIds, ["saved-monday"], "Expected saved loaded ids to remain untouched when shortcut declines.");
+
+const todayShortcutAllowsEmptyLoad = runScenario(`
+  ${reset}
+  document.getElementById = () => null;
+  state.logMode = "strength";
+  state.workoutDraft = [];
+  applyStrengthTodayShortcut();
+`);
+
+assert.strictEqual(todayShortcutAllowsEmptyLoad, false, "Expected empty Strength Log Today shortcut to fall through to normal date loading.");
 
 const populatedDateLoad = runScenario(`
   ${reset}
@@ -1215,6 +1428,143 @@ assert.strictEqual(exerciseCoverageAndFilters.showsBenchUnderChest, true, "Expec
 assert.strictEqual(exerciseCoverageAndFilters.showsRowUnderBack, true, "Expected covered Back row to list primary exercises.");
 assert.strictEqual(exerciseCoverageAndFilters.coverageRowsHaveStandardArrowOnly, true, "Expected coverage rows to avoid redundant inner collapse arrows.");
 assert.strictEqual(exerciseCoverageAndFilters.hasArchiveSection, true, "Expected Exercises markup to include archived section.");
+
+const exerciseEditVisibleState = runScenario(`
+  ${reset}
+  state.activeTab = "exercises";
+  state.settings.customExercises = [
+    {
+      id: "custom-bench",
+      name: "Bench Press",
+      primaryMuscles: ["chest"],
+      secondaryMuscles: ["triceps"],
+      equipment: "barbell",
+      reps: "6-12",
+      rest: "90-180 sec",
+      cue: "Test bench."
+    }
+  ];
+  state.editingExerciseId = "custom-bench";
+  state.exerciseFormDraft = null;
+  state.exerciseFormErrors = {};
+  state.openExerciseActionMenu = "custom-bench";
+  var markup = renderExercises();
+  ({
+    editSummary: markup.includes('<summary><span>Edit exercise</span><small>Bench Press</small></summary>'),
+    formValue: markup.includes('value="Bench Press"'),
+    formTarget: markup.includes('id="exercise-form"'),
+    focusTarget: markup.includes('data-edit-focus-target')
+  });
+`);
+
+assert.strictEqual(exerciseEditVisibleState.editSummary, true, "Expected Exercises edit mode to render the selected exercise in the form summary.");
+assert.strictEqual(exerciseEditVisibleState.formValue, true, "Expected Exercises edit mode to populate selected exercise values.");
+assert.strictEqual(exerciseEditVisibleState.formTarget, true, "Expected Exercises edit form to expose a stable form target.");
+assert.strictEqual(exerciseEditVisibleState.focusTarget, true, "Expected Exercises edit form to expose a visible focus/scroll target.");
+
+const exerciseActionsVisible = runScenario(`
+  ${reset}
+  state.activeTab = "exercises";
+  var markup = renderExercises();
+  ({
+    hasEdit: markup.includes('data-action="edit-exercise"'),
+    hasTrend: markup.includes('data-action="open-exercise-trend"'),
+    hasHistory: markup.includes('data-action="open-exercise-history-global"'),
+    hasArchive: markup.includes('data-action="archive-exercise"'),
+    hasHiddenMenuButton: markup.includes('data-action="toggle-exercise-action-menu"')
+  });
+`);
+
+assert.strictEqual(exerciseActionsVisible.hasEdit, true, "Expected Exercise cards to expose visible Edit actions.");
+assert.strictEqual(exerciseActionsVisible.hasTrend, true, "Expected Exercise cards to expose visible Trend actions.");
+assert.strictEqual(exerciseActionsVisible.hasHistory, true, "Expected Exercise cards to expose visible History actions.");
+assert.strictEqual(exerciseActionsVisible.hasArchive, true, "Expected Exercise cards to expose visible archive/delete actions.");
+assert.strictEqual(exerciseActionsVisible.hasHiddenMenuButton, false, "Expected Exercise card actions not to require the three-dot menu.");
+
+const weeklyMuscleDetail = runScenario(`
+  ${reset}
+  state.workouts = [
+    makeWorkout({
+      id: "bench",
+      date: todayISO(),
+      exercise: "Bench Press",
+      exerciseId: "custom-bench",
+      primaryMuscles: ["chest"],
+      secondaryMuscles: ["triceps"],
+      setRows: [
+        { weight: 100, reps: 10, rir: 2, restSeconds: 120 },
+        { weight: 95, reps: 10, rir: 5, restSeconds: 90 }
+      ],
+      order: 0
+    }),
+    makeWorkout({
+      id: "pressdown",
+      date: todayISO(),
+      exercise: "Cable Pushdown",
+      exerciseId: "pushdown",
+      primaryMuscles: ["triceps"],
+      secondaryMuscles: [],
+      setRows: [
+        { weight: 50, reps: 12, rir: 2, restSeconds: 60 }
+      ],
+      order: 1
+    })
+  ];
+  state.weeklyMuscleDetail = { muscleId: "triceps", returnTab: "dashboard" };
+  var summary = weeklyMuscleDetailSummary("triceps");
+  var markup = renderDashboard();
+  ({
+    totalSets: summary.totalSets,
+    primarySets: summary.primarySets,
+    secondarySets: summary.secondarySets,
+    entryCount: summary.entries.length,
+    firstRole: summary.entries[0].role,
+    firstRowCredits: summary.entries[0].rows.map((row) => row.creditedSets),
+    hasScreen: markup.includes("Weekly set detail") && markup.includes("Cable Pushdown") && markup.includes("Bench Press"),
+    hasFullStats: markup.includes("raw hard sets") && markup.includes("load volume") && markup.includes("avg RIR")
+  });
+`);
+
+assert.strictEqual(weeklyMuscleDetail.entryCount, 2, `Expected primary and secondary weekly contributions, got ${weeklyMuscleDetail.entryCount}`);
+assert.strictEqual(weeklyMuscleDetail.firstRole, "secondary", `Expected bench to count as secondary triceps work, got ${weeklyMuscleDetail.firstRole}`);
+assert.deepEqual(weeklyMuscleDetail.firstRowCredits, [0.5, 0.25], `Expected secondary set credits with RIR discount, got ${weeklyMuscleDetail.firstRowCredits.join(", ")}`);
+assert.strictEqual(weeklyMuscleDetail.primarySets, 1, `Expected 1 primary credited set, got ${weeklyMuscleDetail.primarySets}`);
+assert.strictEqual(weeklyMuscleDetail.secondarySets, 0.75, `Expected 0.75 secondary credited sets, got ${weeklyMuscleDetail.secondarySets}`);
+assert.strictEqual(weeklyMuscleDetail.totalSets, 1.75, `Expected 1.75 total credited sets, got ${weeklyMuscleDetail.totalSets}`);
+assert.strictEqual(weeklyMuscleDetail.hasScreen, true, "Expected weekly muscle detail screen to render the contributing exercises.");
+assert.strictEqual(weeklyMuscleDetail.hasFullStats, true, "Expected weekly muscle detail screen to render full logging stats.");
+
+const bodyWeightAverage = runScenario(`
+  ${reset}
+  state.metrics = [
+    { id: "m1", date: "2026-06-01", bodyWeight: 180, calories: 2500, protein: 170 },
+    { id: "m2", date: "2026-06-02", bodyWeight: 182, calories: 2500, protein: 170 },
+    { id: "m3", date: "2026-06-03", bodyWeight: 181, calories: 2500, protein: 170 },
+    { id: "m4", date: "2026-06-04", bodyWeight: 183, calories: 2500, protein: 170 },
+    { id: "m5", date: "2026-06-05", bodyWeight: 184, calories: 2500, protein: 170 },
+    { id: "m6", date: "2026-06-06", bodyWeight: 186, calories: 2500, protein: 170 },
+    { id: "m7", date: "2026-06-07", bodyWeight: 185, calories: 2500, protein: 170 },
+    { id: "m8", date: "2026-06-08", bodyWeight: 187, calories: 2500, protein: 170 }
+  ];
+  state.settings.dashboardWidgets = ["bodyWeight"];
+  state.settings.dashboardWidgetOrder = ["bodyWeight"];
+  var series = seriesFromMetrics("bodyWeight");
+  var avgSeries = rollingAverageSeries(series, 7);
+  var latestAvg = latestRollingAverage(series, 7);
+  var dashboard = renderDashboard();
+  var trends = renderTrends();
+  ({
+    avgValues: avgSeries.map((point) => Math.round(point.value * 10) / 10),
+    latestAvg: Math.round(latestAvg * 10) / 10,
+    dashboardHasAvg: dashboard.includes("7d avg"),
+    trendsHasOverlay: trends.includes("comparison-polyline")
+  });
+`);
+
+assert.deepEqual(bodyWeightAverage.avgValues.slice(-2), [183, 184], `Expected rolling average values, got ${bodyWeightAverage.avgValues.join(", ")}`);
+assert.strictEqual(bodyWeightAverage.latestAvg, 184, `Expected latest 7-day average weight, got ${bodyWeightAverage.latestAvg}`);
+assert.strictEqual(bodyWeightAverage.dashboardHasAvg, true, "Expected Today body weight card to include 7d avg label.");
+assert.strictEqual(bodyWeightAverage.trendsHasOverlay, true, "Expected Trends body weight chart to include average overlay.");
 
 const mobileQolMarkup = runScenario(`
   ${reset}
