@@ -7,6 +7,7 @@ appCode = appCode.replace(/init\(\)\.catch\([\s\S]*?\n\}\);\s*$/, "");
 const stylesCode = fs.readFileSync("styles.css", "utf8");
 const serviceWorkerCode = fs.readFileSync("service-worker.js", "utf8");
 const indexCode = fs.readFileSync("index.html", "utf8");
+const supabaseSchemaCode = fs.readFileSync("supabase-schema.sql", "utf8");
 
 const context = {
   console,
@@ -168,9 +169,9 @@ assert(!appCode.includes('selectedExercise: "Push-up"'), "Expected Log startup n
 assert(!appCode.includes('showBanner("Unsaved draft restored."'), "Expected startup draft recovery not to show a top banner.");
 assert(appCode.includes("notifyMetricSaved"), "Expected metrics saves to use a dedicated bottom-only notification helper.");
 assert(!stylesCode.includes(".mobile-quick-toggle"), "Expected floating quick action button styling to be removed.");
-assert(indexCode.includes("v=1.5.43"), "Expected index shell references to use bumped app version.");
+assert(indexCode.includes("v=1.5.44"), "Expected index shell references to use bumped app version.");
 assert(!indexCode.includes('id="app" class="app-content" aria-live'), "Expected broad app aria-live to be removed in favor of targeted live regions.");
-assert(serviceWorkerCode.includes("trainwise-cache-v65"), "Expected service worker cache version bump.");
+assert(serviceWorkerCode.includes("trainwise-cache-v66"), "Expected service worker cache version bump.");
 assert(appCode.includes("data-settings-panel"), "Expected Settings panels to preserve open state with stable panel ids.");
 assert(appCode.includes('forceSettingsPanelOpen("supabase-sync")'), "Expected Supabase actions to keep the Supabase panel open after rendering.");
 
@@ -1228,6 +1229,78 @@ const supabaseSessionRefresh = runScenario(`
 
 assert.strictEqual(supabaseSessionRefresh.expired, true, "Expected expired Supabase session to require refresh.");
 assert.strictEqual(supabaseSessionRefresh.fresh, false, "Expected fresh Supabase session not to require refresh.");
+
+const syncBootstrapRecords = runScenario(`
+  ${reset}
+  state.workouts = [makeWorkout({ id: "existing-workout", date: "2026-06-22" })];
+  state.metrics = [{ id: "existing-metric", date: "2026-06-22", calories: 2200, protein: 170 }];
+  state.settings.dayTemplates = [{ id: "template-1", name: "Push", exercises: [] }];
+  state.settings.nutritionGoal = "maintain";
+  state.settings.supabasePassword = "never-sync";
+  state.settings.supabaseSession = { access_token: "never-sync" };
+  state.workoutDraft = [{ draftId: "draft-only", exercise: "Bench Press", setRows: [{ weight: 999, reps: 99, rir: 0 }] }];
+  var records = buildLocalSyncRecords();
+  ({
+    workout: records.find((record) => record.recordType === "workout"),
+    metric: records.find((record) => record.recordType === "metric"),
+    hasTemplate: records.some((record) => record.recordType === "template" && record.recordId === "template-1"),
+    hasMaintainGoal: records.some((record) => record.recordType === "preference" && record.recordId === "nutritionGoal" && record.payload.value === "maintain"),
+    serialized: JSON.stringify(records)
+  });
+`);
+
+assert.strictEqual(syncBootstrapRecords.workout.recordId, "existing-workout", "Expected sync bootstrap to preserve existing workout IDs.");
+assert.strictEqual(syncBootstrapRecords.workout.payload.date, "2026-06-22", "Expected sync bootstrap to preserve workout history contents.");
+assert.strictEqual(syncBootstrapRecords.metric.recordId, "2026-06-22", "Expected nutrition sync identity to be canonical by date.");
+assert.strictEqual(syncBootstrapRecords.hasTemplate, true, "Expected templates to participate in safe record sync.");
+assert.strictEqual(syncBootstrapRecords.hasMaintainGoal, true, "Expected safe preferences to participate in record sync.");
+assert(!syncBootstrapRecords.serialized.includes("draft-only"), "Expected unsaved workout drafts to stay device-local.");
+assert(!syncBootstrapRecords.serialized.includes("never-sync"), "Expected Supabase secrets and sessions to stay device-local.");
+
+const syncConflictBehavior = runScenario(`
+  var pending = {
+    id: syncRecordKey("workout", "existing-workout"),
+    recordType: "workout",
+    recordId: "existing-workout",
+    baseRevision: 2,
+    status: "pending",
+    payload: { id: "existing-workout", notes: "local" }
+  };
+  var remote = {
+    record_type: "workout",
+    record_id: "existing-workout",
+    revision: 3,
+    payload: { id: "existing-workout", notes: "cloud" }
+  };
+  var conflict = syncConflictFromRemote(pending, remote);
+  ({ id: conflict.id, status: conflict.status, localNotes: conflict.payload.notes, cloudNotes: conflict.remoteRecord.payload.notes });
+`);
+
+assert.strictEqual(syncConflictBehavior.id, "workout:existing-workout", "Expected stable per-record sync queue identity.");
+assert.strictEqual(syncConflictBehavior.status, "conflict", "Expected same-record revision mismatch to require review.");
+assert.strictEqual(syncConflictBehavior.localNotes, "local", "Expected conflict handling to preserve the local version.");
+assert.strictEqual(syncConflictBehavior.cloudNotes, "cloud", "Expected conflict handling to preserve the cloud version.");
+assert.strictEqual(
+  runScenario('syncPayloadFingerprint({ b: 2, a: { d: 4, c: 3 } }) === syncPayloadFingerprint({ a: { c: 3, d: 4 }, b: 2 })'),
+  true,
+  "Expected sync fingerprints to ignore JSON object key order."
+);
+
+assert(supabaseSchemaCode.includes("fitness_sync_records"), "Expected record-level Supabase sync table schema.");
+assert(supabaseSchemaCode.includes("apply_fitness_sync_change"), "Expected revision-aware Supabase sync function.");
+assert(appCode.includes("const DB_VERSION = 3"), "Expected IndexedDB migration for persistent sync queue storage.");
+assert(appCode.includes('createObjectStore("syncQueue"'), "Expected offline sync operations to persist in IndexedDB.");
+assert(appCode.includes('data-action="push-supabase-sync"'), "Expected manual Push to use record-level sync.");
+assert(appCode.includes('data-action="pull-supabase-sync"'), "Expected manual Pull to use record-level sync.");
+assert(!appCode.includes('data-action="push-supabase">'), "Expected snapshot Push control to be retired from the active UI.");
+assert(appCode.includes('queueSyncChange("workout", entry.id, entry)'), "Expected locked and updated workouts to enter record sync.");
+assert(appCode.includes('queueSyncChange("workout", id, null, { deleted: true })'), "Expected deleted workouts to synchronize as tombstones.");
+assert(appCode.includes('queueSyncChange("metric", date, entry)'), "Expected saved nutrition to enter record sync by date.");
+assert(appCode.includes('queueSyncChange("metric", metricDate, null, { deleted: true })'), "Expected deleted nutrition to synchronize as a date tombstone.");
+assert(appCode.includes('queueSyncChange("exercise", exercise.id, exercise)'), "Expected saved exercises to enter record sync.");
+assert(appCode.includes('queueSyncChange("template", template.id, template)'), "Expected saved templates to enter record sync.");
+assert(appCode.includes("scheduleRecordSync();"), "Expected completed local mutations to schedule automatic synchronization.");
+assert(appCode.includes('saveSetting("syncBootstrapVersion", 0)'), "Expected backup imports to reset sync bootstrap metadata before merging.");
 
 const archivedExerciseBehavior = runScenario(`
   ${reset}

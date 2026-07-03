@@ -1,17 +1,23 @@
 "use strict";
 
 const DB_NAME = "trainwise-db";
-const DB_VERSION = 2;
-const STORES = ["workouts", "metrics", "settings"];
-const APP_VERSION = "1.5.43";
+const DB_VERSION = 3;
+const STORES = ["workouts", "metrics", "settings", "syncQueue"];
+const APP_VERSION = "1.5.44";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 const DRAFT_RECOVERY_KEY = "trainwise-draft-recovery-v1";
 const COPIED_COACH_PLAN_KEY = "trainwise-copied-coach-plan-v1";
+const SYNC_BOOTSTRAP_VERSION = 1;
+const SYNC_POLL_MS = 60000;
+const SYNC_SAFE_PREFERENCES = ["hypertrophyProfile", "nutritionGoal", "dashboardWidgets", "dashboardWidgetOrder"];
 let dbOpenPromise = null;
 let chartId = 0;
 let reloadingForUpdate = false;
 let renderToken = 0;
 let scrollTopTimer = null;
+let recordSyncTimer = null;
+let recordSyncPromise = null;
+let recordSyncLifecycleStarted = false;
 const SESSION_LIMIT_MINUTES = 60;
 const COACH_TIME_TOLERANCE_MINUTES = 3;
 const COACH_TIMEFRAME_OPTIONS = [
@@ -158,6 +164,9 @@ const state = {
   logDraftNotice: null,
   undoAction: null,
   pendingImport: null,
+  syncQueue: [],
+  syncStatus: "idle",
+  syncMessage: "",
   dismissedRecordTrophies: new Set(),
   templateQueue: [],
   draftDate: todayISO(),
@@ -413,6 +422,9 @@ async function saveDashboardWidgets(enabled, order = dashboardWidgetOrder()) {
   const nextOrder = order.filter((id, index, items) => valid.has(id) && items.indexOf(id) === index);
   await saveSetting("dashboardWidgets", nextEnabled.length ? nextEnabled : [...DEFAULT_TODAY_WIDGETS]);
   await saveSetting("dashboardWidgetOrder", nextOrder.length ? nextOrder : [...DEFAULT_TODAY_WIDGETS]);
+  await queueSyncChange("preference", "dashboardWidgets", { value: selectedDashboardWidgets() });
+  await queueSyncChange("preference", "dashboardWidgetOrder", { value: dashboardWidgetOrder() });
+  scheduleRecordSync();
 }
 
 function sleep(ms) {
@@ -442,6 +454,11 @@ function openDB() {
       }
       if (!db.objectStoreNames.contains("settings")) {
         db.createObjectStore("settings", { keyPath: "key" });
+      }
+      if (!db.objectStoreNames.contains("syncQueue")) {
+        const store = db.createObjectStore("syncQueue", { keyPath: "id" });
+        store.createIndex("status", "status");
+        store.createIndex("createdAt", "createdAt");
       }
     };
     request.onsuccess = () => {
@@ -564,19 +581,70 @@ function workoutsForDate(date) {
 }
 
 async function loadState() {
-  const [workouts, metrics, settingsRows] = await Promise.all([
+  const [workouts, metrics, settingsRows, syncQueue] = await Promise.all([
     dbAll("workouts"),
     dbAll("metrics"),
-    dbAll("settings")
+    dbAll("settings"),
+    dbAll("syncQueue")
   ]);
   state.workouts = sortByDateDesc(workouts);
   state.metrics = sortByDateDesc(metrics);
   state.settings = Object.fromEntries(settingsRows.map((row) => [row.key, row.value]));
+  state.syncQueue = syncQueue;
 }
 
 async function saveSetting(key, value) {
   state.settings[key] = value;
   await dbPut("settings", { key, value });
+}
+
+function syncRecordKey(recordType, recordId) {
+  return `${String(recordType || "").trim()}:${String(recordId || "").trim()}`;
+}
+
+function localSyncRecord(recordType, recordId, payload) {
+  return {
+    recordType,
+    recordId: String(recordId),
+    payload: clonePlain(payload)
+  };
+}
+
+function safePreferenceValue(key) {
+  if (key === "hypertrophyProfile") return hypertrophySettings();
+  if (key === "nutritionGoal") return selectedNutritionGoal();
+  if (key === "dashboardWidgets") return selectedDashboardWidgets();
+  if (key === "dashboardWidgetOrder") return dashboardWidgetOrder();
+  return undefined;
+}
+
+function buildLocalSyncRecords() {
+  const records = [];
+  state.workouts
+    .filter((entry) => !isSampleEntry(entry) && entry?.id)
+    .forEach((entry) => records.push(localSyncRecord("workout", entry.id, entry)));
+  canonicalMetricEntries(state.metrics.filter((entry) => !isSampleEntry(entry)))
+    .filter((entry) => entry?.date)
+    .forEach((entry) => records.push(localSyncRecord("metric", entry.date, entry)));
+  getCustomExercises({ includeArchived: true })
+    .filter((entry) => entry?.id)
+    .forEach((entry) => records.push(localSyncRecord("exercise", entry.id, entry)));
+  getDayTemplates()
+    .filter((entry) => entry?.id)
+    .forEach((entry) => records.push(localSyncRecord("template", entry.id, entry)));
+  SYNC_SAFE_PREFERENCES.forEach((key) => {
+    records.push(localSyncRecord("preference", key, { value: safePreferenceValue(key) }));
+  });
+  return records;
+}
+
+function syncConflictFromRemote(pending, remoteRecord) {
+  return {
+    ...pending,
+    status: "conflict",
+    remoteRecord: clonePlain(remoteRecord),
+    conflictAt: new Date().toISOString()
+  };
 }
 
 function recentDays(days) {
@@ -4155,13 +4223,16 @@ async function saveDayTemplate() {
   const name = (document.getElementById("template-name")?.value || defaultName).trim();
   if (!name) return;
   const templates = getDayTemplates().filter((template) => template.name !== name);
-  templates.push({
+  const template = {
     id: uid(),
     name,
     createdAt: new Date().toISOString(),
     exercises
-  });
+  };
+  templates.push(template);
   await saveSetting("dayTemplates", templates);
+  await queueSyncChange("template", template.id, template);
+  scheduleRecordSync();
   await render();
   toast("Template saved.");
 }
@@ -4191,6 +4262,8 @@ async function deleteDayTemplate() {
   if (!template) throw new Error("Choose a template first.");
   if (!confirm(`Delete template "${template.name}"?`)) return;
   await saveSetting("dayTemplates", getDayTemplates().filter((item) => item.id !== template.id));
+  await queueSyncChange("template", template.id, null, { deleted: true });
+  scheduleRecordSync();
   state.templateQueue = [];
   await render();
   toast("Template deleted.");
@@ -5282,11 +5355,14 @@ function renderAppChrome() {
 }
 
 function dataSafetySummaryMarkup() {
+  const pending = state.syncQueue.filter((entry) => entry.status === "pending").length;
+  const conflicts = syncConflictCount();
   return `
     <div class="data-safety-grid">
       <span><strong>${escapeHtml(formatDateTime(state.settings.lastBackupAt))}</strong><small>last local backup</small></span>
-      <span><strong>${escapeHtml(formatDateTime(state.settings.lastCloudPushAt))}</strong><small>last cloud push</small></span>
-      <span><strong>${escapeHtml(formatDateTime(state.settings.lastCloudPullAt))}</strong><small>last cloud pull</small></span>
+      <span><strong>${escapeHtml(formatDateTime(state.settings.lastRecordSyncAt))}</strong><small>last cloud sync</small></span>
+      <span><strong>${fmt(pending)}</strong><small>changes queued</small></span>
+      <span><strong>${fmt(conflicts)}</strong><small>sync conflicts</small></span>
       <span><strong>v${escapeHtml(APP_VERSION)}</strong><small>installed shell</small></span>
     </div>
   `;
@@ -5312,6 +5388,26 @@ function supabaseStatus() {
   if (session?.access_token) return `Signed in as ${state.settings.supabaseEmail || "Supabase user"}`;
   if (state.settings.supabaseUrl && state.settings.supabaseAnonKey) return "Configured, not signed in";
   return "Not configured";
+}
+
+function renderRecordSyncConflicts() {
+  const conflicts = state.syncQueue.filter((entry) => entry.status === "conflict");
+  if (!conflicts.length) return "";
+  return `
+    <div class="notice-card sync-conflict-list" role="status">
+      <strong>Sync review needed</strong>
+      <p class="muted micro">The same saved record changed on two devices. Both versions are preserved.</p>
+      ${conflicts.map((entry) => `
+        <div class="sync-conflict-item">
+          <span><strong>${escapeHtml(entry.recordType)}</strong><small>${escapeHtml(entry.recordId)}</small></span>
+          <div class="button-row compact-actions">
+            <button class="ghost-mini" type="button" data-action="resolve-sync-conflict" data-sync-id="${escapeHtml(entry.id)}" data-choice="local">Keep this device</button>
+            <button class="ghost-mini" type="button" data-action="resolve-sync-conflict" data-sync-id="${escapeHtml(entry.id)}" data-choice="cloud">Use cloud</button>
+          </div>
+        </div>
+      `).join("")}
+    </div>
+  `;
 }
 
 function hypertrophySettings() {
@@ -5465,6 +5561,9 @@ async function renderSettings() {
 
     ${renderSettingsPanel("Supabase sync", supabaseStatus(), `
       <p class="muted small">Status: ${escapeHtml(supabaseStatus())}</p>
+      <p class="muted small">Record sync: <strong data-record-sync-status>${escapeHtml(syncStatusText())}</strong></p>
+      <p class="muted micro">Completed logs sync automatically. Unsaved strength and nutrition drafts stay on this device.</p>
+      ${renderRecordSyncConflicts()}
       <div class="field">
         <label for="supabaseUrl">Project URL</label>
         <input id="supabaseUrl" value="${escapeHtml(state.settings.supabaseUrl || "")}" placeholder="https://your-project.supabase.co">
@@ -5490,9 +5589,14 @@ async function renderSettings() {
         <button class="ghost-button" type="button" data-action="save-supabase">Save settings</button>
         <button class="ghost-button" type="button" data-action="signup-supabase">Create account</button>
         <button class="primary-button" type="button" data-action="signin-supabase">Sign in</button>
-        <button class="ghost-button" type="button" data-action="push-supabase">Push backup</button>
-        <button class="ghost-button" type="button" data-action="pull-supabase">Pull latest</button>
+        <button class="ghost-button" type="button" data-action="push-supabase-sync">Push to cloud</button>
+        <button class="ghost-button" type="button" data-action="pull-supabase-sync">Pull from cloud</button>
       </div>
+      <details class="inline-disclosure">
+        <summary>Legacy cloud recovery</summary>
+        <p class="muted micro">Review and restore snapshots created by older TrainWise versions.</p>
+        <button class="ghost-button" type="button" data-action="pull-supabase">Review latest legacy backup</button>
+      </details>
     `, { id: "supabase-sync" })}
 
     ${renderSettingsPanel("Danger zone", "destructive", `
@@ -5647,6 +5751,8 @@ async function saveExercise(form) {
     : [...customExercises, exercise];
 
   await saveSetting("customExercises", nextExercises);
+  await queueSyncChange("exercise", exercise.id, exercise);
+  scheduleRecordSync();
   state.editingExerciseId = null;
   state.exerciseFormDraft = null;
   state.exerciseFormErrors = {};
@@ -5695,6 +5801,9 @@ async function saveWorkout(form) {
   setUndoAction(hadExisting ? "Undo workout update" : "Undo workout lock-in", undoPayload);
   await dbPutBatch("workouts", entries);
   await Promise.all(staleWorkoutIds.map((id) => dbDelete("workouts", id)));
+  for (const entry of entries) await queueSyncChange("workout", entry.id, entry);
+  for (const id of staleWorkoutIds) await queueSyncChange("workout", id, null, { deleted: true });
+  scheduleRecordSync();
   const first = entries[0];
   state.selectedExercise = first.exercise;
   state.draftDate = first.date;
@@ -5731,6 +5840,8 @@ async function saveMetric(form) {
   const duplicateIds = metricDuplicateIdsForDate(date, entry.id);
   await dbPut("metrics", entry);
   await Promise.all(duplicateIds.map((id) => dbDelete("metrics", id)));
+  await queueSyncChange("metric", date, entry);
+  scheduleRecordSync();
   await loadState();
   state.metricDate = date;
   state.metricFormDraft = null;
@@ -6322,6 +6433,9 @@ async function importPayload(payload) {
   await saveSetting("lastBackupAt", normalized.settings.lastBackupAt);
   await saveSetting("lastCloudPushAt", normalized.settings.lastCloudPushAt);
   await saveSetting("lastCloudPullAt", normalized.settings.lastCloudPullAt);
+  await saveSetting("syncRecordMeta", {});
+  await saveSetting("syncCursor", "");
+  await saveSetting("syncBootstrapVersion", 0);
   await loadState();
   await render();
 }
@@ -6352,6 +6466,7 @@ async function confirmPendingImport() {
   await importPayload({ normalized: pending.summary.normalized });
   if (pending.sourceType === "cloud") await saveSetting("lastCloudPullAt", new Date().toISOString());
   state.pendingImport = null;
+  scheduleRecordSync();
   announce("Backup restored.", {
     tone: "good",
     detail: "Previous local data can be restored with Undo.",
@@ -6367,15 +6482,20 @@ async function undoLastAction() {
   const { payload } = undo;
   if (payload.type === "delete-workout" && payload.entry) {
     await dbPut("workouts", payload.entry);
+    await queueSyncChange("workout", payload.entry.id, payload.entry);
   } else if (payload.type === "save-workout") {
     const restoredEntries = [...(payload.previousEntries || []), ...(payload.staleEntries || [])];
     await Promise.all((payload.savedEntryIds || []).map((id) => dbDelete("workouts", id)));
     await dbPutBatch("workouts", restoredEntries);
+    for (const id of payload.savedEntryIds || []) await queueSyncChange("workout", id, null, { deleted: true });
+    for (const entry of restoredEntries) await queueSyncChange("workout", entry.id, entry);
     clearWorkoutDraft(payload.date || todayISO());
   } else if (payload.type === "delete-metrics" && Array.isArray(payload.entries)) {
     for (const entry of payload.entries) await dbPut("metrics", entry);
+    for (const entry of payload.entries) await queueSyncChange("metric", entry.date, entry);
   } else if (payload.type === "custom-exercises" && Array.isArray(payload.previous)) {
     await saveSetting("customExercises", payload.previous);
+    await queueAllLocalSyncRecords();
   } else if (payload.type === "clear-all") {
     await Promise.all(["workouts", "metrics"].map((store) => dbClear(store)));
     for (const entry of payload.workouts || []) await dbPut("workouts", entry);
@@ -6389,6 +6509,7 @@ async function undoLastAction() {
   }
   clearUndoAction();
   await loadState();
+  scheduleRecordSync();
   showBanner("Undo complete.", { tone: "good" });
   await render();
 }
@@ -6476,6 +6597,357 @@ async function supabaseAuth(mode) {
   });
   announce("Signed in to Supabase.", { tone: "good" });
   await render();
+  scheduleRecordSync({ immediate: true });
+}
+
+function recordSyncConfigured() {
+  return Boolean(state.settings.supabaseUrl && state.settings.supabaseAnonKey && state.settings.supabaseSession?.access_token);
+}
+
+function syncRecordMetaMap() {
+  return state.settings.syncRecordMeta && typeof state.settings.syncRecordMeta === "object"
+    ? state.settings.syncRecordMeta
+    : {};
+}
+
+function syncRecordMeta(recordType, recordId) {
+  return syncRecordMetaMap()[syncRecordKey(recordType, recordId)] || {};
+}
+
+function canonicalSyncValue(value) {
+  if (Array.isArray(value)) return value.map(canonicalSyncValue);
+  if (!value || typeof value !== "object") return value;
+  return Object.keys(value).sort().reduce((result, key) => {
+    result[key] = canonicalSyncValue(value[key]);
+    return result;
+  }, {});
+}
+
+function syncPayloadFingerprint(payload, deleted = false) {
+  return deleted ? "deleted" : JSON.stringify(canonicalSyncValue(payload ?? null));
+}
+
+async function saveSyncRecordMeta(recordType, recordId, revision, payload, deleted = false) {
+  const key = syncRecordKey(recordType, recordId);
+  const next = {
+    ...syncRecordMetaMap(),
+    [key]: {
+      revision: Math.max(0, Number(revision) || 0),
+      fingerprint: syncPayloadFingerprint(payload, deleted)
+    }
+  };
+  state.settings.syncRecordMeta = next;
+  await dbPut("settings", { key: "syncRecordMeta", value: next });
+}
+
+async function ensureSyncDeviceId() {
+  if (state.settings.syncDeviceId) return state.settings.syncDeviceId;
+  const deviceId = uid();
+  state.settings.syncDeviceId = deviceId;
+  await dbPut("settings", { key: "syncDeviceId", value: deviceId });
+  return deviceId;
+}
+
+function normalizeRemoteSyncRecord(record = {}) {
+  return {
+    recordType: record.record_type ?? record.recordType,
+    recordId: String(record.record_id ?? record.recordId ?? ""),
+    payload: clonePlain(record.payload),
+    revision: Math.max(0, Number(record.revision) || 0),
+    updatedAt: record.updated_at ?? record.updatedAt ?? "",
+    deletedAt: record.deleted_at ?? record.deletedAt ?? null,
+    sourceDeviceId: record.source_device_id ?? record.sourceDeviceId ?? ""
+  };
+}
+
+async function persistSyncQueueEntry(entry) {
+  const normalized = { ...entry, id: syncRecordKey(entry.recordType, entry.recordId) };
+  await dbPut("syncQueue", normalized);
+  state.syncQueue = [...state.syncQueue.filter((item) => item.id !== normalized.id), normalized];
+  return normalized;
+}
+
+async function removeSyncQueueEntry(id) {
+  await dbDelete("syncQueue", id);
+  state.syncQueue = state.syncQueue.filter((entry) => entry.id !== id);
+}
+
+function shouldQueueRecordSync() {
+  return Boolean(state.settings.supabaseUrl || Number(state.settings.syncBootstrapVersion) >= SYNC_BOOTSTRAP_VERSION);
+}
+
+async function queueSyncChange(recordType, recordId, payload, { deleted = false, force = false } = {}) {
+  if (!recordId || (!force && !shouldQueueRecordSync())) return null;
+  const id = syncRecordKey(recordType, recordId);
+  const existing = state.syncQueue.find((entry) => entry.id === id);
+  const meta = syncRecordMeta(recordType, recordId);
+  return persistSyncQueueEntry({
+    id,
+    recordType,
+    recordId: String(recordId),
+    payload: deleted ? null : clonePlain(payload),
+    deleted,
+    baseRevision: existing?.baseRevision ?? Math.max(0, Number(meta.revision) || 0),
+    status: existing?.status === "conflict" ? "conflict" : "pending",
+    remoteRecord: existing?.remoteRecord || null,
+    createdAt: existing?.createdAt || new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  });
+}
+
+async function queueAllLocalSyncRecords({ force = false } = {}) {
+  for (const record of buildLocalSyncRecords()) {
+    const meta = syncRecordMeta(record.recordType, record.recordId);
+    if (force || meta.fingerprint !== syncPayloadFingerprint(record.payload)) {
+      await queueSyncChange(record.recordType, record.recordId, record.payload, { force: true });
+    }
+  }
+}
+
+async function applyRemoteSyncRecord(remoteInput) {
+  const remote = normalizeRemoteSyncRecord(remoteInput);
+  if (!remote.recordType || !remote.recordId) return;
+  const deleted = Boolean(remote.deletedAt);
+
+  if (remote.recordType === "workout") {
+    if (deleted) await dbDelete("workouts", remote.recordId);
+    else await dbPut("workouts", { ...remote.payload, id: remote.recordId });
+  } else if (remote.recordType === "metric") {
+    const duplicateIds = state.metrics.filter((entry) => entry.date === remote.recordId).map((entry) => entry.id).filter(Boolean);
+    await Promise.all(duplicateIds.map((id) => dbDelete("metrics", id)));
+    if (!deleted) {
+      const entry = { ...remote.payload, date: remote.recordId, id: remote.payload?.id || `metric-${remote.recordId}` };
+      await dbPut("metrics", entry);
+    }
+  } else if (remote.recordType === "exercise") {
+    const current = getCustomExercises({ includeArchived: true });
+    const next = deleted
+      ? current.filter((entry) => entry.id !== remote.recordId)
+      : [...current.filter((entry) => entry.id !== remote.recordId), { ...remote.payload, id: remote.recordId }];
+    await saveSetting("customExercises", next);
+  } else if (remote.recordType === "template") {
+    const current = getDayTemplates();
+    const next = deleted
+      ? current.filter((entry) => entry.id !== remote.recordId)
+      : [...current.filter((entry) => entry.id !== remote.recordId), { ...remote.payload, id: remote.recordId }];
+    await saveSetting("dayTemplates", next);
+  } else if (remote.recordType === "preference" && SYNC_SAFE_PREFERENCES.includes(remote.recordId) && !deleted) {
+    await saveSetting(remote.recordId, clonePlain(remote.payload?.value));
+  }
+
+  await saveSyncRecordMeta(remote.recordType, remote.recordId, remote.revision, remote.payload, deleted);
+}
+
+async function fetchRemoteSyncRecords(config, { full = false } = {}) {
+  const select = "record_type,record_id,payload,revision,updated_at,deleted_at,source_device_id";
+  const cursor = full ? "" : String(state.settings.syncCursor || "");
+  const filter = cursor ? `&updated_at=gte.${encodeURIComponent(cursor)}` : "";
+  const response = await fetch(`${config.url}/rest/v1/fitness_sync_records?select=${select}${filter}&order=updated_at.asc`, {
+    headers: {
+      apikey: config.key,
+      Authorization: `Bearer ${config.session.access_token}`
+    }
+  });
+  const json = await response.json();
+  if (!response.ok) throw new Error(json.message || "Could not pull synchronized records.");
+  return Array.isArray(json) ? json.map(normalizeRemoteSyncRecord) : [];
+}
+
+async function updateSyncCursor(records = []) {
+  const newest = records.map((record) => record.updatedAt || "").filter(Boolean).sort().at(-1);
+  if (!newest || newest <= String(state.settings.syncCursor || "")) return;
+  state.settings.syncCursor = newest;
+  await dbPut("settings", { key: "syncCursor", value: newest });
+}
+
+async function pullRecordSync(config, { full = false } = {}) {
+  const remoteRecords = await fetchRemoteSyncRecords(config, { full });
+  for (const remote of remoteRecords) {
+    const id = syncRecordKey(remote.recordType, remote.recordId);
+    const pending = state.syncQueue.find((entry) => entry.id === id);
+    if (pending && remote.revision !== Number(pending.baseRevision || 0)) {
+      await persistSyncQueueEntry(syncConflictFromRemote(pending, remote));
+      continue;
+    }
+    if (!pending) await applyRemoteSyncRecord(remote);
+  }
+  await updateSyncCursor(remoteRecords);
+  return remoteRecords;
+}
+
+async function bootstrapRecordSync(config) {
+  if (Number(state.settings.syncBootstrapVersion) >= SYNC_BOOTSTRAP_VERSION) return;
+  const remoteRecords = await fetchRemoteSyncRecords(config, { full: true });
+  const remoteByKey = new Map(remoteRecords.map((record) => [syncRecordKey(record.recordType, record.recordId), record]));
+  const localRecords = buildLocalSyncRecords();
+  const localByKey = new Map(localRecords.map((record) => [syncRecordKey(record.recordType, record.recordId), record]));
+
+  for (const remote of remoteRecords) {
+    const id = syncRecordKey(remote.recordType, remote.recordId);
+    const local = localByKey.get(id);
+    if (!local) {
+      await applyRemoteSyncRecord(remote);
+    } else if (syncPayloadFingerprint(local.payload) === syncPayloadFingerprint(remote.payload, Boolean(remote.deletedAt))) {
+      await saveSyncRecordMeta(remote.recordType, remote.recordId, remote.revision, remote.payload, Boolean(remote.deletedAt));
+    } else {
+      const pending = await queueSyncChange(local.recordType, local.recordId, local.payload, { force: true });
+      await persistSyncQueueEntry(syncConflictFromRemote(pending, remote));
+    }
+  }
+
+  for (const local of localRecords) {
+    if (!remoteByKey.has(syncRecordKey(local.recordType, local.recordId))) {
+      await queueSyncChange(local.recordType, local.recordId, local.payload, { force: true });
+    }
+  }
+
+  state.settings.syncBootstrapVersion = SYNC_BOOTSTRAP_VERSION;
+  await dbPut("settings", { key: "syncBootstrapVersion", value: SYNC_BOOTSTRAP_VERSION });
+  await updateSyncCursor(remoteRecords);
+}
+
+async function applyQueuedSyncChange(config, entry, deviceId) {
+  const response = await fetch(`${config.url}/rest/v1/rpc/apply_fitness_sync_change`, {
+    method: "POST",
+    headers: {
+      apikey: config.key,
+      Authorization: `Bearer ${config.session.access_token}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      p_record_type: entry.recordType,
+      p_record_id: entry.recordId,
+      p_payload: entry.deleted ? null : entry.payload,
+      p_deleted: Boolean(entry.deleted),
+      p_base_revision: Math.max(0, Number(entry.baseRevision) || 0),
+      p_source_device_id: deviceId
+    })
+  });
+  const json = await response.json();
+  if (!response.ok) throw new Error(json.message || "Could not push synchronized record.");
+  return json;
+}
+
+async function flushRecordSyncQueue(config) {
+  const deviceId = await ensureSyncDeviceId();
+  const pending = state.syncQueue.filter((entry) => entry.status === "pending");
+  for (const entry of pending) {
+    const result = await applyQueuedSyncChange(config, entry, deviceId);
+    const remote = result?.record ? normalizeRemoteSyncRecord(result.record) : null;
+    if (result?.status === "conflict") {
+      await persistSyncQueueEntry(syncConflictFromRemote(entry, remote));
+      continue;
+    }
+    if (!remote) throw new Error("Cloud sync returned no saved record.");
+    await saveSyncRecordMeta(entry.recordType, entry.recordId, remote.revision, entry.payload, entry.deleted);
+    await updateSyncCursor([remote]);
+    await removeSyncQueueEntry(entry.id);
+  }
+}
+
+function syncConflictCount() {
+  return state.syncQueue.filter((entry) => entry.status === "conflict").length;
+}
+
+function syncStatusText() {
+  if (!recordSyncConfigured()) return "Sign in to sync";
+  if (state.syncStatus === "syncing") return "Syncing";
+  if (syncConflictCount()) return `${syncConflictCount()} conflict${syncConflictCount() === 1 ? "" : "s"} need review`;
+  if (state.syncStatus === "offline") return "Offline - changes queued";
+  if (state.syncStatus === "error") return state.syncMessage || "Sync failed";
+  if (state.syncQueue.some((entry) => entry.status === "pending")) return `${state.syncQueue.filter((entry) => entry.status === "pending").length} change${state.syncQueue.filter((entry) => entry.status === "pending").length === 1 ? "" : "s"} queued`;
+  return "Synced";
+}
+
+function syncSyncStatusDom() {
+  const status = document.querySelector?.("[data-record-sync-status]");
+  if (status) status.textContent = syncStatusText();
+}
+
+async function performRecordSync({ pull = true, push = true, reconcile = false, notify = false } = {}) {
+  if (recordSyncPromise) return recordSyncPromise;
+  recordSyncPromise = (async () => {
+    if (!recordSyncConfigured()) {
+      state.syncStatus = "idle";
+      if (notify) throw new Error("Sign in to Supabase first.");
+      return false;
+    }
+    if (typeof navigator !== "undefined" && navigator.onLine === false) {
+      state.syncStatus = "offline";
+      syncSyncStatusDom();
+      return false;
+    }
+    state.syncStatus = "syncing";
+    state.syncMessage = "";
+    syncSyncStatusDom();
+    try {
+      const config = await supabaseConfigWithFreshSession();
+      await ensureSyncDeviceId();
+      await bootstrapRecordSync(config);
+      if (pull) await pullRecordSync(config);
+      if (reconcile) await queueAllLocalSyncRecords();
+      if (push) await flushRecordSyncQueue(config);
+      await loadState();
+      state.syncStatus = syncConflictCount() ? "conflict" : "synced";
+      const syncedAt = new Date().toISOString();
+      state.settings.lastRecordSyncAt = syncedAt;
+      await dbPut("settings", { key: "lastRecordSyncAt", value: syncedAt });
+      if (!notify && state.activeTab !== "log") await render();
+      if (notify) announce(syncConflictCount() ? "Sync needs review." : "Cloud sync complete.", { tone: syncConflictCount() ? "warn" : "good" });
+      return true;
+    } catch (error) {
+      state.syncStatus = "error";
+      state.syncMessage = error.message || "Sync failed";
+      if (notify) throw error;
+      return false;
+    } finally {
+      recordSyncPromise = null;
+      syncSyncStatusDom();
+    }
+  })();
+  return recordSyncPromise;
+}
+
+function scheduleRecordSync({ immediate = false } = {}) {
+  if (recordSyncTimer) clearTimeout(recordSyncTimer);
+  recordSyncTimer = setTimeout(() => {
+    recordSyncTimer = null;
+    performRecordSync().catch(() => {});
+  }, immediate ? 0 : 250);
+}
+
+function startRecordSyncLifecycle() {
+  if (recordSyncLifecycleStarted) return;
+  recordSyncLifecycleStarted = true;
+  window.addEventListener?.("online", () => scheduleRecordSync({ immediate: true }));
+  document.addEventListener?.("visibilitychange", () => {
+    if (!document.hidden) scheduleRecordSync({ immediate: true });
+  });
+  window.setInterval?.(() => {
+    if (!document.hidden && recordSyncConfigured()) scheduleRecordSync({ immediate: true });
+  }, SYNC_POLL_MS);
+  if (recordSyncConfigured()) scheduleRecordSync({ immediate: true });
+}
+
+async function resolveRecordSyncConflict(id, choice) {
+  const entry = state.syncQueue.find((item) => item.id === id && item.status === "conflict");
+  if (!entry) throw new Error("Sync conflict is no longer available.");
+  const remote = entry.remoteRecord ? normalizeRemoteSyncRecord(entry.remoteRecord) : null;
+  if (choice === "cloud") {
+    if (remote) await applyRemoteSyncRecord(remote);
+    await removeSyncQueueEntry(entry.id);
+    await loadState();
+    return;
+  }
+  const next = {
+    ...entry,
+    baseRevision: remote?.revision || 0,
+    status: "pending",
+    remoteRecord: null,
+    updatedAt: new Date().toISOString()
+  };
+  await persistSyncQueueEntry(next);
+  await performRecordSync({ pull: false, push: true, notify: true });
 }
 
 async function pushSupabaseBackup() {
@@ -7067,14 +7539,17 @@ async function handleAction(action, target) {
         if (!confirm(`Delete "${exercise.name}" from your exercise database?`)) return;
         setUndoAction("Undo exercise change", { type: "custom-exercises", previous: exercises });
         await saveSetting("customExercises", exercises.filter((item) => item.id !== exercise.id));
+        await queueSyncChange("exercise", exercise.id, null, { deleted: true });
         announce("Exercise deleted.", { tone: "warn", action: "undo-last-action", actionLabel: "Undo" });
       } else {
         if (!confirm(`Archive "${exercise.name}"? Existing logs stay intact.`)) return;
         setUndoAction("Undo exercise change", { type: "custom-exercises", previous: exercises });
         const archived = { ...exercise, archivedAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
         await saveSetting("customExercises", exercises.map((item) => item.id === exercise.id ? archived : item));
+        await queueSyncChange("exercise", archived.id, archived);
         announce("Exercise archived.", { tone: "warn", action: "undo-last-action", actionLabel: "Undo" });
       }
+      scheduleRecordSync();
       if (state.editingExerciseId === exercise.id) state.editingExerciseId = null;
       state.openExerciseActionMenu = null;
       await render();
@@ -7087,6 +7562,8 @@ async function handleAction(action, target) {
       const restored = { ...exercise, updatedAt: new Date().toISOString() };
       delete restored.archivedAt;
       await saveSetting("customExercises", exercises.map((item) => item.id === exercise.id ? restored : item));
+      await queueSyncChange("exercise", restored.id, restored);
+      scheduleRecordSync();
       state.openExerciseActionMenu = null;
       toast("Exercise restored.", { duration: 2000 });
       await render();
@@ -7099,6 +7576,8 @@ async function handleAction(action, target) {
       if (!confirm(`Permanently delete "${exercise.name}" from your exercise database?`)) return;
       setUndoAction("Undo exercise delete", { type: "custom-exercises", previous: exercises });
       await saveSetting("customExercises", exercises.filter((item) => item.id !== exercise.id));
+      await queueSyncChange("exercise", exercise.id, null, { deleted: true });
+      scheduleRecordSync();
       if (state.editingExerciseId === exercise.id) state.editingExerciseId = null;
       state.openExerciseActionMenu = null;
       announce("Exercise deleted.", { tone: "warn", action: "undo-last-action", actionLabel: "Undo" });
@@ -7244,6 +7723,8 @@ async function handleAction(action, target) {
       const entry = state.workouts.find((workout) => workout.id === target.dataset.id);
       if (entry) setUndoAction("Restore lift", { type: "delete-workout", entry });
       await dbDelete("workouts", target.dataset.id);
+      await queueSyncChange("workout", target.dataset.id, null, { deleted: true });
+      scheduleRecordSync();
       if (state.editingWorkoutId === target.dataset.id) clearWorkoutDraft();
       await loadState();
       announce("Lift deleted.", { tone: "warn", action: "undo-last-action", actionLabel: "Undo" });
@@ -7255,8 +7736,11 @@ async function handleAction(action, target) {
         ? metricEntriesForDate(target.dataset.date).map((entry) => entry.id).filter(Boolean)
         : [target.dataset.id].filter(Boolean);
       const entries = state.metrics.filter((entry) => ids.includes(entry.id));
+      const metricDate = target.dataset.date || entries[0]?.date || "";
       if (entries.length) setUndoAction("Restore nutrition", { type: "delete-metrics", entries });
       await Promise.all(ids.map((id) => dbDelete("metrics", id)));
+      if (metricDate) await queueSyncChange("metric", metricDate, null, { deleted: true });
+      scheduleRecordSync();
       await loadState();
       announce("Metric deleted.", { tone: "warn", action: "undo-last-action", actionLabel: "Undo" });
       await render();
@@ -7279,6 +7763,21 @@ async function handleAction(action, target) {
       forceSettingsPanelOpen("supabase-sync");
       await supabaseAuth("signin");
     },
+    async "push-supabase-sync"() {
+      forceSettingsPanelOpen("supabase-sync");
+      await performRecordSync({ pull: true, push: true, reconcile: true, notify: true });
+      await render();
+    },
+    async "pull-supabase-sync"() {
+      forceSettingsPanelOpen("supabase-sync");
+      await performRecordSync({ pull: true, push: false, notify: true });
+      await render();
+    },
+    async "resolve-sync-conflict"() {
+      forceSettingsPanelOpen("supabase-sync");
+      await resolveRecordSyncConflict(target.dataset.syncId, target.dataset.choice);
+      await render();
+    },
     async "push-supabase"() {
       forceSettingsPanelOpen("supabase-sync");
       await pushSupabaseBackup();
@@ -7291,6 +7790,8 @@ async function handleAction(action, target) {
       const goal = target.dataset.nutritionGoal;
       if (!NUTRITION_GOAL_OPTIONS.some((option) => option.id === goal)) return;
       await saveSetting("nutritionGoal", goal);
+      await queueSyncChange("preference", "nutritionGoal", { value: goal });
+      scheduleRecordSync();
       announce(`Nutrition goal set to ${nutritionGoalLabel(goal)}.`, { tone: "good" });
       await render();
     },
@@ -7754,6 +8255,7 @@ async function init() {
   }
 
   await render();
+  startRecordSyncLifecycle();
   registerServiceWorker().catch(() => {});
 }
 
