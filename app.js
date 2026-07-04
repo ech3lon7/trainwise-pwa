@@ -3,13 +3,16 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 3;
 const STORES = ["workouts", "metrics", "settings", "syncQueue"];
-const APP_VERSION = "1.5.44";
+const APP_VERSION = "1.5.45";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 const DRAFT_RECOVERY_KEY = "trainwise-draft-recovery-v1";
 const COPIED_COACH_PLAN_KEY = "trainwise-copied-coach-plan-v1";
 const SYNC_BOOTSTRAP_VERSION = 1;
 const SYNC_POLL_MS = 60000;
 const SYNC_SAFE_PREFERENCES = ["hypertrophyProfile", "nutritionGoal", "dashboardWidgets", "dashboardWidgetOrder"];
+const COLLAPSE_ANIMATION_MS = 240;
+const COLLAPSE_REVEAL_MS = 760;
+const COLLAPSIBLE_SELECTOR = "details.collapsible-panel, details.coverage-row, details.inline-disclosure";
 let dbOpenPromise = null;
 let chartId = 0;
 let reloadingForUpdate = false;
@@ -5613,6 +5616,126 @@ function applyStaggerAnimations() {
   });
 }
 
+function prefersReducedMotion() {
+  return Boolean(window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches);
+}
+
+function directCollapseSummary(panel) {
+  return Array.from(panel?.children || []).find((child) => child.tagName?.toLowerCase?.() === "summary") || null;
+}
+
+function ensureCollapseContent(panel) {
+  const summary = directCollapseSummary(panel);
+  if (!summary) return null;
+  let content = Array.from(panel.children).find((child) => child.classList?.contains("collapse-content"));
+  if (!content) {
+    content = document.createElement("div");
+    content.className = "collapse-content";
+    let node = summary.nextSibling;
+    while (node) {
+      const next = node.nextSibling;
+      content.appendChild(node);
+      node = next;
+    }
+    panel.appendChild(content);
+  }
+  panel.classList.add("collapse-enhanced");
+  return { summary, content };
+}
+
+function flashCollapseBorder(panel, opening) {
+  if (prefersReducedMotion()) return;
+  clearTimeout(panel._collapseFlashTimer);
+  panel.classList.remove("collapse-flash-open", "collapse-flash-close");
+  void panel.offsetWidth;
+  panel.classList.add(opening ? "collapse-flash-open" : "collapse-flash-close");
+  panel._collapseFlashTimer = setTimeout(() => {
+    panel.classList.remove("collapse-flash-open", "collapse-flash-close");
+  }, 420);
+}
+
+function triggerCollapseDataReveal(panel) {
+  if (prefersReducedMotion()) return;
+  const lines = panel.querySelectorAll("svg polyline");
+  const progressBars = panel.querySelectorAll(".progress-bar span");
+  const muscleRows = panel.querySelectorAll(".muscle-card");
+  if (!lines.length && !progressBars.length && !muscleRows.length) return;
+
+  lines.forEach((line) => {
+    try {
+      line.style.setProperty("--collapse-line-length", String(Math.max(1, line.getTotalLength())));
+    } catch {
+      line.style.setProperty("--collapse-line-length", "100");
+    }
+  });
+  muscleRows.forEach((row, index) => row.style.setProperty("--reveal-i", String(Math.min(index, 10))));
+  clearTimeout(panel._collapseRevealTimer);
+  panel.classList.remove("is-data-revealing");
+  void panel.offsetWidth;
+  panel.classList.add("is-data-revealing");
+  panel._collapseRevealTimer = setTimeout(() => panel.classList.remove("is-data-revealing"), COLLAPSE_REVEAL_MS);
+}
+
+function finishCollapseAnimation(panel, content, opening) {
+  if (!opening) panel.open = false;
+  content.style.removeProperty("height");
+  content.style.removeProperty("opacity");
+  content.style.removeProperty("transform");
+  panel.classList.remove("is-collapse-animating");
+  delete panel.dataset.collapseTarget;
+  delete panel._collapseAnimationTimer;
+}
+
+function animateCollapsiblePanel(panel, opening) {
+  const parts = ensureCollapseContent(panel);
+  if (!parts) return;
+  const { content } = parts;
+  clearTimeout(panel._collapseAnimationTimer);
+  panel.dataset.collapseTarget = String(opening);
+  flashCollapseBorder(panel, opening);
+
+  if (prefersReducedMotion()) {
+    panel.open = opening;
+    finishCollapseAnimation(panel, content, opening);
+    return;
+  }
+
+  const currentHeight = panel.open ? content.getBoundingClientRect().height : 0;
+  if (opening && !panel.open) panel.open = true;
+  content.style.height = `${currentHeight}px`;
+  content.style.opacity = currentHeight > 0 ? "1" : "0";
+  content.style.transform = currentHeight > 0 ? "translateY(0)" : "translateY(-8px)";
+  panel.classList.add("is-collapse-animating");
+
+  requestAnimationFrame(() => {
+    content.style.height = opening ? `${content.scrollHeight}px` : "0px";
+    content.style.opacity = opening ? "1" : "0";
+    content.style.transform = opening ? "translateY(0)" : "translateY(-8px)";
+    if (opening) triggerCollapseDataReveal(panel);
+  });
+
+  panel._collapseAnimationTimer = setTimeout(
+    () => finishCollapseAnimation(panel, content, opening),
+    COLLAPSE_ANIMATION_MS
+  );
+}
+
+function initializeCollapsiblePanels(root = els.app) {
+  root.querySelectorAll(COLLAPSIBLE_SELECTOR).forEach((panel) => ensureCollapseContent(panel));
+}
+
+function handleCollapsibleSummaryClick(event) {
+  const summary = event.target.closest?.("summary");
+  if (!summary) return;
+  const panel = summary.parentElement;
+  if (!panel?.matches?.(COLLAPSIBLE_SELECTOR) || summary.parentElement !== panel) return;
+  if (event.button !== undefined && event.button !== 0) return;
+  event.preventDefault();
+  const pendingTarget = panel.dataset.collapseTarget;
+  const opening = pendingTarget ? pendingTarget !== "true" : !panel.open;
+  animateCollapsiblePanel(panel, opening);
+}
+
 async function flashSelection(target) {
   const element = target?.closest?.(".history-exercise-card, .exercise-definition, .exercise-draft, .history-session-card, button");
   if (!element) return;
@@ -5654,6 +5777,7 @@ async function render({ animate = false } = {}) {
   if (token !== renderToken) return;
   els.app.classList.remove("content-exit", "content-enter");
   if (animate) els.app.classList.add("content-enter");
+  initializeCollapsiblePanels();
   applyStaggerAnimations();
   if (typeof requestAnimationFrame === "function") requestAnimationFrame(updateScrollTopButton);
   else updateScrollTopButton();
@@ -7947,6 +8071,8 @@ document.addEventListener("toggle", (event) => {
     setSettingsPanelOpen(panel.dataset.settingsPanel, panel.open);
   }
 }, true);
+
+document.addEventListener("click", handleCollapsibleSummaryClick, true);
 
 document.addEventListener("click", async (event) => {
   const tab = event.target.closest("[data-tab]");

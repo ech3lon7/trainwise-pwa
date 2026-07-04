@@ -155,6 +155,17 @@ assert(stylesCode.includes(".data-safety-grid"), "Expected data safety summary s
 assert(stylesCode.includes(".widget-preference-list"), "Expected Today widget preference styling.");
 assert(stylesCode.includes(".collapsible-panel"), "Expected secondary settings/notes panels to be collapsible.");
 assert(stylesCode.includes(".settings-panel.collapsible-panel"), "Expected Settings panels to use collapsible panel styling.");
+assert(appCode.includes("initializeCollapsiblePanels"), "Expected rendered collapse panels to use the shared animation initializer.");
+assert(appCode.includes("animateCollapsiblePanel"), "Expected collapse panels to use reversible open/close animation handling.");
+assert(appCode.includes("triggerCollapseDataReveal"), "Expected expanded data panels to replay chart, progress, and muscle-audit reveals.");
+assert(appCode.includes("summary.parentElement !== panel"), "Expected nested collapse summaries to animate independently from parent panels.");
+assert(stylesCode.includes(".collapse-content"), "Expected collapsible content to have shared height/fade/slide transitions.");
+assert(stylesCode.includes(".collapse-flash-open"), "Expected opening panels to briefly brighten green.");
+assert(stylesCode.includes(".collapse-flash-close"), "Expected closing panels to briefly brighten purple.");
+assert(stylesCode.includes("collapseChartLineReveal"), "Expected chart lines to redraw when their panel opens.");
+assert(stylesCode.includes("collapseMuscleRowReveal"), "Expected muscle audit rows to reveal with a subtle stagger.");
+assert(stylesCode.includes(".is-data-revealing .progress-bar span"), "Expected progress bars to animate when revealed.");
+assert(stylesCode.includes("prefers-reduced-motion: reduce"), "Expected collapse effects to respect reduced-motion preferences.");
 assert(stylesCode.includes(".empty-restore-row"), "Expected inline Log empty-state restore styling.");
 assert(appCode.includes("muscle-audit-panel"), "Expected long Coach muscle set audit to be collapsible.");
 assert(appCode.includes("scrollTopButtonShouldShow"), "Expected scroll-to-top threshold helper.");
@@ -169,9 +180,9 @@ assert(!appCode.includes('selectedExercise: "Push-up"'), "Expected Log startup n
 assert(!appCode.includes('showBanner("Unsaved draft restored."'), "Expected startup draft recovery not to show a top banner.");
 assert(appCode.includes("notifyMetricSaved"), "Expected metrics saves to use a dedicated bottom-only notification helper.");
 assert(!stylesCode.includes(".mobile-quick-toggle"), "Expected floating quick action button styling to be removed.");
-assert(indexCode.includes("v=1.5.44"), "Expected index shell references to use bumped app version.");
+assert(indexCode.includes("v=1.5.45"), "Expected index shell references to use bumped app version.");
 assert(!indexCode.includes('id="app" class="app-content" aria-live'), "Expected broad app aria-live to be removed in favor of targeted live regions.");
-assert(serviceWorkerCode.includes("trainwise-cache-v66"), "Expected service worker cache version bump.");
+assert(serviceWorkerCode.includes("trainwise-cache-v67"), "Expected service worker cache version bump.");
 assert(appCode.includes("data-settings-panel"), "Expected Settings panels to preserve open state with stable panel ids.");
 assert(appCode.includes('forceSettingsPanelOpen("supabase-sync")'), "Expected Supabase actions to keep the Supabase panel open after rendering.");
 
