@@ -3,16 +3,17 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 3;
 const STORES = ["workouts", "metrics", "settings", "syncQueue"];
-const APP_VERSION = "1.5.45";
+const APP_VERSION = "1.5.47";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 const DRAFT_RECOVERY_KEY = "trainwise-draft-recovery-v1";
 const COPIED_COACH_PLAN_KEY = "trainwise-copied-coach-plan-v1";
 const SYNC_BOOTSTRAP_VERSION = 1;
 const SYNC_POLL_MS = 60000;
 const SYNC_SAFE_PREFERENCES = ["hypertrophyProfile", "nutritionGoal", "dashboardWidgets", "dashboardWidgetOrder"];
-const COLLAPSE_ANIMATION_MS = 240;
-const COLLAPSE_REVEAL_MS = 760;
+const COLLAPSE_ANIMATION_MS = 360;
+const COLLAPSE_REVEAL_MS = 1600;
 const COLLAPSIBLE_SELECTOR = "details.collapsible-panel, details.coverage-row, details.inline-disclosure";
+const SILENT_UI_ACTIONS = new Set(["decrement-rir", "increment-rir", "scroll-top"]);
 let dbOpenPromise = null;
 let chartId = 0;
 let reloadingForUpdate = false;
@@ -21,6 +22,8 @@ let scrollTopTimer = null;
 let recordSyncTimer = null;
 let recordSyncPromise = null;
 let recordSyncLifecycleStarted = false;
+let uiAudioContext = null;
+let lastUiCueAt = 0;
 const SESSION_LIMIT_MINUTES = 60;
 const COACH_TIME_TOLERANCE_MINUTES = 3;
 const COACH_TIMEFRAME_OPTIONS = [
@@ -327,13 +330,92 @@ function showBanner(message, options = {}) {
   };
 }
 
+function soundEffectsEnabled() {
+  return state.settings.soundEffectsEnabled !== false;
+}
+
+function soundEffectsVolumePercent() {
+  const value = Number(state.settings.soundEffectsVolume);
+  return Number.isFinite(value) ? Math.max(0, Math.min(100, value)) : 35;
+}
+
+function uiCueNotes(type) {
+  const cues = {
+    tap: [{ frequency: 520, endFrequency: 580, duration: 0.045, gain: 0.055, wave: "sine" }],
+    navigate: [{ frequency: 440, endFrequency: 620, duration: 0.07, gain: 0.065, wave: "sine" }],
+    expand: [{ frequency: 390, endFrequency: 610, duration: 0.085, gain: 0.07, wave: "sine" }],
+    collapse: [{ frequency: 610, endFrequency: 390, duration: 0.075, gain: 0.06, wave: "sine" }],
+    success: [
+      { frequency: 620, endFrequency: 700, duration: 0.09, gain: 0.075, wave: "sine" },
+      { frequency: 840, endFrequency: 920, duration: 0.1, gain: 0.065, wave: "sine", delay: 0.065 }
+    ],
+    warning: [{ frequency: 330, endFrequency: 245, duration: 0.13, gain: 0.065, wave: "triangle" }],
+    error: [
+      { frequency: 245, endFrequency: 205, duration: 0.1, gain: 0.07, wave: "triangle" },
+      { frequency: 190, endFrequency: 165, duration: 0.12, gain: 0.065, wave: "triangle", delay: 0.085 }
+    ]
+  };
+  return cues[type] || cues.tap;
+}
+
+function emitUiCue(context, type) {
+  const volume = soundEffectsVolumePercent() / 100;
+  if (!volume) return;
+  const start = context.currentTime + 0.006;
+  uiCueNotes(type).forEach((note) => {
+    const oscillator = context.createOscillator();
+    const gain = context.createGain();
+    const noteStart = start + Number(note.delay || 0);
+    const noteEnd = noteStart + note.duration;
+    oscillator.type = note.wave;
+    oscillator.frequency.setValueAtTime(note.frequency, noteStart);
+    oscillator.frequency.exponentialRampToValueAtTime(note.endFrequency, noteEnd);
+    gain.gain.setValueAtTime(0.0001, noteStart);
+    gain.gain.exponentialRampToValueAtTime(Math.max(0.0001, note.gain * volume), noteStart + 0.012);
+    gain.gain.exponentialRampToValueAtTime(0.0001, noteEnd);
+    oscillator.connect(gain);
+    gain.connect(context.destination);
+    oscillator.start(noteStart);
+    oscillator.stop(noteEnd + 0.01);
+  });
+}
+
+function playUiCue(type = "tap", options = {}) {
+  if (!options.force && !soundEffectsEnabled()) return false;
+  const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+  if (!AudioContextClass || document.hidden) return false;
+  const now = Date.now();
+  if (["tap", "navigate"].includes(type) && now - lastUiCueAt < 45) return false;
+  lastUiCueAt = now;
+  try {
+    if (!uiAudioContext || uiAudioContext.state === "closed") uiAudioContext = new AudioContextClass();
+    if (uiAudioContext.state === "suspended") {
+      uiAudioContext.resume().then(() => emitUiCue(uiAudioContext, type)).catch(() => {});
+    } else {
+      emitUiCue(uiAudioContext, type);
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function shouldPlayMeaningfulControlCue(target) {
+  if (!target || target.disabled) return false;
+  const action = String(target.dataset?.action || "");
+  if (SILENT_UI_ACTIONS.has(action) || action.startsWith("move-") || action.startsWith("reorder-")) return false;
+  return Boolean(target.matches?.("button, [role='button']"));
+}
+
 function announce(message, options = {}) {
   showBanner(message, options);
   toast(message);
+  if (options.sound) playUiCue(options.sound);
 }
 
 function notifyMetricSaved(existing) {
   toast(existing ? "Metrics updated." : "Metrics saved.", { duration: 2000 });
+  playUiCue("success");
 }
 
 function scrollTopButtonShouldShow(scrollY = 0, scrollHeight = 0, clientHeight = 0) {
@@ -5527,6 +5609,19 @@ async function renderSettings() {
       ${renderDashboardWidgetSelector()}
     `, { id: "today-widgets" })}
 
+    ${renderSettingsPanel("Sound effects", soundEffectsEnabled() ? "On" : "Off", `
+      <label class="checkbox-row sound-enabled-row" for="sound-effects-enabled">
+        <input id="sound-effects-enabled" type="checkbox" data-sound-effects-enabled ${soundEffectsEnabled() ? "checked" : ""}>
+        <span>Play interface sounds</span>
+      </label>
+      <div class="field sound-volume-control">
+        <label for="sound-effects-volume">Volume <strong data-sound-volume-label>${soundEffectsVolumePercent()}%</strong></label>
+        <input id="sound-effects-volume" type="range" min="0" max="100" step="5" value="${soundEffectsVolumePercent()}" data-sound-effects-volume>
+      </div>
+      <button class="ghost-button full-button" type="button" data-action="preview-sound">Preview sound</button>
+      <p class="muted micro">Stored on this device only. Rapid logging controls stay quiet.</p>
+    `, { id: "sound-effects" })}
+
     ${renderSettingsPanel("Data safety", "backup status", `
       <p class="muted small">A quick confidence check before imports, cloud sync, or app updates.</p>
       ${dataSafetySummaryMarkup()}
@@ -5639,18 +5734,27 @@ function ensureCollapseContent(panel) {
     }
     panel.appendChild(content);
   }
+  let feedbackRing = Array.from(panel.children).find((child) => child.classList?.contains("collapse-feedback-ring"));
+  if (!feedbackRing) {
+    feedbackRing = document.createElement("span");
+    feedbackRing.className = "collapse-feedback-ring";
+    feedbackRing.setAttribute("aria-hidden", "true");
+    panel.appendChild(feedbackRing);
+  }
   panel.classList.add("collapse-enhanced");
-  return { summary, content };
+  return { summary, content, feedbackRing };
 }
 
 function flashCollapseBorder(panel, opening) {
   if (prefersReducedMotion()) return;
-  clearTimeout(panel._collapseFlashTimer);
-  panel.classList.remove("collapse-flash-open", "collapse-flash-close");
-  void panel.offsetWidth;
-  panel.classList.add(opening ? "collapse-flash-open" : "collapse-flash-close");
-  panel._collapseFlashTimer = setTimeout(() => {
-    panel.classList.remove("collapse-flash-open", "collapse-flash-close");
+  const feedbackRing = Array.from(panel.children).find((child) => child.classList?.contains("collapse-feedback-ring"));
+  if (!feedbackRing) return;
+  clearTimeout(feedbackRing._collapseFlashTimer);
+  feedbackRing.classList.remove("collapse-flash-open", "collapse-flash-close");
+  void feedbackRing.offsetWidth;
+  feedbackRing.classList.add(opening ? "collapse-flash-open" : "collapse-flash-close");
+  feedbackRing._collapseFlashTimer = setTimeout(() => {
+    feedbackRing.classList.remove("collapse-flash-open", "collapse-flash-close");
   }, 420);
 }
 
@@ -5684,6 +5788,7 @@ function finishCollapseAnimation(panel, content, opening) {
   panel.classList.remove("is-collapse-animating");
   delete panel.dataset.collapseTarget;
   delete panel._collapseAnimationTimer;
+  if (opening) triggerCollapseDataReveal(panel);
 }
 
 function animateCollapsiblePanel(panel, opening) {
@@ -5711,7 +5816,6 @@ function animateCollapsiblePanel(panel, opening) {
     content.style.height = opening ? `${content.scrollHeight}px` : "0px";
     content.style.opacity = opening ? "1" : "0";
     content.style.transform = opening ? "translateY(0)" : "translateY(-8px)";
-    if (opening) triggerCollapseDataReveal(panel);
   });
 
   panel._collapseAnimationTimer = setTimeout(
@@ -5733,6 +5837,7 @@ function handleCollapsibleSummaryClick(event) {
   event.preventDefault();
   const pendingTarget = panel.dataset.collapseTarget;
   const opening = pendingTarget ? pendingTarget !== "true" : !panel.open;
+  playUiCue(opening ? "expand" : "collapse");
   animateCollapsiblePanel(panel, opening);
 }
 
@@ -5883,7 +5988,7 @@ async function saveExercise(form) {
   state.selectedExercise = exercise.name;
   state.draftTargetMuscle = exercise.primaryMuscles[0] || "chest";
   clearDraftRecoveryScope("exercise");
-  announce(existing ? "Exercise updated." : "Exercise saved.", { tone: "good" });
+  announce(existing ? "Exercise updated." : "Exercise saved.", { tone: "good", sound: "success" });
   await render();
 }
 
@@ -5949,6 +6054,7 @@ async function saveWorkout(form) {
   clearDraftRecoveryScope("strength");
   announce(hadExisting ? "Workout updated." : "Workout locked in.", {
     tone: "good",
+    sound: "success",
     detail: "Charts updated. Undo is available if this was accidental.",
     action: "undo-last-action",
     actionLabel: "Undo"
@@ -7370,6 +7476,7 @@ async function handleAction(action, target) {
       state.exerciseFormErrors = {};
       await render({ animate: true });
     },
+    async "preview-sound"() { playUiCue("success", { force: true }); },
     async "refresh-app-shell"() { await refreshAppShell(); },
     async "confirm-import"() { await confirmPendingImport(); },
     async "cancel-import"() {
@@ -7536,7 +7643,7 @@ async function handleAction(action, target) {
     },
     async "copy-coach-plan"() {
       copyCoachPlanToLog(buildTodayPlan(selectedCoachTimeframeMinutes()));
-      announce("Coach plan copied to Log.", { tone: "good", detail: "Exercises and planned sets are ready as an unsaved draft." });
+      announce("Coach plan copied to Log.", { tone: "good", sound: "success", detail: "Exercises and planned sets are ready as an unsaved draft." });
       await render({ animate: true });
     },
     async "export-coach-debug"() { await downloadCoachDebugReport(); },
@@ -7664,14 +7771,14 @@ async function handleAction(action, target) {
         setUndoAction("Undo exercise change", { type: "custom-exercises", previous: exercises });
         await saveSetting("customExercises", exercises.filter((item) => item.id !== exercise.id));
         await queueSyncChange("exercise", exercise.id, null, { deleted: true });
-        announce("Exercise deleted.", { tone: "warn", action: "undo-last-action", actionLabel: "Undo" });
+        announce("Exercise deleted.", { tone: "warn", sound: "warning", action: "undo-last-action", actionLabel: "Undo" });
       } else {
         if (!confirm(`Archive "${exercise.name}"? Existing logs stay intact.`)) return;
         setUndoAction("Undo exercise change", { type: "custom-exercises", previous: exercises });
         const archived = { ...exercise, archivedAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
         await saveSetting("customExercises", exercises.map((item) => item.id === exercise.id ? archived : item));
         await queueSyncChange("exercise", archived.id, archived);
-        announce("Exercise archived.", { tone: "warn", action: "undo-last-action", actionLabel: "Undo" });
+        announce("Exercise archived.", { tone: "warn", sound: "warning", action: "undo-last-action", actionLabel: "Undo" });
       }
       scheduleRecordSync();
       if (state.editingExerciseId === exercise.id) state.editingExerciseId = null;
@@ -7704,7 +7811,7 @@ async function handleAction(action, target) {
       scheduleRecordSync();
       if (state.editingExerciseId === exercise.id) state.editingExerciseId = null;
       state.openExerciseActionMenu = null;
-      announce("Exercise deleted.", { tone: "warn", action: "undo-last-action", actionLabel: "Undo" });
+      announce("Exercise deleted.", { tone: "warn", sound: "warning", action: "undo-last-action", actionLabel: "Undo" });
       await render();
     },
     async "log-exercise"() {
@@ -7851,7 +7958,7 @@ async function handleAction(action, target) {
       scheduleRecordSync();
       if (state.editingWorkoutId === target.dataset.id) clearWorkoutDraft();
       await loadState();
-      announce("Lift deleted.", { tone: "warn", action: "undo-last-action", actionLabel: "Undo" });
+      announce("Lift deleted.", { tone: "warn", sound: "warning", action: "undo-last-action", actionLabel: "Undo" });
       await render();
     },
     async "delete-metric"() {
@@ -7866,7 +7973,7 @@ async function handleAction(action, target) {
       if (metricDate) await queueSyncChange("metric", metricDate, null, { deleted: true });
       scheduleRecordSync();
       await loadState();
-      announce("Metric deleted.", { tone: "warn", action: "undo-last-action", actionLabel: "Undo" });
+      announce("Metric deleted.", { tone: "warn", sound: "warning", action: "undo-last-action", actionLabel: "Undo" });
       await render();
     },
     async "choose-exercise"() {
@@ -8078,9 +8185,11 @@ document.addEventListener("click", async (event) => {
   const tab = event.target.closest("[data-tab]");
   const logMode = event.target.closest("[data-log-mode]");
   const action = event.target.closest("[data-action]");
+  const button = event.target.closest("button, [role='button']");
 
   try {
     if (tab) {
+      if (tab.dataset.tab !== state.activeTab) playUiCue("navigate");
       if (tab.dataset.tab !== state.activeTab) preserveVisibleDraft("tab-change");
       state.activeTab = tab.dataset.tab;
       state.weeklyMuscleDetail = null;
@@ -8090,6 +8199,7 @@ document.addEventListener("click", async (event) => {
     if (logMode) {
       const nextMode = logMode.dataset.logMode;
       if (nextMode !== state.logMode) {
+        playUiCue("navigate");
         preserveVisibleDraft("log-mode-change");
         applyLogModeSwitch(nextMode);
       }
@@ -8097,15 +8207,32 @@ document.addEventListener("click", async (event) => {
       await render();
     }
     if (action) {
+      if (action.dataset.action !== "preview-sound" && shouldPlayMeaningfulControlCue(action)) playUiCue("tap");
       await handleAction(action.dataset.action, action);
+    } else if (!tab && !logMode && shouldPlayMeaningfulControlCue(button)) {
+      playUiCue("tap");
     }
   } catch (error) {
+    playUiCue("error");
     toast(error.message || "Something went wrong.");
   }
 });
 
 document.addEventListener("change", async (event) => {
   try {
+    if (event.target.matches("[data-sound-effects-enabled]")) {
+      await saveSetting("soundEffectsEnabled", Boolean(event.target.checked));
+      forceSettingsPanelOpen("sound-effects");
+      if (event.target.checked) playUiCue("success");
+      await render();
+      return;
+    }
+    if (event.target.matches("[data-sound-effects-volume]")) {
+      const volume = Math.max(0, Math.min(100, Number(event.target.value) || 0));
+      await saveSetting("soundEffectsVolume", volume);
+      playUiCue("tap");
+      return;
+    }
     if (event.target.matches("[data-draft-field='exercise']")) {
       readDraftFromForm();
       const draft = state.workoutDraft.find((item) => item.draftId === event.target.dataset.draftId);
@@ -8143,12 +8270,20 @@ document.addEventListener("change", async (event) => {
       event.target.value = "";
     }
   } catch (error) {
+    playUiCue("error");
     toast(error.message || "Import failed.");
   }
 });
 
 document.addEventListener("input", async (event) => {
   try {
+    if (event.target.matches("[data-sound-effects-volume]")) {
+      const volume = Math.max(0, Math.min(100, Number(event.target.value) || 0));
+      state.settings.soundEffectsVolume = volume;
+      const label = document.querySelector("[data-sound-volume-label]");
+      if (label) label.textContent = `${volume}%`;
+      return;
+    }
     if (event.target.matches("[data-meal-field], [data-quick-field]")) {
       refreshNutritionFormTotals(event.target.closest("#metric-form"));
     }
@@ -8198,6 +8333,7 @@ document.addEventListener("input", async (event) => {
       saveDraftRecovery("exercise-input");
     }
   } catch (error) {
+    playUiCue("error");
     toast(error.message || "Something went wrong.");
   }
 });
@@ -8317,6 +8453,7 @@ document.addEventListener("submit", async (event) => {
     if (event.target.matches("#strength-form")) await saveWorkout(event.target);
     if (event.target.matches("#metric-form")) await saveMetric(event.target);
   } catch (error) {
+    playUiCue("error");
     toast(error.message || "Could not save.");
   }
 });

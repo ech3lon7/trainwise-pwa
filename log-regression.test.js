@@ -165,7 +165,17 @@ assert(stylesCode.includes(".collapse-flash-close"), "Expected closing panels to
 assert(stylesCode.includes("collapseChartLineReveal"), "Expected chart lines to redraw when their panel opens.");
 assert(stylesCode.includes("collapseMuscleRowReveal"), "Expected muscle audit rows to reveal with a subtle stagger.");
 assert(stylesCode.includes(".is-data-revealing .progress-bar span"), "Expected progress bars to animate when revealed.");
+assert(appCode.includes("if (opening) triggerCollapseDataReveal(panel)"), "Expected data reveals to begin after collapse motion finishes.");
+assert(stylesCode.includes("animation: fillBar 1.35s"), "Expected expanded progress bars to use a clearly visible slower fill.");
+assert(stylesCode.includes(".collapse-feedback-ring"), "Expected border feedback to use a lightweight composited ring.");
+assert(!/\.collapse-flash-open\s*\{[^}]*box-shadow/s.test(stylesCode), "Expected opening feedback not to animate painted box shadows.");
 assert(stylesCode.includes("prefers-reduced-motion: reduce"), "Expected collapse effects to respect reduced-motion preferences.");
+assert(appCode.includes("playUiCue"), "Expected a centralized app audio cue helper.");
+assert(appCode.includes("shouldPlayMeaningfulControlCue"), "Expected meaningful-control audio classification.");
+assert(appCode.includes("data-sound-effects-enabled"), "Expected Settings to expose an audio enable control.");
+assert(appCode.includes("data-sound-effects-volume"), "Expected Settings to expose an audio volume control.");
+assert(appCode.includes('"preview-sound"'), "Expected Settings to provide a sound preview action.");
+assert(!/SYNC_SAFE_PREFERENCES\s*=\s*\[[^\]]*soundEffects/s.test(appCode), "Expected sound preferences to remain device-local instead of cloud synced.");
 assert(stylesCode.includes(".empty-restore-row"), "Expected inline Log empty-state restore styling.");
 assert(appCode.includes("muscle-audit-panel"), "Expected long Coach muscle set audit to be collapsible.");
 assert(appCode.includes("scrollTopButtonShouldShow"), "Expected scroll-to-top threshold helper.");
@@ -180,9 +190,9 @@ assert(!appCode.includes('selectedExercise: "Push-up"'), "Expected Log startup n
 assert(!appCode.includes('showBanner("Unsaved draft restored."'), "Expected startup draft recovery not to show a top banner.");
 assert(appCode.includes("notifyMetricSaved"), "Expected metrics saves to use a dedicated bottom-only notification helper.");
 assert(!stylesCode.includes(".mobile-quick-toggle"), "Expected floating quick action button styling to be removed.");
-assert(indexCode.includes("v=1.5.45"), "Expected index shell references to use bumped app version.");
+assert(indexCode.includes("v=1.5.47"), "Expected index shell references to use bumped app version.");
 assert(!indexCode.includes('id="app" class="app-content" aria-live'), "Expected broad app aria-live to be removed in favor of targeted live regions.");
-assert(serviceWorkerCode.includes("trainwise-cache-v67"), "Expected service worker cache version bump.");
+assert(serviceWorkerCode.includes("trainwise-cache-v69"), "Expected service worker cache version bump.");
 assert(appCode.includes("data-settings-panel"), "Expected Settings panels to preserve open state with stable panel ids.");
 assert(appCode.includes('forceSettingsPanelOpen("supabase-sync")'), "Expected Supabase actions to keep the Supabase panel open after rendering.");
 
@@ -203,6 +213,19 @@ const settingsPanelOpenState = runScenario(`
 assert.strictEqual(settingsPanelOpenState.closedHasOpen, false, "Expected Supabase settings panel to start collapsed without session state.");
 assert.strictEqual(settingsPanelOpenState.openHasOpen, true, "Expected Supabase settings panel to render open after session preservation.");
 assert.strictEqual(settingsPanelOpenState.closedAgainHasOpen, false, "Expected Supabase settings panel to respect user collapse.");
+
+const soundDefaults = runScenario(`
+  state.settings = {};
+  ({
+    enabled: soundEffectsEnabled(),
+    volume: soundEffectsVolumePercent(),
+    excludesRir: shouldPlayMeaningfulControlCue({ dataset: { action: "increment-rir" }, matches: () => true })
+  });
+`);
+
+assert.strictEqual(soundDefaults.enabled, true, "Expected sound effects to default on.");
+assert.strictEqual(soundDefaults.volume, 35, `Expected default sound volume to be 35%, got ${soundDefaults.volume}`);
+assert.strictEqual(soundDefaults.excludesRir, false, "Expected rapid RIR controls to remain silent.");
 
 const nutritionQuickTotals = runScenario(`
   ${reset}
