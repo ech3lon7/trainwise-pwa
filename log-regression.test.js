@@ -171,6 +171,9 @@ assert(stylesCode.includes(".collapse-feedback-ring"), "Expected border feedback
 assert(!/\.collapse-flash-open\s*\{[^}]*box-shadow/s.test(stylesCode), "Expected opening feedback not to animate painted box shadows.");
 assert(stylesCode.includes("prefers-reduced-motion: reduce"), "Expected collapse effects to respect reduced-motion preferences.");
 assert(appCode.includes("playUiCue"), "Expected a centralized app audio cue helper.");
+assert(appCode.includes("unlockUiAudio"), "Expected touch/pointer gestures to unlock mobile audio before click cues.");
+assert(appCode.includes("playUiCueFallback"), "Expected generated WAV playback when Web Audio is unavailable or rejected.");
+assert(appCode.includes("buildUiCueWavDataUri"), "Expected the audio fallback to remain self-contained without external sound assets.");
 assert(appCode.includes("shouldPlayMeaningfulControlCue"), "Expected meaningful-control audio classification.");
 assert(appCode.includes("data-sound-effects-enabled"), "Expected Settings to expose an audio enable control.");
 assert(appCode.includes("data-sound-effects-volume"), "Expected Settings to expose an audio volume control.");
@@ -190,9 +193,9 @@ assert(!appCode.includes('selectedExercise: "Push-up"'), "Expected Log startup n
 assert(!appCode.includes('showBanner("Unsaved draft restored."'), "Expected startup draft recovery not to show a top banner.");
 assert(appCode.includes("notifyMetricSaved"), "Expected metrics saves to use a dedicated bottom-only notification helper.");
 assert(!stylesCode.includes(".mobile-quick-toggle"), "Expected floating quick action button styling to be removed.");
-assert(indexCode.includes("v=1.5.47"), "Expected index shell references to use bumped app version.");
+assert(indexCode.includes("v=1.5.48"), "Expected index shell references to use bumped app version.");
 assert(!indexCode.includes('id="app" class="app-content" aria-live'), "Expected broad app aria-live to be removed in favor of targeted live regions.");
-assert(serviceWorkerCode.includes("trainwise-cache-v69"), "Expected service worker cache version bump.");
+assert(serviceWorkerCode.includes("trainwise-cache-v70"), "Expected service worker cache version bump.");
 assert(appCode.includes("data-settings-panel"), "Expected Settings panels to preserve open state with stable panel ids.");
 assert(appCode.includes('forceSettingsPanelOpen("supabase-sync")'), "Expected Supabase actions to keep the Supabase panel open after rendering.");
 

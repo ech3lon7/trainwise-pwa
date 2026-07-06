@@ -3,7 +3,7 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 3;
 const STORES = ["workouts", "metrics", "settings", "syncQueue"];
-const APP_VERSION = "1.5.47";
+const APP_VERSION = "1.5.48";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 const DRAFT_RECOVERY_KEY = "trainwise-draft-recovery-v1";
 const COPIED_COACH_PLAN_KEY = "trainwise-copied-coach-plan-v1";
@@ -14,6 +14,7 @@ const COLLAPSE_ANIMATION_MS = 360;
 const COLLAPSE_REVEAL_MS = 1600;
 const COLLAPSIBLE_SELECTOR = "details.collapsible-panel, details.coverage-row, details.inline-disclosure";
 const SILENT_UI_ACTIONS = new Set(["decrement-rir", "increment-rir", "scroll-top"]);
+const uiCueFallbackCache = new Map();
 let dbOpenPromise = null;
 let chartId = 0;
 let reloadingForUpdate = false;
@@ -341,18 +342,18 @@ function soundEffectsVolumePercent() {
 
 function uiCueNotes(type) {
   const cues = {
-    tap: [{ frequency: 520, endFrequency: 580, duration: 0.045, gain: 0.055, wave: "sine" }],
-    navigate: [{ frequency: 440, endFrequency: 620, duration: 0.07, gain: 0.065, wave: "sine" }],
-    expand: [{ frequency: 390, endFrequency: 610, duration: 0.085, gain: 0.07, wave: "sine" }],
-    collapse: [{ frequency: 610, endFrequency: 390, duration: 0.075, gain: 0.06, wave: "sine" }],
+    tap: [{ frequency: 520, endFrequency: 580, duration: 0.065, gain: 0.12, wave: "sine" }],
+    navigate: [{ frequency: 440, endFrequency: 620, duration: 0.095, gain: 0.14, wave: "sine" }],
+    expand: [{ frequency: 390, endFrequency: 610, duration: 0.12, gain: 0.15, wave: "sine" }],
+    collapse: [{ frequency: 610, endFrequency: 390, duration: 0.11, gain: 0.14, wave: "sine" }],
     success: [
-      { frequency: 620, endFrequency: 700, duration: 0.09, gain: 0.075, wave: "sine" },
-      { frequency: 840, endFrequency: 920, duration: 0.1, gain: 0.065, wave: "sine", delay: 0.065 }
+      { frequency: 620, endFrequency: 700, duration: 0.11, gain: 0.16, wave: "sine" },
+      { frequency: 840, endFrequency: 920, duration: 0.12, gain: 0.14, wave: "sine", delay: 0.075 }
     ],
-    warning: [{ frequency: 330, endFrequency: 245, duration: 0.13, gain: 0.065, wave: "triangle" }],
+    warning: [{ frequency: 330, endFrequency: 245, duration: 0.16, gain: 0.14, wave: "triangle" }],
     error: [
-      { frequency: 245, endFrequency: 205, duration: 0.1, gain: 0.07, wave: "triangle" },
-      { frequency: 190, endFrequency: 165, duration: 0.12, gain: 0.065, wave: "triangle", delay: 0.085 }
+      { frequency: 245, endFrequency: 205, duration: 0.12, gain: 0.15, wave: "triangle" },
+      { frequency: 190, endFrequency: 165, duration: 0.14, gain: 0.14, wave: "triangle", delay: 0.095 }
     ]
   };
   return cues[type] || cues.tap;
@@ -380,23 +381,91 @@ function emitUiCue(context, type) {
   });
 }
 
-function playUiCue(type = "tap", options = {}) {
-  if (!options.force && !soundEffectsEnabled()) return false;
-  const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-  if (!AudioContextClass || document.hidden) return false;
-  const now = Date.now();
-  if (["tap", "navigate"].includes(type) && now - lastUiCueAt < 45) return false;
-  lastUiCueAt = now;
-  try {
-    if (!uiAudioContext || uiAudioContext.state === "closed") uiAudioContext = new AudioContextClass();
-    if (uiAudioContext.state === "suspended") {
-      uiAudioContext.resume().then(() => emitUiCue(uiAudioContext, type)).catch(() => {});
-    } else {
-      emitUiCue(uiAudioContext, type);
+function buildUiCueWavDataUri(type) {
+  if (uiCueFallbackCache.has(type)) return uiCueFallbackCache.get(type);
+  const sampleRate = 22050;
+  const notes = uiCueNotes(type);
+  const duration = Math.max(...notes.map((note) => Number(note.delay || 0) + note.duration)) + 0.025;
+  const sampleCount = Math.ceil(duration * sampleRate);
+  const samples = new Float32Array(sampleCount);
+  notes.forEach((note) => {
+    const start = Math.floor(Number(note.delay || 0) * sampleRate);
+    const end = Math.min(sampleCount, start + Math.ceil(note.duration * sampleRate));
+    let phase = 0;
+    for (let index = start; index < end; index += 1) {
+      const progress = (index - start) / Math.max(1, end - start - 1);
+      const frequency = note.frequency + (note.endFrequency - note.frequency) * progress;
+      phase += (Math.PI * 2 * frequency) / sampleRate;
+      const raw = note.wave === "triangle" ? (2 / Math.PI) * Math.asin(Math.sin(phase)) : Math.sin(phase);
+      const envelope = Math.min(1, progress / 0.12, (1 - progress) / 0.22);
+      samples[index] += raw * envelope * note.gain * 3.2;
     }
+  });
+
+  const buffer = new ArrayBuffer(44 + sampleCount * 2);
+  const view = new DataView(buffer);
+  const writeText = (offset, value) => Array.from(value).forEach((character, index) => view.setUint8(offset + index, character.charCodeAt(0)));
+  writeText(0, "RIFF");
+  view.setUint32(4, 36 + sampleCount * 2, true);
+  writeText(8, "WAVEfmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  writeText(36, "data");
+  view.setUint32(40, sampleCount * 2, true);
+  samples.forEach((sample, index) => view.setInt16(44 + index * 2, Math.max(-1, Math.min(1, sample)) * 0x7fff, true));
+  const bytes = new Uint8Array(buffer);
+  let binary = "";
+  for (let index = 0; index < bytes.length; index += 1) binary += String.fromCharCode(bytes[index]);
+  const dataUri = `data:audio/wav;base64,${window.btoa(binary)}`;
+  uiCueFallbackCache.set(type, dataUri);
+  return dataUri;
+}
+
+function playUiCueFallback(type) {
+  if (typeof window.Audio !== "function" || typeof window.btoa !== "function") return false;
+  try {
+    const audio = new window.Audio(buildUiCueWavDataUri(type));
+    audio.volume = Math.min(1, (soundEffectsVolumePercent() / 100) * 1.8);
+    const playback = audio.play();
+    playback?.catch?.(() => {});
     return true;
   } catch {
     return false;
+  }
+}
+
+function unlockUiAudio() {
+  if (!soundEffectsEnabled()) return false;
+  const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+  if (!AudioContextClass) return false;
+  try {
+    if (!uiAudioContext || uiAudioContext.state === "closed") uiAudioContext = new AudioContextClass();
+    if (uiAudioContext.state !== "running") uiAudioContext.resume().catch(() => {});
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function playUiCue(type = "tap", options = {}) {
+  if (!options.force && !soundEffectsEnabled()) return false;
+  const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+  const now = Date.now();
+  if (["tap", "navigate"].includes(type) && now - lastUiCueAt < 45) return false;
+  lastUiCueAt = now;
+  if (!AudioContextClass) return playUiCueFallback(type);
+  try {
+    if (!uiAudioContext || uiAudioContext.state === "closed") uiAudioContext = new AudioContextClass();
+    emitUiCue(uiAudioContext, type);
+    if (uiAudioContext.state !== "running") uiAudioContext.resume().catch(() => playUiCueFallback(type));
+    return true;
+  } catch {
+    return playUiCueFallback(type);
   }
 }
 
@@ -7476,7 +7545,10 @@ async function handleAction(action, target) {
       state.exerciseFormErrors = {};
       await render({ animate: true });
     },
-    async "preview-sound"() { playUiCue("success", { force: true }); },
+    async "preview-sound"() {
+      const played = playUiCue("success", { force: true });
+      toast(played ? "Sound preview played." : "Audio is unavailable in this browser.", { duration: 2000 });
+    },
     async "refresh-app-shell"() { await refreshAppShell(); },
     async "confirm-import"() { await confirmPendingImport(); },
     async "cancel-import"() {
@@ -8171,6 +8243,9 @@ function restoreCoachTargetScroll(scrollLeft) {
   if (typeof requestAnimationFrame === "function") requestAnimationFrame(restore);
   else restore();
 }
+
+document.addEventListener("pointerdown", unlockUiAudio, { capture: true, passive: true });
+document.addEventListener("touchstart", unlockUiAudio, { capture: true, passive: true });
 
 document.addEventListener("toggle", (event) => {
   const panel = event.target?.closest?.("details[data-settings-panel]");
