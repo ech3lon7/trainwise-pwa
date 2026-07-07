@@ -193,9 +193,9 @@ assert(!appCode.includes('selectedExercise: "Push-up"'), "Expected Log startup n
 assert(!appCode.includes('showBanner("Unsaved draft restored."'), "Expected startup draft recovery not to show a top banner.");
 assert(appCode.includes("notifyMetricSaved"), "Expected metrics saves to use a dedicated bottom-only notification helper.");
 assert(!stylesCode.includes(".mobile-quick-toggle"), "Expected floating quick action button styling to be removed.");
-assert(indexCode.includes("v=1.5.48"), "Expected index shell references to use bumped app version.");
+assert(indexCode.includes("v=1.5.49"), "Expected index shell references to use bumped app version.");
 assert(!indexCode.includes('id="app" class="app-content" aria-live'), "Expected broad app aria-live to be removed in favor of targeted live regions.");
-assert(serviceWorkerCode.includes("trainwise-cache-v70"), "Expected service worker cache version bump.");
+assert(serviceWorkerCode.includes("trainwise-cache-v71"), "Expected service worker cache version bump.");
 assert(appCode.includes("data-settings-panel"), "Expected Settings panels to preserve open state with stable panel ids.");
 assert(appCode.includes('forceSettingsPanelOpen("supabase-sync")'), "Expected Supabase actions to keep the Supabase panel open after rendering.");
 
@@ -785,6 +785,29 @@ const liveTrophySlots = runScenario(`
 assert(liveTrophySlots.hasSlot, "Expected set rows to include live trophy slots.");
 assert(liveTrophySlots.hasTrophy, "Expected live trophy slot to render a set trophy when row is a record.");
 assert(liveTrophySlots.removedAfterEdit, "Expected live trophy helper to remove trophy when edited below record.");
+
+const trophyAudioTransitions = runScenario(`
+  ${reset}
+  var earned = recordTrophyAudioTransition(
+    new Map([["set:0", false], ["volume", false]]),
+    new Map([["set:0", true], ["volume", false]])
+  );
+  var lost = recordTrophyAudioTransition(
+    new Map([["set:0", true], ["volume", false]]),
+    new Map([["set:0", false], ["volume", false]])
+  );
+  var unchanged = recordTrophyAudioTransition(
+    new Map([["set:0", true], ["volume", false]]),
+    new Map([["set:0", true], ["volume", false]])
+  );
+  ({ earned, lost, unchanged, earnedNotes: uiCueNotes("trophy-earned"), lostNotes: uiCueNotes("trophy-lost") });
+`);
+
+assert.strictEqual(trophyAudioTransitions.earned, "trophy-earned", `Expected trophy appearance cue, got ${trophyAudioTransitions.earned}`);
+assert.strictEqual(trophyAudioTransitions.lost, "trophy-lost", `Expected trophy correction cue, got ${trophyAudioTransitions.lost}`);
+assert.strictEqual(trophyAudioTransitions.unchanged, "", `Expected unchanged trophy state to stay silent, got ${trophyAudioTransitions.unchanged}`);
+assert(trophyAudioTransitions.earnedNotes.length >= 3, "Expected trophy-earned to use a celebratory multi-note cue.");
+assert(trophyAudioTransitions.lostNotes.length >= 2, "Expected trophy-lost to use a distinct descending cue.");
 
 const logLoadDirectionIndicator = runScenario(`
   ${reset}

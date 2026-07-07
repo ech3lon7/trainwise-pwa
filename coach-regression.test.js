@@ -1025,6 +1025,89 @@ assert.deepEqual(targetModeContractsSurviveDebugComparison.chestModes, { soft: "
 assert.strictEqual(targetModeContractsSurviveDebugComparison.selectedMode, "medium", `Expected debug mode comparison not to mutate global mode, got ${targetModeContractsSurviveDebugComparison.selectedMode}`);
 assert.strictEqual(targetModeContractsSurviveDebugComparison.selectedOverride, "aggressive", `Expected debug mode comparison not to clear target override, got ${targetModeContractsSurviveDebugComparison.selectedOverride}`);
 
+const targetedModeAllocationStaysProtected = runScenario(`
+  ${resetAndHelpers}
+  state.coachTargetMuscles = ["chest"];
+  state.coachGrowthModes = { chest: "aggressive" };
+  state.workouts = [];
+  var targetSets = {};
+  var totals = {};
+  var allocations = {};
+  for (var mode of ["soft", "medium", "aggressive"]) {
+    state.coachGlobalGrowthMode = mode;
+    var plan = buildTodayPlan(60).sessionPlan;
+    targetSets[mode] = plan.items.find((item) => item.muscle.id === "chest")?.sets || 0;
+    totals[mode] = plan.items.reduce((sum, item) => sum + item.sets, 0);
+    allocations[mode] = plan.items.map((item) => item.muscle.id + ":" + item.sets).join(",");
+  }
+  ({ targetSets, totals, allocations });
+`);
+
+assert(
+  targetedModeAllocationStaysProtected.targetSets.soft <= targetedModeAllocationStaysProtected.targetSets.medium
+    && targetedModeAllocationStaysProtected.targetSets.medium <= targetedModeAllocationStaysProtected.targetSets.aggressive,
+  `Expected selected Aggressive Chest not to lose sets as global intensity rises, got targets=${JSON.stringify(targetedModeAllocationStaysProtected.targetSets)} totals=${JSON.stringify(targetedModeAllocationStaysProtected.totals)} allocations=${JSON.stringify(targetedModeAllocationStaysProtected.allocations)}`
+);
+assert(
+  targetedModeAllocationStaysProtected.totals.soft <= targetedModeAllocationStaysProtected.totals.medium
+    && targetedModeAllocationStaysProtected.totals.medium <= targetedModeAllocationStaysProtected.totals.aggressive,
+  `Expected mode totals to remain monotonic, got ${JSON.stringify(targetedModeAllocationStaysProtected.totals)}`
+);
+
+const rirAwareProgressionAndEffortClassification = runScenario(`
+  ${resetAndHelpers}
+  state.settings.customExercises = [
+    { id: "row", name: "One-Armed Cable Row", primaryMuscles: ["back"], secondaryMuscles: [], equipment: "cable", reps: "8-15", rest: "60 sec", cue: "Row.", userCreated: true },
+    { id: "raise", name: "Lateral Raises", primaryMuscles: ["shoulders"], secondaryMuscles: [], equipment: "dumbbells", reps: "8-15", rest: "60 sec", cue: "Raise.", userCreated: true }
+  ];
+  state.workouts = [
+    {
+      id: "row-latest", date: "2026-06-16", exercise: "One-Armed Cable Row", exerciseId: "row", primaryMuscles: ["back"], secondaryMuscles: [],
+      setRows: [
+        { weight: 55, reps: 14, rir: 2, restSeconds: 60 },
+        { weight: 55, reps: 10, rir: 2, restSeconds: 60 },
+        { weight: 55, reps: 9, rir: 2, restSeconds: 60 },
+        { weight: 50, reps: 11, rir: 2, restSeconds: 60 }
+      ], createdAt: "2026-06-16T12:00:00.000Z"
+    },
+    {
+      id: "row-previous", date: "2026-06-09", exercise: "One-Armed Cable Row", exerciseId: "row", primaryMuscles: ["back"], secondaryMuscles: [],
+      setRows: [{ weight: 50, reps: 15, rir: 1, restSeconds: 60 }], createdAt: "2026-06-09T12:00:00.000Z"
+    },
+    {
+      id: "raise-latest", date: "2026-06-15", exercise: "Lateral Raises", exerciseId: "raise", primaryMuscles: ["shoulders"], secondaryMuscles: [],
+      setRows: [
+        { weight: 25, reps: 13, rir: 0, restSeconds: 60 },
+        { weight: 25, reps: 8, rir: 0, restSeconds: 60 },
+        { weight: 20, reps: 9, rir: 0, restSeconds: 60 }
+      ], createdAt: "2026-06-15T12:00:00.000Z"
+    },
+    {
+      id: "raise-previous", date: "2026-06-08", exercise: "Lateral Raises", exerciseId: "raise", primaryMuscles: ["shoulders"], secondaryMuscles: [],
+      setRows: [
+        { weight: 25, reps: 14, rir: 1, restSeconds: 60 },
+        { weight: 25, reps: 9, rir: 0, restSeconds: 60 },
+        { weight: 20, reps: 9, rir: 0, restSeconds: 60 }
+      ], createdAt: "2026-06-08T12:00:00.000Z"
+    }
+  ];
+  var rowProgression = progressionTargetForExercise("One-Armed Cable Row");
+  var raiseSignal = coachExercisePerformanceSignal(resolveExerciseMeta("Lateral Raises"));
+  var raiseTarget = coachPlanTargetForExercise(resolveExerciseMeta("Lateral Raises"), raiseSignal);
+  ({
+    rowTarget: rowProgression?.target || "",
+    rowIncreaseLoad: rowProgression?.increaseLoad || false,
+    raiseStatus: raiseSignal.status,
+    raiseTargetKind: raiseTarget.kind,
+    raiseTargetLabel: raiseTarget.label
+  });
+`);
+
+assert(rirAwareProgressionAndEffortClassification.rowIncreaseLoad, `Expected 55 x 14 @2 RIR to permit a load increase, got ${rirAwareProgressionAndEffortClassification.rowTarget}`);
+assert(rirAwareProgressionAndEffortClassification.rowTarget.includes("60 lb"), `Expected Cable Row target to increase to 60 lb, got ${rirAwareProgressionAndEffortClassification.rowTarget}`);
+assert(["minor-dip", "reached-failure"].includes(rirAwareProgressionAndEffortClassification.raiseStatus), `Expected Lateral Raises to avoid failure classification, got ${rirAwareProgressionAndEffortClassification.raiseStatus}`);
+assert.notStrictEqual(rirAwareProgressionAndEffortClassification.raiseTargetKind, "reset", `Expected Lateral Raises to hold rather than reduce load, got ${rirAwareProgressionAndEffortClassification.raiseTargetLabel}`);
+
 const targetScrollRestore = runScenario(`
   var originalQuerySelector = document.querySelector;
   var scroller = { scrollLeft: 0 };

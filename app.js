@@ -3,7 +3,7 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 3;
 const STORES = ["workouts", "metrics", "settings", "syncQueue"];
-const APP_VERSION = "1.5.48";
+const APP_VERSION = "1.5.49";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 const DRAFT_RECOVERY_KEY = "trainwise-draft-recovery-v1";
 const COPIED_COACH_PLAN_KEY = "trainwise-copied-coach-plan-v1";
@@ -349,6 +349,15 @@ function uiCueNotes(type) {
     success: [
       { frequency: 620, endFrequency: 700, duration: 0.11, gain: 0.16, wave: "sine" },
       { frequency: 840, endFrequency: 920, duration: 0.12, gain: 0.14, wave: "sine", delay: 0.075 }
+    ],
+    "trophy-earned": [
+      { frequency: 523, endFrequency: 587, duration: 0.12, gain: 0.17, wave: "sine" },
+      { frequency: 659, endFrequency: 740, duration: 0.14, gain: 0.16, wave: "sine", delay: 0.085 },
+      { frequency: 784, endFrequency: 988, duration: 0.2, gain: 0.18, wave: "sine", delay: 0.18 }
+    ],
+    "trophy-lost": [
+      { frequency: 440, endFrequency: 349, duration: 0.16, gain: 0.12, wave: "triangle" },
+      { frequency: 311, endFrequency: 247, duration: 0.2, gain: 0.1, wave: "triangle", delay: 0.12 }
     ],
     warning: [{ frequency: 330, endFrequency: 245, duration: 0.16, gain: 0.14, wave: "triangle" }],
     error: [
@@ -1305,17 +1314,22 @@ function progressionTargetForExercise(exerciseName) {
   if (!top) return null;
   const meta = resolveExerciseMeta(exerciseName);
   const range = parseRepRange(meta.reps);
+  const workingRows = setRowsFromWorkout(latest).filter((row) => row.weight > 0 && row.reps > 0);
+  const estimatedCapacity = top.reps + Math.max(0, Number(top.rir) || 0);
+  const backoffSetsHeldRange = workingRows.length > 0 && workingRows.every((row) => row.reps >= range.low);
+  const increaseLoad = estimatedCapacity >= range.high && backoffSetsHeldRange;
   const nextRep = Math.min(range.high, top.reps + 1);
   const loadStep = top.weight >= 50 ? 5 : 2.5;
   const indicator = progressiveOverloadIndicator(exerciseName);
-  const target = top.reps < range.high
-    ? `${fmt(top.weight, 1)} lb x ${fmt(nextRep)}-${fmt(range.high)}`
-    : `${fmt(top.weight + loadStep, 1)} lb x ${fmt(range.low)}-${fmt(Math.max(range.low, top.reps - 2))}`;
+  const target = increaseLoad
+    ? `${fmt(top.weight + loadStep, 1)} lb x ${fmt(range.low)}-${fmt(Math.max(range.low, Math.min(range.high, top.reps - 2)))}`
+    : `${fmt(top.weight, 1)} lb x ${fmt(nextRep)}-${fmt(range.high)}`;
   return {
     exercise: exerciseName,
     latest,
     top,
     indicator,
+    increaseLoad,
     target,
     body: `Last ${exerciseName}: ${fmt(top.weight, 1)} lb x ${fmt(top.reps)}. Next target: ${target}, while keeping ${HYPERTROPHY.idealRirMin}-${HYPERTROPHY.idealRirMax} RIR.`
   };
@@ -2034,11 +2048,14 @@ function exerciseUnderperformed(current, previous, options = {}) {
   const previousE1rm = e1rm(previous);
   const e1rmDrop = previousE1rm > 0 && currentE1rm < previousE1rm * (1 - COACH_PERFORMANCE_DROP_THRESHOLD);
   const repDrops = comparableRepDrop(current, previous);
+  const range = parseRepRange(options.repRange || "8-15");
+  const missedRange = setRowsFromWorkout(current).some((row) => row.reps > 0 && row.reps < range.low);
+  const broadRepRegression = repDrops >= 3;
   const failureRir = (averageRir(current) ?? HYPERTROPHY.idealRirMin) <= 0;
   if (options.progressEvidence?.progressed) {
-    return failureRir && repDrops >= 3 && e1rmDrop;
+    return failureRir && broadRepRegression && e1rmDrop;
   }
-  return e1rmDrop || repDrops >= 2 || (failureRir && (e1rmDrop || repDrops > 0 || currentE1rm <= previousE1rm));
+  return e1rmDrop || missedRange || broadRepRegression || (failureRir && (e1rmDrop || missedRange || broadRepRegression));
 }
 
 function coachExercisePerformanceSignal(exercise, workouts = coachWorkoutEntries()) {
@@ -2067,9 +2084,10 @@ function coachExercisePerformanceSignal(exercise, workouts = coachWorkoutEntries
       message: `${exercise.name} progressed last session (${latestProgress.reasons.join(", ")}); keep recovery-managed volume and use the next small overload target.`
     };
   }
-  const latestUnder = exerciseUnderperformed(latest, previous, { progressEvidence: latestProgress });
+  const performanceOptions = { progressEvidence: latestProgress, repRange: exercise.reps };
+  const latestUnder = exerciseUnderperformed(latest, previous, performanceOptions);
   const previousProgress = history.length >= 3 ? exerciseProgressEvidence(previous, history.slice(2)) : null;
-  const previousUnder = history.length >= 3 && exerciseUnderperformed(previous, history[2], { progressEvidence: previousProgress });
+  const previousUnder = history.length >= 3 && exerciseUnderperformed(previous, history[2], { progressEvidence: previousProgress, repRange: exercise.reps });
   if (latestUnder && previousUnder) {
     return {
       status: "repeated-failure",
@@ -2103,6 +2121,29 @@ function coachExercisePerformanceSignal(exercise, workouts = coachWorkoutEntries
       previous,
       progressEvidence: latestProgress,
       message: `${exercise.name} is progressing; use the next small overload target.`
+    };
+  }
+  const repDrops = comparableRepDrop(latest, previous);
+  if (repDrops > 0 || (previousE1rm > 0 && latestE1rm < previousE1rm)) {
+    return {
+      status: "minor-dip",
+      tone: "",
+      history,
+      latest,
+      previous,
+      progressEvidence: latestProgress,
+      message: `${exercise.name} had a small one-session dip; hold the load and aim for 1-2 RIR before changing it.`
+    };
+  }
+  if ((averageRir(latest) ?? HYPERTROPHY.idealRirMin) <= 0) {
+    return {
+      status: "reached-failure",
+      tone: "",
+      history,
+      latest,
+      previous,
+      progressEvidence: latestProgress,
+      message: `${exercise.name} reached failure while staying in range; hold the load and leave 1-2 RIR next time.`
     };
   }
   return {
@@ -2167,7 +2208,7 @@ function coachPlanTargetForExercise(exercise, signal = coachExercisePerformanceS
       detail: `${HYPERTROPHY.idealRirMin}-${HYPERTROPHY.idealRirMax} RIR`,
       tone: progression.indicator.tone,
       loadMultiplier: 1,
-      repOffset: top.reps < range.high ? 1 : 0,
+      repOffset: progression.increaseLoad ? 0 : 1,
       message: signal.message
     };
   }
@@ -2689,6 +2730,21 @@ function targetModeContractSetFloors(limitMinutes = SESSION_LIMIT_MINUTES, optio
     : selectedCoachGlobalGrowthMode();
   const floors = {};
 
+  if (globalGrowthMode !== "soft") {
+    const softGlobalPlan = buildSessionPlan(limitMinutes, {
+      restart: options.restart || false,
+      targetMuscles,
+      globalGrowthMode: "soft",
+      growthModes,
+      context: options.context,
+      skipTargetModeContracts: true
+    });
+    for (const muscleId of targetMuscles) {
+      const baselineItem = softGlobalPlan.items.find((item) => item.muscle.id === muscleId);
+      if (baselineItem?.sets) floors[muscleId] = baselineItem.sets;
+    }
+  }
+
   for (const muscleId of targetMuscles) {
     let mode = lowerCoachGrowthMode(growthModes[muscleId] || globalGrowthMode);
     while (mode) {
@@ -2796,7 +2852,7 @@ function buildSessionPlan(limitMinutes = SESSION_LIMIT_MINUTES, options = {}) {
     addPerformanceNote(performanceSignal);
     let sets = Number.isFinite(addOptions.setCount)
       ? Math.max(1, addOptions.setCount)
-      : initialSetsForPlanTarget(target, caps, allowHighVolume, growthMode);
+      : initialSetsForPlanTarget(target, caps, allowHighVolume, addOptions.initialGrowthMode || growthMode);
     if (Number.isFinite(addOptions.setCap)) sets = Math.min(sets, Math.max(1, addOptions.setCap));
     if (planTarget.kind === "deload") sets = Math.max(1, sets - 1);
     if (!sets) return false;
@@ -2816,7 +2872,11 @@ function buildSessionPlan(limitMinutes = SESSION_LIMIT_MINUTES, options = {}) {
 
   for (const target of freshTargets) {
     if (items.some((item) => item.muscle.id === target.id)) continue;
-    addTargetToPlan(target);
+    const growthMode = growthModeFor(target.id);
+    const initialGrowthMode = targetMuscles.length && !isCoachTargetMuscle(target.id, targetMuscles)
+      ? "soft"
+      : growthMode;
+    addTargetToPlan(target, { growthMode, initialGrowthMode });
     if (items.length >= caps.maxItems) break;
   }
 
@@ -2970,8 +3030,7 @@ function buildSessionPlan(limitMinutes = SESSION_LIMIT_MINUTES, options = {}) {
         .filter(({ item }) => (
           item.muscle.id !== protectedMuscleId
           && !isCoachTargetMuscle(item.muscle.id, targetMuscles)
-          && item.sets > 0
-          && item.muscle.sets + item.sets - 1 >= HYPERTROPHY.minimumSets
+          && item.sets > 1
         ))
         .sort((a, b) => (
           coachGrowthModeRank(a.item.growthMode) - coachGrowthModeRank(b.item.growthMode)
@@ -4228,6 +4287,7 @@ function renderSetRows(draft = draftExerciseFromState()) {
 function refreshDraftRecordTrophies(draftId) {
   const draft = state.workoutDraft.find((item) => item.draftId === draftId);
   if (!draft) return;
+  const before = recordTrophyVisibilityForDraft(draftId);
   const recordStats = exerciseRecordStats(draft.exercise, draft.editingWorkoutId);
   document.querySelectorAll(`[data-record-slot="set"]`).forEach((slot) => {
     if (slot.dataset.draftId !== draftId) return;
@@ -4239,6 +4299,31 @@ function refreshDraftRecordTrophies(draftId) {
     if (slot.dataset.draftId !== draftId) return;
     slot.innerHTML = volumeRecordTrophyMarkupForDraft(draft, recordStats);
   });
+  const cue = recordTrophyAudioTransition(before, recordTrophyVisibilityForDraft(draftId));
+  if (cue) playUiCue(cue);
+}
+
+function recordTrophyVisibilityForDraft(draftId) {
+  const visibility = new Map();
+  document.querySelectorAll(`[data-record-slot]`).forEach((slot) => {
+    if (slot.dataset.draftId !== draftId) return;
+    const key = slot.dataset.recordSlot === "set" ? `set:${slot.dataset.index}` : "volume";
+    const visible = Boolean(slot.querySelector?.(".record-trophy"));
+    visibility.set(key, Boolean(visibility.get(key)) || visible);
+  });
+  return visibility;
+}
+
+function recordTrophyAudioTransition(before = new Map(), after = new Map()) {
+  const keys = new Set([...before.keys(), ...after.keys()]);
+  let lost = false;
+  for (const key of keys) {
+    const wasVisible = Boolean(before.get(key));
+    const isVisible = Boolean(after.get(key));
+    if (!wasVisible && isVisible) return "trophy-earned";
+    if (wasVisible && !isVisible) lost = true;
+  }
+  return lost ? "trophy-lost" : "";
 }
 
 function exerciseInitial(name) {
