@@ -3,7 +3,7 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 3;
 const STORES = ["workouts", "metrics", "settings", "syncQueue"];
-const APP_VERSION = "1.5.49";
+const APP_VERSION = "1.5.50";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 const DRAFT_RECOVERY_KEY = "trainwise-draft-recovery-v1";
 const COPIED_COACH_PLAN_KEY = "trainwise-copied-coach-plan-v1";
@@ -1331,7 +1331,7 @@ function progressionTargetForExercise(exerciseName) {
     indicator,
     increaseLoad,
     target,
-    body: `Last ${exerciseName}: ${fmt(top.weight, 1)} lb x ${fmt(top.reps)}. Next target: ${target}, while keeping ${HYPERTROPHY.idealRirMin}-${HYPERTROPHY.idealRirMax} RIR.`
+    body: `Last time you hit ${fmt(top.weight, 1)} lb x ${fmt(top.reps)} on ${exerciseName}. I'm setting ${target} as the next target - keep ${HYPERTROPHY.idealRirMin}-${HYPERTROPHY.idealRirMax} clean reps in reserve.`
   };
 }
 
@@ -2058,6 +2058,26 @@ function exerciseUnderperformed(current, previous, options = {}) {
   return e1rmDrop || missedRange || broadRepRegression || (failureRir && (e1rmDrop || missedRange || broadRepRegression));
 }
 
+function coachPerformanceMessage(exercise, status, detail = "") {
+  if (status === "progressing") {
+    const evidence = detail ? ` (${detail})` : "";
+    return `Nice work - ${exercise.name} moved forward last session${evidence}. Let's use the next small overload target without getting greedy.`;
+  }
+  if (status === "repeated-failure") {
+    return `We've seen ${exercise.name} slide in back-to-back sessions. Let's rotate it or pull the volume back before we pile on more.`;
+  }
+  if (status === "isolated-failure") {
+    return `${exercise.name} took a real step back last session. Let's trim the load slightly and rebuild it with 1-2 RIR.`;
+  }
+  if (status === "minor-dip") {
+    return `${exercise.name} had a small one-session dip. Keep the load where it is and give me 1-2 clean reps in reserve before we change it.`;
+  }
+  if (status === "reached-failure") {
+    return `You took ${exercise.name} to failure while staying in range. Hold the load, but leave me 1-2 good reps in the tank next time.`;
+  }
+  return `${exercise.name} is holding steady. Let's chase one clean rep or a small load increase next.`;
+}
+
 function coachExercisePerformanceSignal(exercise, workouts = coachWorkoutEntries()) {
   const history = exerciseHistoryForDefinition(exercise, workouts);
   if (history.length < 2) {
@@ -2081,7 +2101,7 @@ function coachExercisePerformanceSignal(exercise, workouts = coachWorkoutEntries
       latest,
       previous,
       progressEvidence: latestProgress,
-      message: `${exercise.name} progressed last session (${latestProgress.reasons.join(", ")}); keep recovery-managed volume and use the next small overload target.`
+      message: coachPerformanceMessage(exercise, "progressing", latestProgress.reasons.join(", "))
     };
   }
   const performanceOptions = { progressEvidence: latestProgress, repRange: exercise.reps };
@@ -2096,7 +2116,7 @@ function coachExercisePerformanceSignal(exercise, workouts = coachWorkoutEntries
       latest,
       previous,
       progressEvidence: latestProgress,
-      message: `${exercise.name} has stalled across recent sessions; rotate or deload before adding more volume.`
+      message: coachPerformanceMessage(exercise, "repeated-failure")
     };
   }
   if (latestUnder) {
@@ -2107,7 +2127,7 @@ function coachExercisePerformanceSignal(exercise, workouts = coachWorkoutEntries
       latest,
       previous,
       progressEvidence: latestProgress,
-      message: `${exercise.name} dipped last session; use a small load reduction and keep 1-2 RIR.`
+      message: coachPerformanceMessage(exercise, "isolated-failure")
     };
   }
   const latestE1rm = e1rm(latest);
@@ -2120,7 +2140,7 @@ function coachExercisePerformanceSignal(exercise, workouts = coachWorkoutEntries
       latest,
       previous,
       progressEvidence: latestProgress,
-      message: `${exercise.name} is progressing; use the next small overload target.`
+      message: coachPerformanceMessage(exercise, "progressing")
     };
   }
   const repDrops = comparableRepDrop(latest, previous);
@@ -2132,7 +2152,7 @@ function coachExercisePerformanceSignal(exercise, workouts = coachWorkoutEntries
       latest,
       previous,
       progressEvidence: latestProgress,
-      message: `${exercise.name} had a small one-session dip; hold the load and aim for 1-2 RIR before changing it.`
+      message: coachPerformanceMessage(exercise, "minor-dip")
     };
   }
   if ((averageRir(latest) ?? HYPERTROPHY.idealRirMin) <= 0) {
@@ -2143,7 +2163,7 @@ function coachExercisePerformanceSignal(exercise, workouts = coachWorkoutEntries
       latest,
       previous,
       progressEvidence: latestProgress,
-      message: `${exercise.name} reached failure while staying in range; hold the load and leave 1-2 RIR next time.`
+      message: coachPerformanceMessage(exercise, "reached-failure")
     };
   }
   return {
@@ -2153,7 +2173,7 @@ function coachExercisePerformanceSignal(exercise, workouts = coachWorkoutEntries
     latest,
     previous,
     progressEvidence: latestProgress,
-    message: `${exercise.name} is steady; progress with a small rep or load target.`
+    message: coachPerformanceMessage(exercise, "steady")
   };
 }
 
@@ -2264,16 +2284,34 @@ function isMuscleAvailableForPlanning(target) {
   return target.primaryDaysSince === null || target.primaryDaysSince >= COACH_MUSCLE_RECOVERY_DAYS;
 }
 
-function muscleDateGapReason(target) {
+function coachRecoveryMessage(target, options = {}) {
   const when = target.primaryDaysSince === 0 ? "today" : "yesterday";
-  return `${target.label} was directly trained ${when}; Coach uses a 2-day gap by date before direct work returns.`;
+  const nextMove = options.pickedAlternative
+    ? " I'm putting that work toward another muscle that is ready today."
+    : "";
+  return `Easy there, champ - you trained ${target.label} directly ${when}. I want a 2-day gap by date before we hit it directly again.${nextMove}`;
+}
+
+function muscleDateGapReason(target) {
+  return coachRecoveryMessage(target);
+}
+
+function coachIntensityMessage(mode) {
+  return `We're running the ${coachGrowthModeLabel(mode)} plan intensity today.`;
+}
+
+function coachTargetsMessage(targetMuscles, growthModes, globalGrowthMode) {
+  const targets = muscleGroups
+    .filter((muscle) => targetMuscles.includes(muscle.id))
+    .map((muscle) => `${muscle.label} (${coachGrowthModeLabel(growthModes[muscle.id] || globalGrowthMode)})`);
+  if (!targets.length) return "";
+  return `You asked me to prioritize ${targets.join(", ")}. I'll protect the weekly floors first, then give those targets the remaining recoverable work and keep Soft targets conservative.`;
 }
 
 function coachTargetSelectionWarning(muscleId, context = coachPlanningContext()) {
   const target = context.rankedStats.find((stat) => stat.id === muscleId);
   if (!target || isMuscleAvailableForPlanning(target)) return "";
-  const when = target.primaryDaysSince === 0 ? "today" : "yesterday";
-  return `${target.label} was directly trained ${when}. Coach will protect recovery and skip direct ${target.label} work today.`;
+  return coachRecoveryMessage(target);
 }
 
 function scoreExerciseForMuscle(exercise, muscleId, options = {}) {
@@ -2520,33 +2558,25 @@ function plannedSetGap(item, allowHighVolume = false, growthMode = item.growthMo
 
 function planPriorityReason(item) {
   if (item.phase === "target-extra") {
-    const modeLabel = item.growthMode ? `${coachGrowthModeLabel(item.growthMode)} target: ` : "";
+    const modeLabel = item.growthMode ? `${coachGrowthModeLabel(item.growthMode)} target` : "selected target";
     const touchLabel = item.muscle.sessions >= 2
-      ? "Touches satisfied; adding selected target volume because recovery is clear"
-      : `${item.muscle.sessions}/2 touches`;
-    const parts = [
-      `${modeLabel}${item.muscle.label} is ${fmt(item.muscle.sets, 1)}/${HYPERTROPHY.growthHigh}+; adding selected extra volume`,
-      touchLabel
-    ];
-    if (item.muscle.daysSince !== null) parts.push(`last hit ${item.muscle.daysSince}d ago`);
-    return parts.join(" - ");
+      ? "Touches satisfied, and recovery is clear"
+      : `You have ${item.muscle.sessions}/2 weekly touches so far`;
+    const recency = item.muscle.daysSince !== null ? ` You last hit it ${item.muscle.daysSince}d ago.` : "";
+    return `You picked ${item.muscle.label} as a ${modeLabel}. It's at ${fmt(item.muscle.sets, 1)}/${HYPERTROPHY.growthHigh}+ hard sets, so I'm adding focused work. ${touchLabel}.${recency}`;
   }
   const highVolume = item.phase === "high-volume";
   const targetSets = planSetCeilingForTarget(item.muscle, highVolume, item.growthMode);
-  const modeLabel = item.growthMode ? `${coachGrowthModeLabel(item.growthMode)} mode: ` : "";
+  const modeLabel = item.growthMode ? coachGrowthModeLabel(item.growthMode) : "planned";
   const targetLabel = item.muscle.sets < HYPERTROPHY.minimumSets ? "weekly floor" : "upper growth target";
-  const prefix = highVolume && isCoachTargetMuscle(item.muscle.id)
-    ? "Target selected; above default growth zone: "
-    : highVolume ? "High-volume filler: " : modeLabel;
   const touchLabel = isCoachTargetMuscle(item.muscle.id) && item.muscle.sessions >= 2
-    ? "Touches satisfied; adding selected target volume because recovery is clear"
-    : `${item.muscle.sessions}/2 touches`;
-  const parts = [
-    `${prefix}${item.muscle.label} is ${fmt(item.muscle.sets, 1)}/${targetSets} ${targetLabel}`,
-    touchLabel
-  ];
-  if (item.muscle.daysSince !== null) parts.push(`last hit ${item.muscle.daysSince}d ago`);
-  return parts.join(" - ");
+    ? "Touches satisfied, but you selected it and recovery is clear"
+    : `${item.muscle.sessions}/2 weekly touches`;
+  const volumeNote = highVolume
+    ? " This is above the default growth zone, so keep an eye on performance and recovery."
+    : "";
+  const recency = item.muscle.daysSince !== null ? ` You last hit it ${item.muscle.daysSince}d ago.` : "";
+  return `${item.muscle.label} is at ${fmt(item.muscle.sets, 1)}/${targetSets} for its ${targetLabel}. I'm putting it in today's ${modeLabel} plan because it has ${touchLabel}.${recency}${volumeNote}`;
 }
 
 function selectedCoachTimeframeMinutes() {
@@ -3195,19 +3225,14 @@ function buildTodayPlan(limitMinutes = selectedCoachTimeframeMinutes()) {
 
   if (restart) {
     why.push(daysSinceWorkout === null
-      ? "No lifting baseline yet, so the plan starts with a small session."
-      : `${daysSinceWorkout} days since your last lift, so volume is capped for a restart.`);
+      ? "We don't have a lifting baseline yet, so I'm starting you with a small, useful session."
+      : `It's been ${daysSinceWorkout} days since your last lift. I'm capping the volume so we can build momentum without burying you.`);
   }
   if (sessionPlan.items.length) {
-    selectedReasons.push(`${coachGrowthModeLabel(globalGrowthMode)} plan intensity.`);
+    selectedReasons.push(coachIntensityMessage(globalGrowthMode));
     selectedReasons.push(...sessionPlan.items.map((item) => item.reason));
     if (targetMuscles.length) {
-      const targetLabels = muscleGroups
-        .filter((muscle) => targetMuscles.includes(muscle.id))
-        .map((muscle) => growthModes[muscle.id]
-          ? `${muscle.label} ${coachGrowthModeLabel(growthModes[muscle.id])}`
-          : `${muscle.label} ${coachGrowthModeLabel(globalGrowthMode)}`);
-      selectedReasons.unshift(`Targets selected: ${targetLabels.join(", ")}. Soft targets get conservative priority after weekly floors.`);
+      selectedReasons.unshift(coachTargetsMessage(targetMuscles, growthModes, globalGrowthMode));
     }
     why.push(...selectedReasons.slice(0, 3));
   }
@@ -3218,12 +3243,12 @@ function buildTodayPlan(limitMinutes = selectedCoachTimeframeMinutes()) {
     why.push(...targetLimitReasons.slice(0, 2));
   }
   if (sessionPlan.deprioritized.length) {
-    skippedReasons.push(...sessionPlan.deprioritized.map((item) => `${item.reason} Coach picked another gap first.`));
+    skippedReasons.push(...sessionPlan.deprioritized.map((item) => coachRecoveryMessage(item.muscle, { pickedAlternative: true })));
     why.push(...skippedReasons.slice(0, 2));
   }
   if (sessionPlan.missing.length) {
-    missingReasons.push(...sessionPlan.missing.map((muscle) => `Add a primary exercise for ${muscle.label}.`));
-    why.push(`Add a primary exercise for ${sessionPlan.missing.map((muscle) => muscle.label).join(", ")} to unlock better plans.`);
+    missingReasons.push(...sessionPlan.missing.map((muscle) => `I need a primary ${muscle.label} exercise in your library before I can program it safely.`));
+    why.push(`Add primary exercises for ${sessionPlan.missing.map((muscle) => muscle.label).join(", ")}, and I can build you a better plan.`);
   }
   if (sessionPlan.shortfallReason) {
     notes.push(sessionPlan.shortfallReason);
@@ -3242,58 +3267,81 @@ function buildTodayPlan(limitMinutes = selectedCoachTimeframeMinutes()) {
     why.push(...sessionPlan.performanceNotes.slice(0, 2));
   }
   if (protein.bodyWeightLb && proteinAvg && proteinAvg < protein.floor) {
-    notes.push(`Protein is under target: ${fmt(proteinAvg)}g avg vs ${fmt(protein.floor)}g floor.`);
+    notes.push(`Your protein is running low: ${fmt(proteinAvg)}g average against a ${fmt(protein.floor)}g floor. Let's tighten that up so the training has something to build with.`);
   } else if (!protein.bodyWeightLb || !proteinAvg) {
-    notes.push("Log body weight and protein for nutrition-aware coaching.");
+    notes.push("Give me body-weight and protein logs, and I can coach the nutrition side with better context.");
   }
   if (highVolume.length) {
-    notes.push(`${highVolume.map((stat) => stat.label).join(", ")} are above the default growth zone; monitor performance and recovery.`);
+    notes.push(`${highVolume.map((stat) => stat.label).join(", ")} are above the default growth zone. That's allowed, but I want you watching performance and recovery closely.`);
   }
 
   if (sessionPlan.items.length) {
-    return {
+    return attachCoachBriefing({
       mode: restart ? "restart" : "session",
       title: restart ? "Restart session" : "Today's Plan",
       subtitle: sessionPlan.shortfallReason
-        ? `Estimated ${sessionPlan.totalMinutes}/${sessionPlan.limitMinutes} min; limited by library-safe coverage.`
+        ? `I've built ${sessionPlan.totalMinutes}/${sessionPlan.limitMinutes} minutes with the safe exercise coverage currently in your library.`
         : restart
-          ? `Small, useful work built for about ${coachTimeframeLabel(limitMinutes)}.`
+          ? `Let's get useful work done in about ${coachTimeframeLabel(limitMinutes)} without trying to win the whole week today.`
           : belowMinimum.length
-            ? `Best minimum gaps to train next, built for about ${coachTimeframeLabel(limitMinutes)}.`
-            : `Best gaps toward 20 hard sets, built for about ${coachTimeframeLabel(limitMinutes)}.`,
+            ? `I'm attacking the most useful weekly gaps in about ${coachTimeframeLabel(limitMinutes)}.`
+            : `We're building toward the upper growth zone in about ${coachTimeframeLabel(limitMinutes)}.`,
       sessionPlan,
       why,
       explanation: { selected: selectedReasons, skipped: skippedReasons, missing: missingReasons, notes },
       notes,
       progression
-    };
+    });
   }
 
   if (belowOptimum.length && sessionPlan.missing.length && !sessionPlan.items.length) {
-    return {
+    return attachCoachBriefing({
       mode: "library-gap",
       title: "Add exercise coverage",
       subtitle: belowMinimum.length
-        ? "Coach needs more movement options before it can build a full plan."
-        : "Coach needs more movement options before it can build toward 20 hard sets.",
+        ? "I need more movement options in your library before I can build a complete session."
+        : "Give me more movement options, and I can keep building you toward the upper growth zone.",
       sessionPlan,
       why,
       explanation: { selected: selectedReasons, skipped: skippedReasons, missing: missingReasons, notes },
       notes,
       progression
-    };
+    });
   }
 
-  return {
+  return attachCoachBriefing({
     mode: progression ? "progression" : "recovery",
     title: progression ? "Progression focus" : "Recovery or maintenance",
-    subtitle: progression ? progression.body : "20-set targets are covered. Progress slowly or recover if joints feel beat up.",
+    subtitle: progression ? progression.body : "You've covered the upper weekly targets. We can progress carefully or let recovery do its job if your joints feel beat up.",
     sessionPlan,
-    why: why.length ? why : ["Weekly 20-set targets are covered, so Coach is not forcing extra volume."],
+    why: why.length ? why : ["You've covered the weekly targets, so I'm not forcing junk volume just to make the plan look busy."],
     explanation: { selected: selectedReasons, skipped: skippedReasons, missing: missingReasons, notes },
     notes,
     progression
-  };
+  });
+}
+
+function coachBriefingSummary(plan) {
+  const items = plan.sessionPlan?.items || [];
+  const briefing = [];
+  if (items.length) {
+    const sets = items.reduce((sum, item) => sum + item.sets, 0);
+    const muscles = [...new Set(items.map((item) => item.muscle.label))];
+    briefing.push(`Here's the play: we're putting ${sets} sets into ${muscles.join(", ")} and landing around ${plan.sessionPlan.totalMinutes}/${plan.sessionPlan.limitMinutes} minutes.`);
+  } else {
+    briefing.push(plan.subtitle);
+  }
+  const targetMessage = coachTargetsMessage(selectedCoachTargetMuscles(), selectedCoachGrowthModes(), selectedCoachGlobalGrowthMode());
+  if (targetMessage) briefing.push(targetMessage);
+  const recoveryMessage = plan.explanation?.skipped?.find((message) => message.includes("2-day gap"));
+  if (recoveryMessage) briefing.push(recoveryMessage);
+  else if (plan.sessionPlan?.performanceNotes?.length) briefing.push(plan.sessionPlan.performanceNotes[0]);
+  else if (plan.explanation?.missing?.length) briefing.push(plan.explanation.missing[0]);
+  return briefing.filter(Boolean).slice(0, 3);
+}
+
+function attachCoachBriefing(plan) {
+  return { ...plan, briefing: coachBriefingSummary(plan) };
 }
 
 function actionFromSessionPlan(plan) {
@@ -3303,7 +3351,7 @@ function actionFromSessionPlan(plan) {
       mode: plan.mode,
       sessionPlan: plan.sessionPlan,
       title: plan.title,
-      body: plan.subtitle
+      body: plan.briefing?.[0] || plan.subtitle
     };
   }
   const sets = items.reduce((sum, item) => sum + item.sets, 0);
@@ -3312,7 +3360,7 @@ function actionFromSessionPlan(plan) {
     mode: plan.mode,
     sessionPlan: plan.sessionPlan,
     title: plan.mode === "restart" ? "Restart session is the priority" : "Today's Plan is the priority",
-    body: `${sets} sets across ${muscles}. Estimated ${plan.sessionPlan.totalMinutes}/${plan.sessionPlan.limitMinutes} min.`
+    body: plan.briefing?.[0] || `Here's the play: ${sets} sets across ${muscles}, landing around ${plan.sessionPlan.totalMinutes} minutes.`
   };
 }
 
@@ -3547,6 +3595,18 @@ function topUnderTargetMuscles(limit = 4) {
     .slice(0, limit);
 }
 
+function coachTodayMessage(kind, data = {}) {
+  if (kind === "baseline") return "Give me 2-3 hard sets for a few muscles today. Once you log them, I'll start steering the weekly gaps with real data.";
+  if (kind === "restart") return `It's been ${data.days} days since your last lift. Let's ease back in with 2-3 sets and keep 1-3 good reps in reserve.`;
+  if (kind === "touches") return `${data.muscles} have work in the bank, but they still need a second weekly touch. Split a little work onto another day if recovery is clear.`;
+  if (kind === "high-rir") return `You had ${data.count} recent ${data.count === 1 ? "set" : "sets"} more than 3 reps from failure. Bring the effort closer next time so those sets do more for you.`;
+  if (kind === "protein-low") return `Your 7-day protein average is ${data.average}g. At your logged weight, I want at least ${data.floor}g per day so recovery has the materials it needs.`;
+  if (kind === "protein-covered") return `Nice - your 7-day protein average is ${data.average}g. Keep it inside roughly ${data.floor}-${data.upper}g per day.`;
+  if (kind === "protein-missing") return "Log body weight and protein for me. I need both before I can give you a useful daily protein floor.";
+  if (kind === "high-volume") return `${data.muscles} are above the default growth zone. That's not automatically a problem, but don't add more unless performance and recovery stay solid.`;
+  return "";
+}
+
 function recommendations(todayPlan = null) {
   const recs = [];
   const stats = todayPlan ? coachMuscleSetStats() : muscleSetStats();
@@ -3580,13 +3640,13 @@ function recommendations(todayPlan = null) {
     recs.push({
       tone: "warn",
       title: "Start with a baseline hypertrophy session",
-      body: "Log 2-3 hard sets for a few muscles. The coach will start filling weekly set gaps as soon as it sees data."
+      body: coachTodayMessage("baseline")
     });
   } else if (daysSinceWorkout >= 4) {
     recs.push({
       tone: "warn",
       title: "Ease back into the week",
-      body: `It has been ${daysSinceWorkout} days since your last lift. Use 2-3 sets and keep 1-3 reps in reserve.`
+      body: coachTodayMessage("restart", { days: daysSinceWorkout })
     });
   }
 
@@ -3594,7 +3654,7 @@ function recommendations(todayPlan = null) {
     recs.push({
       tone: "warn",
       title: "Add a second weekly touch",
-      body: `${lowFrequency.map((stat) => stat.label).join(", ")} have work logged but fewer than 2 weekly touches. Split sets across another day if you can.`
+      body: coachTodayMessage("touches", { muscles: lowFrequency.map((stat) => stat.label).join(", ") })
     });
   }
 
@@ -3602,7 +3662,7 @@ function recommendations(todayPlan = null) {
     recs.push({
       tone: "warn",
       title: "Some sets were too far from failure",
-      body: `${highRir.length} recent log${highRir.length === 1 ? "" : "s"} had RIR above 3. Those sets count at half credit for hypertrophy until effort gets closer.`
+      body: coachTodayMessage("high-rir", { count: highRir.length })
     });
   }
 
@@ -3611,20 +3671,20 @@ function recommendations(todayPlan = null) {
       recs.push({
         tone: "hot",
         title: "Protein is below the hypertrophy floor",
-        body: `Your 7-day average is ${fmt(proteinAvg)}g. Based on ${fmt(protein.bodyWeightLb, 1)} lb, aim for at least ${fmt(protein.floor)}g/day.`
+        body: coachTodayMessage("protein-low", { average: fmt(proteinAvg), floor: fmt(protein.floor) })
       });
     } else {
       recs.push({
         tone: "good",
         title: "Protein floor is covered",
-        body: `Your 7-day average is ${fmt(proteinAvg)}g. Useful range for your logged weight is about ${fmt(protein.floor)}-${fmt(protein.upper)}g/day.`
+        body: coachTodayMessage("protein-covered", { average: fmt(proteinAvg), floor: fmt(protein.floor), upper: fmt(protein.upper) })
       });
     }
   } else {
     recs.push({
       tone: "warn",
       title: "Log body weight and protein",
-      body: "The hypertrophy nutrition target needs body weight plus protein logs to calculate your daily floor."
+      body: coachTodayMessage("protein-missing")
     });
   }
 
@@ -3638,7 +3698,7 @@ function recommendations(todayPlan = null) {
     recs.push({
       tone: "warn",
       title: "High volume muscles",
-      body: `${highVolume.map((stat) => stat.label).join(", ")} are above the default growth zone. Monitor performance and recovery before adding more.`
+      body: coachTodayMessage("high-volume", { muscles: highVolume.map((stat) => stat.label).join(", ") })
     });
   }
 
@@ -5398,6 +5458,7 @@ function renderCoachTargetSelector() {
 
 function renderCoachWhy(plan) {
   const explanation = plan.explanation || {};
+  const briefing = plan.briefing || [];
   const sections = [
     { title: "Selected", items: explanation.selected || plan.why || [] },
     { title: "Waiting", items: explanation.skipped || [] },
@@ -5407,6 +5468,14 @@ function renderCoachWhy(plan) {
   return `
     <details class="section card coach-why-card collapsible-panel" open>
       <summary><span>Why this?</span><small>readiness + gaps</small></summary>
+      ${briefing.length ? `
+        <div class="coach-why-list coach-briefing">
+          <div class="coach-why-section">
+            <h4>Coach's read</h4>
+            ${briefing.map((item) => `<span>${escapeHtml(item)}</span>`).join("")}
+          </div>
+        </div>
+      ` : ""}
       ${sections.length ? `
         <div class="coach-why-list">
           ${sections.map((section) => `

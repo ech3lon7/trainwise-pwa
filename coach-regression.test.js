@@ -392,7 +392,7 @@ const repeatedFailureRotatesExercise = runScenario(`
 `);
 
 assert.strictEqual(repeatedFailureRotatesExercise.exercise, "Incline Dumbbell Press", `Expected repeated bench failure to rotate to incline, got ${repeatedFailureRotatesExercise.exercise}`);
-assert((repeatedFailureRotatesExercise.note + repeatedFailureRotatesExercise.why).includes("deload") || (repeatedFailureRotatesExercise.note + repeatedFailureRotatesExercise.why).includes("stalled"), `Expected repeated failure explanation, got ${repeatedFailureRotatesExercise.note} ${repeatedFailureRotatesExercise.why}`);
+assert((repeatedFailureRotatesExercise.note + repeatedFailureRotatesExercise.why).includes("back-to-back sessions"), `Expected conversational repeated failure explanation, got ${repeatedFailureRotatesExercise.note} ${repeatedFailureRotatesExercise.why}`);
 
 const topSetPrAvoidsFalseFailure = runScenario(`
   ${resetAndHelpers}
@@ -626,7 +626,7 @@ const targetedMuscles = runScenario(`
 assert.strictEqual(targetedMuscles.mode, "session", `Expected target focus to create a session, got ${targetedMuscles.mode}`);
 assert(targetedMuscles.muscles.includes("biceps"), `Expected biceps target in plan, got ${targetedMuscles.muscles.join(", ")}`);
 assert(targetedMuscles.bicepsSets > 0, `Expected biceps target to receive work, got ${targetedMuscles.bicepsSets}`);
-assert(targetedMuscles.why.includes("Targets selected") && targetedMuscles.why.includes("conservative priority"), `Expected target priority explanation, got ${targetedMuscles.why}`);
+assert(targetedMuscles.why.includes("You asked me to prioritize") && targetedMuscles.why.includes("weekly floors"), `Expected conversational target priority explanation, got ${targetedMuscles.why}`);
 
 const targetsPrioritizeBeforeGeneralFill = runScenario(`
   ${resetAndHelpers}
@@ -650,7 +650,7 @@ const targetsPrioritizeBeforeGeneralFill = runScenario(`
 assert(targetsPrioritizeBeforeGeneralFill.bicepsIndex >= 0, `Expected selected Biceps target in plan, got ${targetsPrioritizeBeforeGeneralFill.muscles.join(", ")}`);
 assert(targetsPrioritizeBeforeGeneralFill.firstNonTargetIndex < 0 || targetsPrioritizeBeforeGeneralFill.bicepsIndex < targetsPrioritizeBeforeGeneralFill.firstNonTargetIndex, `Expected selected target before non-target optional fill, got ${targetsPrioritizeBeforeGeneralFill.muscles.join(", ")}`);
 assert(targetsPrioritizeBeforeGeneralFill.bicepsSets > 0, "Expected Soft target to receive conservative work before non-target optional work.");
-assert(targetsPrioritizeBeforeGeneralFill.why.includes("Soft targets get conservative priority"), `Expected Soft target wording, got ${targetsPrioritizeBeforeGeneralFill.why}`);
+assert(targetsPrioritizeBeforeGeneralFill.why.includes("keep Soft targets conservative"), `Expected conversational Soft target wording, got ${targetsPrioritizeBeforeGeneralFill.why}`);
 
 const targetTouchesSatisfiedStillAddsVolume = runScenario(`
   ${resetAndHelpers}
@@ -705,10 +705,32 @@ const targetSelectionRecoveryWarning = runScenario(`
   });
 `);
 
-assert(targetSelectionRecoveryWarning.directWarning.includes("Triceps was directly trained yesterday"), `Expected direct recent target warning, got ${targetSelectionRecoveryWarning.directWarning}`);
-assert(targetSelectionRecoveryWarning.directWarning.includes("Coach will protect recovery and skip direct Triceps work today"), `Expected firm recovery wording, got ${targetSelectionRecoveryWarning.directWarning}`);
+assert(targetSelectionRecoveryWarning.directWarning.includes("Easy there, champ"), `Expected direct recent target warning to sound conversational, got ${targetSelectionRecoveryWarning.directWarning}`);
+assert(targetSelectionRecoveryWarning.directWarning.includes("trained Triceps directly yesterday"), `Expected warning to identify recent direct work, got ${targetSelectionRecoveryWarning.directWarning}`);
+assert(targetSelectionRecoveryWarning.directWarning.includes("2-day gap"), `Expected firm recovery wording, got ${targetSelectionRecoveryWarning.directWarning}`);
 assert.strictEqual(targetSelectionRecoveryWarning.secondaryWarning, "", `Expected secondary-only work not to warn, got ${targetSelectionRecoveryWarning.secondaryWarning}`);
 assert.strictEqual(targetSelectionRecoveryWarning.readyWarning, "", `Expected ready target not to warn, got ${targetSelectionRecoveryWarning.readyWarning}`);
+
+const conversationalCoachBriefing = runScenario(`
+  ${resetAndHelpers}
+  var chest = muscleGroups.find((muscle) => muscle.id === "chest");
+  state.workouts = [makeWorkout(chest, 1, 3)];
+  var plan = buildTodayPlan(60);
+  var whyMarkup = renderCoachWhy(plan);
+  var todayAction = actionFromSessionPlan(plan);
+  ({
+    briefing: plan.briefing || [],
+    whyMarkup,
+    todayBody: todayAction.body,
+    skipped: plan.explanation.skipped.join(" ")
+  });
+`);
+
+assert(conversationalCoachBriefing.briefing.length > 0, "Expected Coach to provide a short briefing summary.");
+assert(conversationalCoachBriefing.briefing[0].includes("Here's the play"), `Expected briefing to speak directly, got ${conversationalCoachBriefing.briefing.join(" ")}`);
+assert(conversationalCoachBriefing.whyMarkup.includes("Coach's read"), "Expected Why this? to render the briefing above detailed reasons.");
+assert(conversationalCoachBriefing.skipped.includes("Easy there, champ"), `Expected skipped recovery reason to use Coach voice, got ${conversationalCoachBriefing.skipped}`);
+assert(conversationalCoachBriefing.todayBody.includes("Here's the play"), `Expected Today action to reuse Coach briefing, got ${conversationalCoachBriefing.todayBody}`);
 
 const targetSelectionBlocksRecoveryConflict = runScenario(`
   ${resetAndHelpers}
@@ -731,7 +753,7 @@ const targetSelectionBlocksRecoveryConflict = runScenario(`
 `);
 
 assert(!targetSelectionBlocksRecoveryConflict.selected.includes("triceps"), `Expected recovery-conflicting Triceps target to stay unselected, got ${targetSelectionBlocksRecoveryConflict.selected.join(", ")}`);
-assert(targetSelectionBlocksRecoveryConflict.toastMessage.includes("skip direct Triceps work today"), `Expected blocked selection toast, got ${targetSelectionBlocksRecoveryConflict.toastMessage}`);
+assert(targetSelectionBlocksRecoveryConflict.toastMessage.includes("2-day gap"), `Expected blocked selection toast, got ${targetSelectionBlocksRecoveryConflict.toastMessage}`);
 
 const targetAboveGrowthZoneStillGetsReserve = runScenario(`
   ${resetAndHelpers}
@@ -757,7 +779,7 @@ assert(targetAboveGrowthZoneStillGetsReserve.muscles.includes("hamstrings"), `Ex
 assert.strictEqual(targetAboveGrowthZoneStillGetsReserve.phase, "target-extra", `Expected Hamstrings to be target-extra, got ${targetAboveGrowthZoneStillGetsReserve.phase}`);
 assert(targetAboveGrowthZoneStillGetsReserve.sets > 0, `Expected target reserve sets for Hamstrings, got ${targetAboveGrowthZoneStillGetsReserve.sets}`);
 assert(targetAboveGrowthZoneStillGetsReserve.projectedSets > 20, `Expected selected target to be allowed above 20, got ${targetAboveGrowthZoneStillGetsReserve.projectedSets}`);
-assert(targetAboveGrowthZoneStillGetsReserve.reason.includes("selected extra volume"), `Expected target-extra reason, got ${targetAboveGrowthZoneStillGetsReserve.reason}`);
+assert(targetAboveGrowthZoneStillGetsReserve.reason.includes("adding focused work"), `Expected conversational target-extra reason, got ${targetAboveGrowthZoneStillGetsReserve.reason}`);
 assert(!targetAboveGrowthZoneStillGetsReserve.why.includes("already at its Medium target"), `Expected Why this? not to deny above-20 target by mode cap, got ${targetAboveGrowthZoneStillGetsReserve.why}`);
 
 const globalGrowthModeSelector = runScenario(`
@@ -964,7 +986,7 @@ const perMuscleGrowthModes = runScenario(`
 assert.strictEqual(perMuscleGrowthModes.chestMode, "aggressive", `Expected Chest to use aggressive mode, got ${perMuscleGrowthModes.chestMode}`);
 assert.strictEqual(perMuscleGrowthModes.quadsMode, "soft", `Expected Quads to use soft mode, got ${perMuscleGrowthModes.quadsMode}`);
 assert(perMuscleGrowthModes.chestProjected > perMuscleGrowthModes.quadsProjected, `Expected aggressive Chest to receive more upper-zone volume than soft Quads, got chest=${perMuscleGrowthModes.chestProjected} quads=${perMuscleGrowthModes.quadsProjected}`);
-assert(perMuscleGrowthModes.why.includes("Chest Aggressive") && perMuscleGrowthModes.why.includes("Quads Soft"), `Expected Why this? to include per-muscle modes, got ${perMuscleGrowthModes.why}`);
+assert(perMuscleGrowthModes.why.includes("Chest (Aggressive)") && perMuscleGrowthModes.why.includes("Quads (Soft)"), `Expected Why this? to include per-muscle modes, got ${perMuscleGrowthModes.why}`);
 
 const targetModeContractsStayMonotonic = runScenario(`
   ${resetAndHelpers}
@@ -1200,7 +1222,7 @@ const highVolumeTimeframe = runScenario(`
   ({
     mode: plan.mode,
     total: plan.sessionPlan.totalMinutes,
-    hasHighVolumeReason: plan.why.join(" ").includes("High-volume filler"),
+    hasHighVolumeReason: plan.why.join(" ").includes("above the default growth zone"),
     chestProjectedSets: plan.sessionPlan.items.find((item) => item.muscle.id === "chest")?.muscle.sets + plan.sessionPlan.items.find((item) => item.muscle.id === "chest")?.sets,
     maxProjectedSets: Math.max(...plan.sessionPlan.items.map((item) => item.muscle.sets + item.sets)),
     shortfallReason: plan.sessionPlan.shortfallReason
