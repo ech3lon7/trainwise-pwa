@@ -195,9 +195,9 @@ assert(!appCode.includes('selectedExercise: "Push-up"'), "Expected Log startup n
 assert(!appCode.includes('showBanner("Unsaved draft restored."'), "Expected startup draft recovery not to show a top banner.");
 assert(appCode.includes("notifyMetricSaved"), "Expected metrics saves to use a dedicated bottom-only notification helper.");
 assert(!stylesCode.includes(".mobile-quick-toggle"), "Expected floating quick action button styling to be removed.");
-assert(indexCode.includes("v=1.5.55"), "Expected index shell references to use bumped app version.");
+assert(indexCode.includes("v=1.5.56"), "Expected index shell references to use bumped app version.");
 assert(!indexCode.includes('id="app" class="app-content" aria-live'), "Expected broad app aria-live to be removed in favor of targeted live regions.");
-assert(serviceWorkerCode.includes("trainwise-cache-v77"), "Expected service worker cache version bump.");
+assert(serviceWorkerCode.includes("trainwise-cache-v78"), "Expected service worker cache version bump.");
 assert(appCode.includes("data-settings-panel"), "Expected Settings panels to preserve open state with stable panel ids.");
 assert(appCode.includes('forceSettingsPanelOpen("supabase-sync")'), "Expected Supabase actions to keep the Supabase panel open after rendering.");
 
@@ -1889,6 +1889,46 @@ assert.deepEqual(bodyWeightAverage.avgValues.slice(-2), [183, 184], `Expected ro
 assert.strictEqual(bodyWeightAverage.latestAvg, 184, `Expected latest 7-day average weight, got ${bodyWeightAverage.latestAvg}`);
 assert.strictEqual(bodyWeightAverage.dashboardHasAvg, true, "Expected Today body weight card to include 7d avg label.");
 assert.strictEqual(bodyWeightAverage.trendsHasOverlay, true, "Expected Trends body weight chart to include average overlay.");
+
+const chartAxesAndAverages = runScenario(`
+  ${reset}
+  state.workouts = [
+    { id: "w1", date: "2026-06-01", exercise: "Bench Press", primaryMuscles: ["chest"], secondaryMuscles: ["triceps"], setRows: [{ weight: 100, reps: 10, rir: 2 }] },
+    { id: "w2", date: "2026-06-02", exercise: "Bench Press", primaryMuscles: ["chest"], secondaryMuscles: ["triceps"], setRows: [{ weight: 200, reps: 10, rir: 2 }] },
+    { id: "w3", date: "2026-06-03", exercise: "Bench Press", primaryMuscles: ["chest"], secondaryMuscles: ["triceps"], setRows: [{ weight: 300, reps: 10, rir: 2 }] }
+  ];
+  state.metrics = [
+    { id: "m1", date: "2026-06-01", bodyWeight: 180, calories: 2000, protein: 140 },
+    { id: "m2", date: "2026-06-02", bodyWeight: 185, calories: 2500, protein: 160 },
+    { id: "m3", date: "2026-06-03", bodyWeight: 187, calories: 3000, protein: 180 }
+  ];
+  state.selectedExercise = "Bench Press";
+  state.selectedMuscle = "chest";
+  var volumeChart = lineChart([{ label: "06-01", value: 1000 }, { label: "06-02", value: 2000 }, { label: "06-03", value: 3000 }], "#35d58c", " lb");
+  var setChart = lineChart([{ label: "06-01", value: 1 }, { label: "06-02", value: 2 }, { label: "06-03", value: 3 }], "#f2d06b", " sets");
+  var weightChart = lineChart([{ label: "06-01", value: 180 }, { label: "06-02", value: 185 }, { label: "06-03", value: 187 }], "#f2d06b", " lb");
+  var emptyChart = lineChart([], "#35d58c", " lb");
+  var trends = renderTrends();
+  ({
+    volumeHasKLabels: volumeChart.includes("chart-y-axis") && volumeChart.includes(">3k<") && volumeChart.includes(">2k<") && volumeChart.includes(">1k<"),
+    setHasAxisLabels: setChart.includes(">3<") && setChart.includes(">2<") && setChart.includes(">1<"),
+    weightHasNiceLabels: weightChart.includes(">190<") && weightChart.includes(">185<") && weightChart.includes(">180<"),
+    hasXAxisLabels: volumeChart.includes("chart-x-axis") && volumeChart.includes("06-01") && volumeChart.includes("06-02") && volumeChart.includes("06-03"),
+    emptyHasNoAxis: !emptyChart.includes("chart-y-axis") && !emptyChart.includes("chart-x-axis"),
+    trendsOverlayCount: (trends.match(/comparison-polyline/g) || []).length,
+    trendsUsesEntryWording: trends.includes("7-entry avg"),
+    trendsUsesDayWordingForHealth: trends.includes("daily grams - 7d avg") && trends.includes("daily intake - 7d avg")
+  });
+`);
+
+assert.strictEqual(chartAxesAndAverages.volumeHasKLabels, true, "Expected large volume charts to render compact k-value Y-axis labels.");
+assert.strictEqual(chartAxesAndAverages.setHasAxisLabels, true, "Expected set charts to render small-number Y-axis labels.");
+assert.strictEqual(chartAxesAndAverages.weightHasNiceLabels, true, "Expected body-weight style charts to render rounded Y-axis labels.");
+assert.strictEqual(chartAxesAndAverages.hasXAxisLabels, true, "Expected charts to render compact first/middle/last X-axis labels.");
+assert.strictEqual(chartAxesAndAverages.emptyHasNoAxis, true, "Expected empty charts to remain a clean empty state without axis labels.");
+assert(chartAxesAndAverages.trendsOverlayCount >= 7, `Expected every Trends chart to render an average overlay, got ${chartAxesAndAverages.trendsOverlayCount}.`);
+assert.strictEqual(chartAxesAndAverages.trendsUsesEntryWording, true, "Expected workout-derived Trends charts to use 7-entry average wording.");
+assert.strictEqual(chartAxesAndAverages.trendsUsesDayWordingForHealth, true, "Expected health Trends charts to use 7d average wording.");
 
 const mobileQolMarkup = runScenario(`
   ${reset}

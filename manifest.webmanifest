@@ -2,7 +2,7 @@
   "name": "TrainWise",
   "short_name": "TrainWise",
   "description": "A personal hypertrophy coach for home-basics strength and nutrition tracking.",
-  "start_url": "./index.html?v=1.5.55",
+  "start_url": "./index.html?v=1.5.56",
   "display": "standalone",
   "background_color": "#101310",
   "theme_color": "#101310",

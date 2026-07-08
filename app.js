@@ -3,7 +3,7 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 3;
 const STORES = ["workouts", "metrics", "settings", "syncQueue"];
-const APP_VERSION = "1.5.55";
+const APP_VERSION = "1.5.56";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 const DRAFT_RECOVERY_KEY = "trainwise-draft-recovery-v1";
 const COPIED_COACH_PLAN_KEY = "trainwise-copied-coach-plan-v1";
@@ -3809,6 +3809,10 @@ function latestRollingAverage(points = [], windowSize = 7) {
   return series.length ? series[series.length - 1].value : 0;
 }
 
+function chartRollingAverage(points = [], windowSize = 7) {
+  return rollingAverageSeries(points, windowSize);
+}
+
 function aggregateByDate(entries, valueForEntry) {
   const byDate = new Map();
   for (const entry of entries) {
@@ -3841,20 +3845,67 @@ function chartReadout(point, unit) {
   return `${point.label}: ${fmt(point.value, 1)}${unit}`;
 }
 
+function compactAxisValue(value, unit = "") {
+  const abs = Math.abs(value);
+  if (abs >= 1000000) return `${fmt(value / 1000000, value % 1000000 ? 1 : 0)}m`;
+  if (abs >= 1000) return `${fmt(value / 1000, value % 1000 ? 1 : 0)}k`;
+  const decimals = unit.includes("sets") || abs < 10 && value % 1 ? 1 : 0;
+  return fmt(value, decimals);
+}
+
+function niceAxisTicks(min, max, unit = "") {
+  if (!Number.isFinite(min) || !Number.isFinite(max)) return [];
+  if (min === max) {
+    const pad = Math.max(Math.abs(max) * 0.1, unit.includes("sets") ? 1 : 5);
+    min -= pad;
+    max += pad;
+  }
+  const range = max - min || 1;
+  const rawStep = range / 2;
+  const magnitude = Math.pow(10, Math.floor(Math.log10(Math.max(rawStep, 0.001))));
+  const normalized = rawStep / magnitude;
+  const step = (normalized <= 1 ? 1 : normalized <= 2 ? 2 : normalized <= 5 ? 5 : 10) * magnitude;
+  const axisMin = Math.floor(min / step) * step;
+  const axisMax = Math.ceil(max / step) * step;
+  const mid = axisMin + (axisMax - axisMin) / 2;
+  return [axisMax, mid, axisMin].map((value, index) => ({
+    value,
+    y: [16, 50, 84][index],
+    label: compactAxisValue(value, unit)
+  }));
+}
+
+function chartXAxisTicks(points = []) {
+  const visible = points.filter((point) => !point.hidden);
+  if (!visible.length) return [];
+  if (visible.length === 1) return [{ label: visible[0].label, x: 50 }];
+  const indexes = [...new Set([0, Math.floor((visible.length - 1) / 2), visible.length - 1])];
+  return indexes.map((index) => ({
+    label: visible[index].label,
+    x: 8 + (index / Math.max(visible.length - 1, 1)) * 84
+  }));
+}
+
 function lineChart(points, color = "#35d58c", unit = "", options = {}) {
   if (!points.length) {
     return `<div class="empty">No data yet. Your chart will appear after the first few logs.</div>`;
   }
-  const comparisonPoints = Array.isArray(options.comparisonPoints) ? options.comparisonPoints : [];
+  const hasComparisonOverride = Array.isArray(options.comparisonPoints);
+  const shouldShowAverage = options.showAverage !== false && !hasComparisonOverride;
+  const averagePoints = shouldShowAverage ? chartRollingAverage(points, options.averageWindow || 7) : [];
+  const comparisonPoints = hasComparisonOverride ? options.comparisonPoints : averagePoints;
   const comparisonColor = options.comparisonColor || "rgba(255,255,255,0.68)";
 
   const chartPoints = points.length > 1 ? points : [
     { label: points[0].label, value: points[0].value - 1, hidden: true },
     points[0]
   ];
-  const rangePoints = [...chartPoints, ...comparisonPoints];
-  const min = Math.min(...rangePoints.map((point) => point.value));
-  const max = Math.max(...rangePoints.map((point) => point.value));
+  const rangePoints = [...chartPoints, ...comparisonPoints].filter((point) => Number.isFinite(point.value));
+  const dataMin = Math.min(...rangePoints.map((point) => point.value));
+  const dataMax = Math.max(...rangePoints.map((point) => point.value));
+  const axisTicks = niceAxisTicks(dataMin, dataMax, unit);
+  const min = axisTicks.length ? Math.min(...axisTicks.map((tick) => tick.value)) : dataMin;
+  const max = axisTicks.length ? Math.max(...axisTicks.map((tick) => tick.value)) : dataMax;
   const range = max - min || 1;
   const coords = chartPoints.map((point, index) => {
     const x = 8 + (index / Math.max(chartPoints.length - 1, 1)) * 84;
@@ -3872,6 +3923,7 @@ function lineChart(points, color = "#35d58c", unit = "", options = {}) {
   const visibleCoords = coords.filter((point) => !point.hidden);
   const last = visibleCoords[visibleCoords.length - 1];
   const first = visibleCoords[0];
+  const xTicks = chartXAxisTicks(visibleCoords);
   chartId += 1;
   const gradientId = `area-${color.slice(1)}-${chartId}`;
   const payload = escapeHtml(JSON.stringify(visibleCoords.map((point) => ({
@@ -3884,6 +3936,9 @@ function lineChart(points, color = "#35d58c", unit = "", options = {}) {
   return `
     <div class="chart interactive-chart" data-points="${payload}" data-unit="${escapeHtml(unit)}" tabindex="0" aria-label="Interactive chart. Tap or press to inspect the nearest point.">
       <div class="chart-stage">
+        <div class="chart-y-axis" aria-hidden="true">
+          ${axisTicks.map((tick) => `<span style="top:${tick.y}%">${escapeHtml(tick.label)}</span>`).join("")}
+        </div>
         <svg viewBox="0 0 100 100" preserveAspectRatio="none" role="img" aria-label="Interactive trend chart">
           <defs>
             <linearGradient id="${gradientId}" x1="0" x2="0" y1="0" y2="1">
@@ -3900,6 +3955,9 @@ function lineChart(points, color = "#35d58c", unit = "", options = {}) {
           ${visibleCoords.map((point) => `<circle cx="${point.x}" cy="${point.y}" r="1.7" fill="${color}"></circle>`).join("")}
         </svg>
         <div class="chart-marker" style="left:${last.x}%; top:${last.y}%"></div>
+        <div class="chart-x-axis" aria-hidden="true">
+          ${xTicks.map((tick) => `<span style="left:${tick.x}%">${escapeHtml(tick.label)}</span>`).join("")}
+        </div>
       </div>
       <p class="chart-readout" aria-live="polite">${escapeHtml(chartReadout(last, unit))}</p>
       <p class="muted small">${escapeHtml(first.label)} to ${escapeHtml(last.label)}</p>
@@ -5982,6 +6040,8 @@ function renderTrends() {
   const bodyWeightSeries = seriesFromMetrics("bodyWeight");
   const bodyWeightAverageSeries = rollingAverageSeries(bodyWeightSeries, 7);
   const bodyWeightAverage = latestRollingAverage(bodyWeightSeries, 7);
+  const proteinSeries = seriesFromMetrics("protein");
+  const calorieSeries = seriesFromMetrics("calories");
 
   return `
     <details class="section trend-section collapsible-panel muscle-trends-panel" open>
@@ -5998,12 +6058,12 @@ function renderTrends() {
       </div>
       <div class="grid two">
         <div class="chart-panel">
-          <div class="chart-header"><h3>${escapeHtml(selectedMuscleLabel)} hard sets</h3><span class="muted small">daily credit</span></div>
-          ${lineChart(muscleSetSeries, "#f2d06b", " sets")}
+          <div class="chart-header"><h3>${escapeHtml(selectedMuscleLabel)} hard sets</h3><span class="muted small">daily credit - 7-entry avg</span></div>
+          ${lineChart(muscleSetSeries, "#f2d06b", " sets", { showAverage: true })}
         </div>
         <div class="chart-panel">
-          <div class="chart-header"><h3>${escapeHtml(selectedMuscleLabel)} load volume</h3><span class="muted small">credited tonnage</span></div>
-          ${lineChart(muscleVolumeSeries, "#35d58c", " lb")}
+          <div class="chart-header"><h3>${escapeHtml(selectedMuscleLabel)} load volume</h3><span class="muted small">credited tonnage - 7-entry avg</span></div>
+          ${lineChart(muscleVolumeSeries, "#35d58c", " lb", { showAverage: true })}
         </div>
       </div>
     </details>
@@ -6022,12 +6082,12 @@ function renderTrends() {
       </div>
       <div class="grid two">
         <div class="chart-panel">
-          <div class="chart-header"><h3>${escapeHtml(selectedExercise)} load volume</h3><span class="muted small">sets x reps x load</span></div>
-          ${lineChart(volumeSeries, "#9b8cff", " lb")}
+          <div class="chart-header"><h3>${escapeHtml(selectedExercise)} load volume</h3><span class="muted small">sets x reps x load - 7-entry avg</span></div>
+          ${lineChart(volumeSeries, "#9b8cff", " lb", { showAverage: true })}
         </div>
         <div class="chart-panel">
-          <div class="chart-header"><h3>Estimated 1RM</h3><span class="muted small">best set estimate</span></div>
-          ${lineChart(e1rmSeries, "#ff6b5f", " lb")}
+          <div class="chart-header"><h3>Estimated 1RM</h3><span class="muted small">best set estimate - 7-entry avg</span></div>
+          ${lineChart(e1rmSeries, "#ff6b5f", " lb", { showAverage: true })}
         </div>
       </div>
     </details>
@@ -6047,12 +6107,12 @@ function renderTrends() {
           ${lineChart(bodyWeightSeries, "#f2d06b", " lb", { comparisonPoints: bodyWeightAverageSeries, comparisonColor: "rgba(255,255,255,0.62)" })}
         </div>
         <div class="chart-panel">
-          <div class="chart-header"><h3>Protein</h3><span class="muted small">daily grams</span></div>
-          ${lineChart(seriesFromMetrics("protein"), "#ff6b5f", "g")}
+          <div class="chart-header"><h3>Protein</h3><span class="muted small">daily grams - 7d avg</span></div>
+          ${lineChart(proteinSeries, "#ff6b5f", "g", { showAverage: true })}
         </div>
         <div class="chart-panel">
-          <div class="chart-header"><h3>Calories</h3><span class="muted small">daily intake</span></div>
-          ${lineChart(seriesFromMetrics("calories"), "#35d58c", "")}
+          <div class="chart-header"><h3>Calories</h3><span class="muted small">daily intake - 7d avg</span></div>
+          ${lineChart(calorieSeries, "#35d58c", "", { showAverage: true })}
         </div>
       </div>
     </details>
