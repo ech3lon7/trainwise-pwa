@@ -97,6 +97,8 @@ const reset = `
   state.dismissedRecordTrophies = new Set();
   state.weeklyMuscleDetail = null;
   state.returnStack = [];
+  state.historyRecordCategory = "";
+  state.historyRecordDetail = "";
   var makeWorkout = (overrides = {}) => ({
     id: overrides.id || "workout-" + Math.random(),
     date: overrides.date || "2026-06-10",
@@ -193,9 +195,9 @@ assert(!appCode.includes('selectedExercise: "Push-up"'), "Expected Log startup n
 assert(!appCode.includes('showBanner("Unsaved draft restored."'), "Expected startup draft recovery not to show a top banner.");
 assert(appCode.includes("notifyMetricSaved"), "Expected metrics saves to use a dedicated bottom-only notification helper.");
 assert(!stylesCode.includes(".mobile-quick-toggle"), "Expected floating quick action button styling to be removed.");
-assert(indexCode.includes("v=1.5.52"), "Expected index shell references to use bumped app version.");
+assert(indexCode.includes("v=1.5.53"), "Expected index shell references to use bumped app version.");
 assert(!indexCode.includes('id="app" class="app-content" aria-live'), "Expected broad app aria-live to be removed in favor of targeted live regions.");
-assert(serviceWorkerCode.includes("trainwise-cache-v74"), "Expected service worker cache version bump.");
+assert(serviceWorkerCode.includes("trainwise-cache-v75"), "Expected service worker cache version bump.");
 assert(appCode.includes("data-settings-panel"), "Expected Settings panels to preserve open state with stable panel ids.");
 assert(appCode.includes('forceSettingsPanelOpen("supabase-sync")'), "Expected Supabase actions to keep the Supabase panel open after rendering.");
 
@@ -801,9 +803,9 @@ const allTimeRecordsCoverage = runScenario(`
     ] })
   ];
   state.metrics = [
-    { id: "m1", date: "2026-06-09", bodyWeight: 180 },
-    { id: "m2", date: "2026-06-16", bodyWeight: 175 },
-    { id: "m3", date: "2026-06-17", bodyWeight: 185 }
+    { id: "m1", date: "2026-06-09", bodyWeight: 180, calories: 2200, protein: 140 },
+    { id: "m2", date: "2026-06-16", bodyWeight: 175, calories: 2400, protein: 150 },
+    { id: "m3", date: "2026-06-17", bodyWeight: 185, calories: 2600, protein: 175 }
   ];
   state.workoutDraft = [{ draftId: "draft", exercise: "Draft Lift", setRows: [{ weight: 999, reps: 99, rir: 0 }] }];
   var records = allTimeRecords();
@@ -818,10 +820,16 @@ const allTimeRecordsCoverage = runScenario(`
     dayVolume: records.strength.highestDayVolume.value,
     heaviestBodyWeight: records.bodyWeight.heaviest.value,
     lightestBodyWeight: records.bodyWeight.lightest.value,
+    highestCalories: records.nutrition.highestCalories.value,
+    highestProtein: records.nutrition.highestProtein.value,
     chestReps: chest.mostReps.value,
+    chestSets: chest.mostCreditedSets.value,
     tricepsReps: triceps.mostReps.value,
     archivedSessions: archived.sessionCount,
-    hasRecordsPanel: markup.includes("Records") && markup.includes("All-time strength"),
+    hasCabinet: markup.includes("PERSONAL TROPHY CABINET") && markup.includes("Recently earned") && markup.includes("All-time highlights"),
+    hasWeightShelf: markup.includes("Body weight") && markup.includes("Heaviest body weight") && markup.includes("Lightest body weight"),
+    hasEveryShelf: ["Strength", "Nutrition", "Muscle records", "Exercise records", "Consistency"].every((label) => markup.includes(label)),
+    hasDetailAction: markup.includes('data-action="history-record-open"'),
     draftExcluded: records.strength.heaviestWeight.value !== 999
   });
 `);
@@ -832,11 +840,49 @@ assert.strictEqual(allTimeRecordsCoverage.setVolume, 2250, `Expected best set vo
 assert.strictEqual(allTimeRecordsCoverage.dayVolume, 6410, `Expected same-date full session volume 6410, got ${allTimeRecordsCoverage.dayVolume}`);
 assert.strictEqual(allTimeRecordsCoverage.heaviestBodyWeight, 185, `Expected heaviest body weight 185, got ${allTimeRecordsCoverage.heaviestBodyWeight}`);
 assert.strictEqual(allTimeRecordsCoverage.lightestBodyWeight, 175, `Expected lightest body weight 175, got ${allTimeRecordsCoverage.lightestBodyWeight}`);
+assert.strictEqual(allTimeRecordsCoverage.highestCalories, 2600, `Expected highest calorie record 2600, got ${allTimeRecordsCoverage.highestCalories}`);
+assert.strictEqual(allTimeRecordsCoverage.highestProtein, 175, `Expected highest protein record 175, got ${allTimeRecordsCoverage.highestProtein}`);
 assert.strictEqual(allTimeRecordsCoverage.chestReps, 22, `Expected full-credit Chest reps 22, got ${allTimeRecordsCoverage.chestReps}`);
+assert.strictEqual(allTimeRecordsCoverage.chestSets, 2, `Expected full-credit Chest set record 2, got ${allTimeRecordsCoverage.chestSets}`);
 assert.strictEqual(allTimeRecordsCoverage.tricepsReps, 11, `Expected half-credit Triceps reps 11, got ${allTimeRecordsCoverage.tricepsReps}`);
 assert.strictEqual(allTimeRecordsCoverage.archivedSessions, 2, "Expected historical archived exercise sessions to remain in Records.");
-assert(allTimeRecordsCoverage.hasRecordsPanel, "Expected History to render the collapsed Records panel and nested categories.");
+assert(allTimeRecordsCoverage.hasCabinet, "Expected History Records to render a recent-first personal trophy cabinet.");
+assert(allTimeRecordsCoverage.hasWeightShelf, "Expected explicit heaviest and lightest all-time body-weight records.");
+assert(allTimeRecordsCoverage.hasEveryShelf, "Expected Strength, Nutrition, Muscle, Exercise, and Consistency shelves.");
+assert(allTimeRecordsCoverage.hasDetailAction, "Expected record cards to open dedicated evidence screens.");
 assert(allTimeRecordsCoverage.draftExcluded, "Expected unsaved drafts to be excluded from all-time records.");
+
+const recordCabinetDetailCoverage = runScenario(`
+  ${reset}
+  state.workouts = [
+    makeWorkout({ id: "bench-old", date: "2026-06-10", exercise: "Bench Press", setRows: [{ weight: 185, reps: 8, rir: 2, restSeconds: 120 }] }),
+    makeWorkout({ id: "bench-record", date: "2026-06-17", exercise: "Bench Press", setRows: [{ weight: 205, reps: 8, rir: 1, restSeconds: 150 }] })
+  ];
+  state.metrics = [
+    { id: "metric-old", date: "2026-06-10", bodyWeight: 175, calories: 2200, protein: 140 },
+    { id: "metric-record", date: "2026-06-17", bodyWeight: 182, calories: 2500, protein: 170 }
+  ];
+  var weightItem = recordCabinetItemById("strength-heaviest");
+  var strengthDetail = renderHistoryRecordDetail("strength-heaviest");
+  var bodyDetail = renderHistoryRecordDetail("weight-heaviest");
+  var nutritionShelf = renderHistoryRecordCategory("nutrition");
+  var modes = renderHistoryModeSegment();
+  ({
+    previousWeight: weightItem.record.previousValue,
+    strengthHasSets: strengthDetail.includes("Set 1") && strengthDetail.includes("205 lb x 8"),
+    strengthHasCalculation: strengthDetail.includes("Highest valid load entered for one submitted set"),
+    bodyHasEvidence: bodyDetail.includes("182 lb") && bodyDetail.includes("2,500 cal") && bodyDetail.includes("170 g"),
+    nutritionHasAll: nutritionShelf.includes("Highest calorie day") && nutritionShelf.includes("Highest protein day") && nutritionShelf.includes("Longest nutrition logging streak"),
+    recordsMode: modes.includes('data-history-mode="records"')
+  });
+`);
+
+assert.strictEqual(recordCabinetDetailCoverage.previousWeight, 185, `Expected previous heaviest-load record 185, got ${recordCabinetDetailCoverage.previousWeight}`);
+assert(recordCabinetDetailCoverage.strengthHasSets, "Expected strength record detail to show the exact source set rows.");
+assert(recordCabinetDetailCoverage.strengthHasCalculation, "Expected record detail to explain its calculation.");
+assert(recordCabinetDetailCoverage.bodyHasEvidence, "Expected body-weight detail to show the complete source health entry.");
+assert(recordCabinetDetailCoverage.nutritionHasAll, "Expected the Nutrition shelf to expose calorie, protein, and streak records.");
+assert(recordCabinetDetailCoverage.recordsMode, "Expected Records to be a dedicated History mode.");
 
 const trophyAudioTransitions = runScenario(`
   ${reset}

@@ -2785,9 +2785,308 @@ textarea {
   transform: scale(0.99);
 }
 
+.records-cabinet {
+  display: grid;
+  gap: 14px;
+}
+
+.records-cabinet-hero {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 18px;
+  border: 1px solid rgba(242, 208, 107, 0.26);
+  border-radius: 8px;
+  background: linear-gradient(135deg, rgba(242, 208, 107, 0.13), rgba(155, 140, 255, 0.08));
+}
+
+.records-cabinet-hero h2,
+.record-shelf-heading h3,
+.record-detail-section-heading h3 {
+  margin: 0;
+}
+
+.records-cabinet-hero p,
+.record-shelf-heading p {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.records-cabinet-trophy,
+.record-medallion {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 42px;
+  height: 42px;
+  border: 1px solid rgba(242, 208, 107, 0.42);
+  border-radius: 50%;
+  background: rgba(242, 208, 107, 0.14);
+  color: #f2d06b;
+  font-size: 11px;
+  font-weight: 900;
+}
+
+.records-cabinet-trophy {
+  width: 56px;
+  height: 56px;
+  font-size: 22px;
+}
+
+.record-shelf {
+  min-width: 0;
+  padding: 14px 0 4px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.record-shelf-heading,
+.record-detail-section-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.recent-record-track {
+  display: flex;
+  gap: 10px;
+  overflow-x: auto;
+  padding: 1px 1px 8px;
+  scroll-snap-type: x mandatory;
+  scrollbar-width: thin;
+}
+
+.record-trophy-card {
+  display: flex;
+  min-width: 0;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid rgba(242, 208, 107, 0.16);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.035);
+  color: var(--text);
+  text-align: left;
+}
+
+.record-trophy-card:active {
+  transform: scale(0.985);
+}
+
+.recent-record-card {
+  flex: 0 0 min(82vw, 310px);
+  scroll-snap-align: start;
+}
+
+.record-card-copy {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.record-card-copy small,
+.record-card-copy span,
+.record-card-copy em {
+  overflow-wrap: anywhere;
+  color: var(--muted);
+  font-size: 11px;
+  font-style: normal;
+}
+
+.record-card-copy strong {
+  color: #f2d06b;
+  font-size: 20px;
+  line-height: 1.1;
+}
+
+.record-card-copy em {
+  color: rgba(242, 208, 107, 0.78);
+}
+
+.record-highlight-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.record-highlight-card {
+  display: grid;
+}
+
+.record-highlight-card .record-medallion {
+  width: 34px;
+  height: 34px;
+}
+
+.record-category-shelves,
+.record-category-full-list {
+  display: grid;
+  gap: 10px;
+}
+
+.record-full-card {
+  width: 100%;
+}
+
+.record-shelf-preview {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding: 1px 1px 8px;
+  scroll-snap-type: x mandatory;
+  scrollbar-width: thin;
+}
+
+.record-preview-card {
+  flex: 0 0 min(78vw, 290px);
+  scroll-snap-align: start;
+}
+
+.record-detail-nav {
+  padding: 10px;
+}
+
+.record-detail-hero {
+  display: grid;
+  justify-items: start;
+  gap: 7px;
+  padding: 22px 18px;
+  border: 1px solid rgba(242, 208, 107, 0.25);
+  border-radius: 8px;
+  background: linear-gradient(135deg, rgba(242, 208, 107, 0.14), rgba(53, 213, 140, 0.06));
+}
+
+.record-detail-hero h2,
+.record-detail-hero p {
+  margin: 0;
+}
+
+.record-detail-hero > strong {
+  color: #f2d06b;
+  font-size: 34px;
+  line-height: 1.05;
+}
+
+.record-detail-hero p {
+  color: var(--muted);
+}
+
+.record-detail-medallion {
+  width: 52px;
+  height: 52px;
+}
+
+.record-comparison-card {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.record-comparison-card > div,
+.record-calculation,
+.record-source-card,
+.record-evidence-set,
+.record-contribution-row {
+  padding: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.record-comparison-card span,
+.record-calculation span,
+.record-source-card span,
+.record-evidence-set span,
+.record-evidence-set small,
+.record-contribution-row span {
+  display: block;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.record-detail-evidence,
+.record-evidence-sets,
+.record-contribution-list {
+  display: grid;
+  gap: 8px;
+}
+
+.record-source-card {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.record-evidence-sets {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.record-evidence-set.is-record-set {
+  border-color: rgba(242, 208, 107, 0.5);
+  background: rgba(242, 208, 107, 0.1);
+}
+
+.record-contribution-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.record-source-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.record-source-list span {
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: rgba(155, 140, 255, 0.12);
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.record-date-range {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.record-category-full-list {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
 @media (max-width: 430px) {
   .records-grid {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .records-cabinet-hero {
+    padding: 14px;
+  }
+
+  .records-cabinet-trophy {
+    width: 48px;
+    height: 48px;
+  }
+
+  .record-category-full-list,
+  .record-comparison-card,
+  .record-evidence-sets {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .record-source-card {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .record-contribution-row {
+    align-items: flex-start;
+    flex-direction: column;
   }
 }
 

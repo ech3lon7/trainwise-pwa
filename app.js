@@ -3,7 +3,7 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 3;
 const STORES = ["workouts", "metrics", "settings", "syncQueue"];
-const APP_VERSION = "1.5.52";
+const APP_VERSION = "1.5.53";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 const DRAFT_RECOVERY_KEY = "trainwise-draft-recovery-v1";
 const COPIED_COACH_PLAN_KEY = "trainwise-copied-coach-plan-v1";
@@ -157,8 +157,10 @@ const state = {
   logHistoryExercise: "",
   workoutDraft: [],
   loadedWorkoutDateIds: [],
-  historyMode: "exercises",
+  historyMode: "records",
   historyExercise: "",
+  historyRecordCategory: "",
+  historyRecordDetail: "",
   historySearch: "",
   historyDate: "",
   weeklyMuscleDetail: null,
@@ -1194,6 +1196,38 @@ function recordBest(candidates = [], direction = "max") {
   })[0] || null;
 }
 
+function recordBestWithPrevious(candidates = [], direction = "max") {
+  const winner = recordBest(candidates, direction);
+  if (!winner) return null;
+  const previous = recordBest(candidates.filter((item) => String(item.date || "") < String(winner.date || "")), direction);
+  return {
+    ...winner,
+    previousValue: previous?.value ?? null,
+    previousDate: previous?.date || ""
+  };
+}
+
+function longestDateStreak(dates = []) {
+  const uniqueDates = [...new Set(dates.filter(Boolean))].sort();
+  let best = null;
+  let current = null;
+  for (const date of uniqueDates) {
+    if (!current || shiftISODate(current.endDate, 1) !== date) {
+      current = { value: 1, date, startDate: date, endDate: date };
+    } else {
+      current.value += 1;
+      current.endDate = date;
+      current.date = date;
+    }
+    if (!best || current.value > best.value || (current.value === best.value && current.endDate > best.endDate)) best = { ...current };
+  }
+  return best;
+}
+
+function trainingWeekKey(date) {
+  return isoFromLocalDate(currentTrainingWeekStart(parseLocalDate(date)));
+}
+
 function allTimeRecords(workouts = state.workouts, metrics = state.metrics) {
   const submitted = workouts.filter((entry) => !entry.pendingDraft && !isSampleEntry(entry));
   const setEntries = submitted.flatMap((workout) => setRowsFromWorkout(workout).map((row, index) => ({
@@ -1213,27 +1247,51 @@ function allTimeRecords(workouts = state.workouts, metrics = state.metrics) {
   }));
   const dayTotals = new Map();
   for (const session of exerciseSessions) {
-    const current = dayTotals.get(session.date) || { date: session.date, volume: 0, reps: 0, exercises: [] };
+    const current = dayTotals.get(session.date) || { date: session.date, volume: 0, reps: 0, sets: 0, exercises: [], workouts: [] };
     current.volume += session.volume;
     current.reps += session.reps;
+    current.sets += setRowsFromWorkout(session.workout).length;
     current.exercises.push(session.exercise);
+    current.workouts.push({ workout: session.workout, factor: 1 });
     dayTotals.set(session.date, current);
   }
+  const dayEntries = [...dayTotals.values()];
   const strength = {
-    heaviestWeight: recordBest(setEntries.filter((entry) => entry.row.weight > 0).map((entry) => ({ ...entry, value: entry.row.weight }))),
-    mostSetReps: recordBest(setEntries.filter((entry) => entry.row.reps > 0).map((entry) => ({ ...entry, value: entry.row.reps }))),
-    highestSetVolume: recordBest(setEntries.filter((entry) => entry.row.weight > 0).map((entry) => ({ ...entry, value: entry.row.weight * entry.row.reps }))),
-    highestExerciseVolume: recordBest(exerciseSessions.filter((entry) => entry.volume > 0).map((entry) => ({ ...entry, value: entry.volume }))),
-    mostExerciseReps: recordBest(exerciseSessions.filter((entry) => entry.reps > 0).map((entry) => ({ ...entry, value: entry.reps }))),
-    highestDayVolume: recordBest([...dayTotals.values()].filter((entry) => entry.volume > 0).map((entry) => ({ ...entry, value: entry.volume })))
+    heaviestWeight: recordBestWithPrevious(setEntries.filter((entry) => entry.row.weight > 0).map((entry) => ({ ...entry, value: entry.row.weight }))),
+    mostSetReps: recordBestWithPrevious(setEntries.filter((entry) => entry.row.reps > 0).map((entry) => ({ ...entry, value: entry.row.reps }))),
+    highestSetVolume: recordBestWithPrevious(setEntries.filter((entry) => entry.row.weight > 0).map((entry) => ({ ...entry, value: entry.row.weight * entry.row.reps }))),
+    bestEstimated1rm: recordBestWithPrevious(setEntries.filter((entry) => entry.row.weight > 0 && entry.row.reps > 0).map((entry) => ({ ...entry, value: entry.row.weight * (1 + entry.row.reps / 30) }))),
+    highestExerciseVolume: recordBestWithPrevious(exerciseSessions.filter((entry) => entry.volume > 0).map((entry) => ({ ...entry, value: entry.volume }))),
+    mostExerciseReps: recordBestWithPrevious(exerciseSessions.filter((entry) => entry.reps > 0).map((entry) => ({ ...entry, value: entry.reps }))),
+    highestDayVolume: recordBestWithPrevious(dayEntries.filter((entry) => entry.volume > 0).map((entry) => ({ ...entry, value: entry.volume }))),
+    mostDayReps: recordBestWithPrevious(dayEntries.filter((entry) => entry.reps > 0).map((entry) => ({ ...entry, value: entry.reps }))),
+    mostDaySets: recordBestWithPrevious(dayEntries.filter((entry) => entry.sets > 0).map((entry) => ({ ...entry, value: entry.sets }))),
+    mostDayExercises: recordBestWithPrevious(dayEntries.filter((entry) => entry.exercises.length > 0).map((entry) => ({ ...entry, value: entry.exercises.length })))
   };
 
-  const weightEntries = canonicalMetricEntries(metrics.filter((entry) => !isSampleEntry(entry)))
+  const metricEntries = canonicalMetricEntries(metrics.filter((entry) => !isSampleEntry(entry)));
+  const weightEntries = metricEntries
     .filter((entry) => entry.bodyWeight > 0)
-    .map((entry) => ({ value: entry.bodyWeight, date: entry.date }));
+    .map((entry) => ({ value: entry.bodyWeight, date: entry.date, metric: entry }));
+  const weightAverageEntries = [...weightEntries].sort((a, b) => a.date.localeCompare(b.date)).map((entry, index, entries) => {
+    const window = entries.slice(Math.max(0, index - 6), index + 1);
+    return { ...entry, value: window.reduce((sum, item) => sum + item.value, 0) / window.length, sampleCount: window.length };
+  });
   const bodyWeight = {
-    heaviest: recordBest(weightEntries),
-    lightest: recordBest(weightEntries, "min")
+    heaviest: recordBestWithPrevious(weightEntries),
+    lightest: recordBestWithPrevious(weightEntries, "min"),
+    highestAverage: recordBestWithPrevious(weightAverageEntries),
+    lowestAverage: recordBestWithPrevious(weightAverageEntries, "min")
+  };
+
+  const calorieEntries = metricEntries.filter((entry) => entry.calories > 0).map((entry) => ({ value: entry.calories, date: entry.date, metric: entry }));
+  const proteinEntries = metricEntries.filter((entry) => entry.protein > 0).map((entry) => ({ value: entry.protein, date: entry.date, metric: entry }));
+  const nutrition = {
+    highestCalories: recordBestWithPrevious(calorieEntries),
+    lowestCalories: recordBestWithPrevious(calorieEntries, "min"),
+    highestProtein: recordBestWithPrevious(proteinEntries),
+    lowestProtein: recordBestWithPrevious(proteinEntries, "min"),
+    longestLoggingStreak: longestDateStreak(metricEntries.filter((entry) => entry.calories > 0 || entry.protein > 0 || entry.bodyWeight > 0).map((entry) => entry.date))
   };
 
   const muscleDayTotals = new Map();
@@ -1246,10 +1304,12 @@ function allTimeRecords(workouts = state.workouts, metrics = state.metrics) {
         : (meta.secondaryMuscles || []).includes(muscle.id) ? 0.5 : 0;
       if (!factor) continue;
       const key = `${muscle.id}|${workout.date}`;
-      const current = muscleDayTotals.get(key) || { muscleId: muscle.id, muscle: muscle.label, date: workout.date, reps: 0, volume: 0, exercises: [] };
+      const current = muscleDayTotals.get(key) || { muscleId: muscle.id, muscle: muscle.label, date: workout.date, reps: 0, volume: 0, sets: 0, exercises: [], workouts: [] };
       current.reps += rows.reduce((sum, row) => sum + row.reps, 0) * factor;
       current.volume += rows.reduce((sum, row) => sum + row.weight * row.reps, 0) * factor;
+      current.sets += hardSetCount(workout) * factor;
       current.exercises.push({ exercise: workout.exercise, factor });
+      current.workouts.push({ workout, factor });
       muscleDayTotals.set(key, current);
     }
   }
@@ -1259,8 +1319,9 @@ function allTimeRecords(workouts = state.workouts, metrics = state.metrics) {
     return {
       muscleId: muscle.id,
       muscle: muscle.label,
-      mostReps: recordBest(entries.filter((entry) => entry.reps > 0).map((entry) => ({ ...entry, value: entry.reps }))),
-      highestVolume: recordBest(entries.filter((entry) => entry.volume > 0).map((entry) => ({ ...entry, value: entry.volume })))
+      mostReps: recordBestWithPrevious(entries.filter((entry) => entry.reps > 0).map((entry) => ({ ...entry, value: entry.reps }))),
+      highestVolume: recordBestWithPrevious(entries.filter((entry) => entry.volume > 0).map((entry) => ({ ...entry, value: entry.volume }))),
+      mostCreditedSets: recordBestWithPrevious(entries.filter((entry) => entry.sets > 0).map((entry) => ({ ...entry, value: entry.sets })))
     };
   }).filter((entry) => entry.mostReps || entry.highestVolume);
 
@@ -1279,14 +1340,35 @@ function allTimeRecords(workouts = state.workouts, metrics = state.metrics) {
       exercise: group.exercise,
       exerciseId: group.exerciseId,
       sessionCount: group.sessions.length,
-      heaviestWeight: recordBest(rows.filter((entry) => entry.row.weight > 0).map((entry) => ({ ...entry, value: entry.row.weight }))),
-      mostReps: recordBest(rows.filter((entry) => entry.row.reps > 0).map((entry) => ({ ...entry, value: entry.row.reps }))),
-      highestSetVolume: recordBest(rows.filter((entry) => entry.row.weight > 0).map((entry) => ({ ...entry, value: entry.row.weight * entry.row.reps }))),
-      highestSessionVolume: recordBest(sessions.filter((entry) => entry.value > 0))
+      heaviestWeight: recordBestWithPrevious(rows.filter((entry) => entry.row.weight > 0).map((entry) => ({ ...entry, value: entry.row.weight }))),
+      mostReps: recordBestWithPrevious(rows.filter((entry) => entry.row.reps > 0).map((entry) => ({ ...entry, value: entry.row.reps }))),
+      highestSetVolume: recordBestWithPrevious(rows.filter((entry) => entry.row.weight > 0).map((entry) => ({ ...entry, value: entry.row.weight * entry.row.reps }))),
+      bestEstimated1rm: recordBestWithPrevious(rows.filter((entry) => entry.row.weight > 0 && entry.row.reps > 0).map((entry) => ({ ...entry, value: entry.row.weight * (1 + entry.row.reps / 30) }))),
+      highestSessionVolume: recordBestWithPrevious(sessions.filter((entry) => entry.value > 0))
     };
   }).sort((a, b) => a.exercise.localeCompare(b.exercise));
 
-  return { strength, bodyWeight, muscles, exercises };
+  const weekTotals = new Map();
+  for (const workout of submitted) {
+    const key = trainingWeekKey(workout.date);
+    const current = weekTotals.get(key) || { date: key, workouts: 0, sets: 0, volume: 0, trainingDates: new Set(), sourceWorkouts: [] };
+    current.workouts += 1;
+    current.sets += setRowsFromWorkout(workout).length;
+    current.volume += workoutVolume(workout);
+    current.trainingDates.add(workout.date);
+    current.sourceWorkouts.push(workout);
+    weekTotals.set(key, current);
+  }
+  const weeks = [...weekTotals.values()].map((entry) => ({ ...entry, trainingDays: entry.trainingDates.size }));
+  const consistency = {
+    longestWorkoutStreak: longestDateStreak(submitted.map((entry) => entry.date)),
+    mostTrainingDaysWeek: recordBestWithPrevious(weeks.map((entry) => ({ ...entry, value: entry.trainingDays }))),
+    mostWorkoutsWeek: recordBestWithPrevious(weeks.map((entry) => ({ ...entry, value: entry.workouts }))),
+    mostSetsWeek: recordBestWithPrevious(weeks.map((entry) => ({ ...entry, value: entry.sets }))),
+    highestWeeklyVolume: recordBestWithPrevious(weeks.map((entry) => ({ ...entry, value: entry.volume })))
+  };
+
+  return { strength, bodyWeight, nutrition, muscles, exercises, consistency };
 }
 
 function draftVolume(draft) {
@@ -5367,76 +5449,144 @@ function effectiveHistoryDate(recentDates = recentHistoryDates()) {
   return state.historyDate || recentDates[0] || "";
 }
 
-function recordValueMarkup(label, record, options = {}) {
-  const suffix = options.suffix || "";
-  const detail = record
-    ? [record.exercise, record.date ? formatShortDate(record.date) : ""].filter(Boolean).join(" - ")
-    : "No record yet";
+function recordCabinetItem(id, category, title, record, options = {}) {
+  if (!record) return null;
+  return {
+    id,
+    category,
+    title,
+    record,
+    suffix: options.suffix || "",
+    decimals: options.decimals ?? 1,
+    context: options.context || record.exercise || "",
+    formula: options.formula || "",
+    symbol: options.symbol || "PR"
+  };
+}
+
+function recordCabinetItems(records = allTimeRecords()) {
+  const items = [
+    recordCabinetItem("strength-heaviest", "strength", "Heaviest load", records.strength.heaviestWeight, { suffix: " lb", context: records.strength.heaviestWeight?.exercise, formula: "Highest valid load entered for one submitted set.", symbol: "W" }),
+    recordCabinetItem("strength-reps", "strength", "Most reps in one set", records.strength.mostSetReps, { suffix: " reps", decimals: 0, formula: "Highest rep count in one submitted set.", symbol: "R" }),
+    recordCabinetItem("strength-set-volume", "strength", "Highest set volume", records.strength.highestSetVolume, { suffix: " lb", formula: "Weight x reps for one set.", symbol: "V" }),
+    recordCabinetItem("strength-e1rm", "strength", "Best estimated 1RM", records.strength.bestEstimated1rm, { suffix: " lb", formula: "Weight x (1 + reps / 30).", symbol: "1RM" }),
+    recordCabinetItem("strength-exercise-volume", "strength", "Highest exercise-session volume", records.strength.highestExerciseVolume, { suffix: " lb", formula: "Sum of weight x reps for one exercise entry.", symbol: "EV" }),
+    recordCabinetItem("strength-exercise-reps", "strength", "Most exercise-session reps", records.strength.mostExerciseReps, { suffix: " reps", decimals: 0, formula: "Total reps across one submitted exercise entry.", symbol: "ER" }),
+    recordCabinetItem("strength-day-volume", "strength", "Highest full-workout volume", records.strength.highestDayVolume, { suffix: " lb", formula: "All submitted exercise volume on one date.", symbol: "DV" }),
+    recordCabinetItem("strength-day-reps", "strength", "Most reps in one workout", records.strength.mostDayReps, { suffix: " reps", decimals: 0, formula: "All submitted reps on one date.", symbol: "DR" }),
+    recordCabinetItem("strength-day-sets", "strength", "Most sets in one workout", records.strength.mostDaySets, { suffix: " sets", decimals: 0, formula: "All submitted set rows on one date.", symbol: "S" }),
+    recordCabinetItem("strength-day-exercises", "strength", "Most exercises in one workout", records.strength.mostDayExercises, { suffix: " lifts", decimals: 0, formula: "Submitted exercise entries on one date.", symbol: "L" }),
+    recordCabinetItem("weight-heaviest", "body-weight", "Heaviest body weight", records.bodyWeight.heaviest, { suffix: " lb", formula: "Highest submitted body-weight entry.", symbol: "HI" }),
+    recordCabinetItem("weight-lightest", "body-weight", "Lightest body weight", records.bodyWeight.lightest, { suffix: " lb", formula: "Lowest submitted body-weight entry.", symbol: "LO" }),
+    recordCabinetItem("weight-average-high", "body-weight", "Highest rolling weight average", records.bodyWeight.highestAverage, { suffix: " lb", formula: "Average of up to the latest seven valid body-weight logs.", symbol: "AVG" }),
+    recordCabinetItem("weight-average-low", "body-weight", "Lowest rolling weight average", records.bodyWeight.lowestAverage, { suffix: " lb", formula: "Average of up to the latest seven valid body-weight logs.", symbol: "AVG" }),
+    recordCabinetItem("nutrition-calories-high", "nutrition", "Highest calorie day", records.nutrition.highestCalories, { suffix: " cal", decimals: 0, formula: "Highest submitted daily calorie total.", symbol: "CAL" }),
+    recordCabinetItem("nutrition-calories-low", "nutrition", "Lowest logged calorie day", records.nutrition.lowestCalories, { suffix: " cal", decimals: 0, formula: "Lowest non-zero submitted daily calorie total.", symbol: "CAL" }),
+    recordCabinetItem("nutrition-protein-high", "nutrition", "Highest protein day", records.nutrition.highestProtein, { suffix: " g", decimals: 0, formula: "Highest submitted daily protein total.", symbol: "P" }),
+    recordCabinetItem("nutrition-protein-low", "nutrition", "Lowest logged protein day", records.nutrition.lowestProtein, { suffix: " g", decimals: 0, formula: "Lowest non-zero submitted daily protein total.", symbol: "P" }),
+    recordCabinetItem("nutrition-streak", "nutrition", "Longest nutrition logging streak", records.nutrition.longestLoggingStreak, { suffix: " days", decimals: 0, formula: "Consecutive dates with body weight, calories, or protein submitted.", symbol: "ST" }),
+    recordCabinetItem("consistency-workout-streak", "consistency", "Longest workout streak", records.consistency.longestWorkoutStreak, { suffix: " days", decimals: 0, formula: "Consecutive dates with at least one submitted workout.", symbol: "ST" }),
+    recordCabinetItem("consistency-training-days", "consistency", "Most training days in one week", records.consistency.mostTrainingDaysWeek, { suffix: " days", decimals: 0, formula: "Distinct training dates in a local Monday-start week.", symbol: "WK" }),
+    recordCabinetItem("consistency-workouts", "consistency", "Most exercise entries in one week", records.consistency.mostWorkoutsWeek, { suffix: " entries", decimals: 0, formula: "Submitted exercise entries in a local Monday-start week.", symbol: "WK" }),
+    recordCabinetItem("consistency-sets", "consistency", "Most sets in one week", records.consistency.mostSetsWeek, { suffix: " sets", decimals: 0, formula: "Submitted set rows in a local Monday-start week.", symbol: "WK" }),
+    recordCabinetItem("consistency-volume", "consistency", "Highest weekly load volume", records.consistency.highestWeeklyVolume, { suffix: " lb", formula: "All submitted weight x reps in a local Monday-start week.", symbol: "WK" })
+  ];
+  for (const muscle of records.muscles) {
+    const key = normalizeName(muscle.muscle);
+    items.push(
+      recordCabinetItem(`muscle-${key}-sets`, "muscles", `${muscle.muscle}: most credited sets`, muscle.mostCreditedSets, { suffix: " sets", context: muscle.muscle, formula: "Primary hard sets count 1.0; secondary hard sets count 0.5.", symbol: "MS" }),
+      recordCabinetItem(`muscle-${key}-reps`, "muscles", `${muscle.muscle}: most credited reps`, muscle.mostReps, { suffix: " reps", context: muscle.muscle, formula: "Primary reps count 1.0; secondary reps count 0.5.", symbol: "MR" }),
+      recordCabinetItem(`muscle-${key}-volume`, "muscles", `${muscle.muscle}: highest credited volume`, muscle.highestVolume, { suffix: " lb", context: muscle.muscle, formula: "Primary load volume counts 1.0; secondary load volume counts 0.5.", symbol: "MV" })
+    );
+  }
+  for (const exercise of records.exercises) {
+    const key = exercise.exerciseId || normalizeName(exercise.exercise);
+    items.push(
+      recordCabinetItem(`exercise-${key}-weight`, "exercises", `${exercise.exercise}: heaviest load`, exercise.heaviestWeight, { suffix: " lb", context: exercise.exercise, formula: "Highest valid load for this exercise.", symbol: "W" }),
+      recordCabinetItem(`exercise-${key}-reps`, "exercises", `${exercise.exercise}: most reps`, exercise.mostReps, { suffix: " reps", decimals: 0, context: exercise.exercise, formula: "Highest reps in one set for this exercise.", symbol: "R" }),
+      recordCabinetItem(`exercise-${key}-set-volume`, "exercises", `${exercise.exercise}: best set volume`, exercise.highestSetVolume, { suffix: " lb", context: exercise.exercise, formula: "Weight x reps for this exercise's best set.", symbol: "SV" }),
+      recordCabinetItem(`exercise-${key}-e1rm`, "exercises", `${exercise.exercise}: best estimated 1RM`, exercise.bestEstimated1rm, { suffix: " lb", context: exercise.exercise, formula: "Weight x (1 + reps / 30).", symbol: "1RM" }),
+      recordCabinetItem(`exercise-${key}-session-volume`, "exercises", `${exercise.exercise}: best session volume`, exercise.highestSessionVolume, { suffix: " lb", context: exercise.exercise, formula: "Sum of weight x reps for this exercise on one submitted entry.", symbol: "EV" })
+    );
+  }
+  return items.filter(Boolean);
+}
+
+const RECORD_CABINET_CATEGORIES = [
+  { id: "strength", label: "Strength", hint: "Loads, reps, sets, and volume" },
+  { id: "body-weight", label: "Body weight", hint: "Logged and rolling-average extremes" },
+  { id: "nutrition", label: "Nutrition", hint: "Calories, protein, and logging" },
+  { id: "muscles", label: "Muscle records", hint: "Credited sets, reps, and volume" },
+  { id: "exercises", label: "Exercise records", hint: "Every historical exercise" },
+  { id: "consistency", label: "Consistency", hint: "Streaks and weekly highs" }
+];
+
+function recordCabinetValue(item) {
+  return `${fmt(item.record.value, item.decimals)}${item.suffix}`;
+}
+
+function recordCabinetCard(item, className = "") {
+  const previous = Number.isFinite(item.record.previousValue)
+    ? `Previous ${fmt(item.record.previousValue, item.decimals)}${item.suffix}`
+    : "First recorded mark";
   return `
-    <div class="record-stat">
-      <span>${escapeHtml(label)}</span>
-      <strong>${record ? `${fmt(record.value, options.decimals ?? 1)}${escapeHtml(suffix)}` : "--"}</strong>
-      <small>${escapeHtml(detail)}</small>
-    </div>
+    <button class="record-trophy-card ${escapeHtml(className)}" type="button" data-action="history-record-open" data-record-id="${escapeHtml(item.id)}">
+      <span class="record-medallion" aria-hidden="true">${escapeHtml(item.symbol)}</span>
+      <span class="record-card-copy">
+        <small>${escapeHtml(item.title)}</small>
+        <strong>${escapeHtml(recordCabinetValue(item))}</strong>
+        <span>${escapeHtml([item.context, formatShortDate(item.record.date)].filter(Boolean).join(" - "))}</span>
+        <em>${escapeHtml(previous)}</em>
+      </span>
+    </button>
   `;
 }
 
 function renderHistoryRecords(records = allTimeRecords()) {
-  const strength = records.strength;
+  const items = recordCabinetItems(records);
+  const recent = [...items].sort((a, b) => String(b.record.date || "").localeCompare(String(a.record.date || ""))).slice(0, 8);
+  const highlightIds = ["strength-heaviest", "strength-e1rm", "strength-day-volume", "weight-heaviest", "weight-lightest", "consistency-workout-streak"];
+  const highlights = highlightIds.map((id) => items.find((item) => item.id === id)).filter(Boolean);
   return `
-    <details class="section chart-panel collapsible-panel history-records-panel">
-      <summary><span>Records</span><small>all time</small></summary>
-      <div class="records-stack">
-        <details class="record-category collapsible-panel">
-          <summary><span>All-time strength</span><small>best performances</small></summary>
-          <div class="records-grid">
-            ${recordValueMarkup("Heaviest weight", strength.heaviestWeight, { suffix: " lb" })}
-            ${recordValueMarkup("Most reps in one set", strength.mostSetReps, { suffix: " reps", decimals: 0 })}
-            ${recordValueMarkup("Highest set volume", strength.highestSetVolume, { suffix: " lb" })}
-            ${recordValueMarkup("Highest exercise volume", strength.highestExerciseVolume, { suffix: " lb" })}
-            ${recordValueMarkup("Most reps in one exercise session", strength.mostExerciseReps, { suffix: " reps", decimals: 0 })}
-            ${recordValueMarkup("Highest full-session volume", strength.highestDayVolume, { suffix: " lb" })}
-          </div>
-        </details>
-        <details class="record-category collapsible-panel">
-          <summary><span>Body weight</span><small>highest + lowest</small></summary>
-          <div class="records-grid">
-            ${recordValueMarkup("Heaviest", records.bodyWeight.heaviest, { suffix: " lb" })}
-            ${recordValueMarkup("Lightest", records.bodyWeight.lightest, { suffix: " lb" })}
-          </div>
-        </details>
-        <details class="record-category collapsible-panel">
-          <summary><span>Muscle records</span><small>${records.muscles.length} tracked</small></summary>
-          <div class="record-list">
-            ${records.muscles.length ? records.muscles.map((item) => `
-              <div class="record-row">
-                <strong>${escapeHtml(item.muscle)}</strong>
-                <span>${item.mostReps ? `${fmt(item.mostReps.value, 1)} credited reps - ${escapeHtml(formatShortDate(item.mostReps.date))}` : "No rep record"}</span>
-                <span>${item.highestVolume ? `${fmt(item.highestVolume.value, 1)} lb credited volume - ${escapeHtml(formatShortDate(item.highestVolume.date))}` : "No load-volume record"}</span>
-              </div>
-            `).join("") : `<div class="empty compact-empty">No muscle records yet.</div>`}
-          </div>
-        </details>
-        <details class="record-category collapsible-panel">
-          <summary><span>Exercise records</span><small>${records.exercises.length} exercises</small></summary>
-          <div class="record-list">
-            ${records.exercises.length ? records.exercises.map((item) => `
-              <button class="record-row record-exercise-row" type="button" data-action="history-select-exercise" data-exercise="${escapeHtml(item.exercise)}">
-                <strong>${escapeHtml(item.exercise)}</strong>
-                <span>${item.heaviestWeight ? `${fmt(item.heaviestWeight.value, 1)} lb heaviest` : "No load record"} - ${item.mostReps ? `${fmt(item.mostReps.value)} reps` : "no rep record"}</span>
-                <span>${item.highestSetVolume ? `${fmt(item.highestSetVolume.value)} lb best set volume` : "No set volume"} - ${item.highestSessionVolume ? `${fmt(item.highestSessionVolume.value)} lb best session` : "no session volume"}</span>
-              </button>
-            `).join("") : `<div class="empty compact-empty">No exercise records yet.</div>`}
-          </div>
-        </details>
+    <section class="records-cabinet" aria-label="Personal records">
+      <div class="records-cabinet-hero">
+        <div>
+          <span class="eyebrow">PERSONAL TROPHY CABINET</span>
+          <h2>${items.length} all-time records</h2>
+          <p>Every trophy is calculated from locked workouts and submitted health logs.</p>
+        </div>
+        <span class="records-cabinet-trophy" aria-hidden="true">&#127942;</span>
       </div>
-    </details>
+      <section class="record-shelf recent-record-shelf">
+        <div class="record-shelf-heading"><div><h3>Recently earned</h3><p>Newest current records</p></div></div>
+        ${recent.length ? `<div class="recent-record-track">${recent.map((item) => recordCabinetCard(item, "recent-record-card")).join("")}</div>` : `<div class="empty">Lock in workouts or health logs to start your cabinet.</div>`}
+      </section>
+      <section class="record-shelf">
+        <div class="record-shelf-heading"><div><h3>All-time highlights</h3><p>Your headline numbers</p></div></div>
+        <div class="record-highlight-grid">${highlights.length ? highlights.map((item) => recordCabinetCard(item, "record-highlight-card")).join("") : `<div class="empty">No all-time highlights yet.</div>`}</div>
+      </section>
+      <div class="record-category-shelves">
+        ${RECORD_CABINET_CATEGORIES.map((category) => {
+          const categoryItems = items.filter((item) => item.category === category.id);
+          return `
+            <section class="record-shelf record-category-shelf">
+              <div class="record-shelf-heading">
+                <div><h3>${escapeHtml(category.label)}</h3><p>${escapeHtml(category.hint)}</p></div>
+                <button class="ghost-mini" type="button" data-action="history-record-category" data-record-category="${escapeHtml(category.id)}">View all</button>
+              </div>
+              <div class="record-shelf-preview">${categoryItems.length ? categoryItems.slice(0, 3).map((item) => recordCabinetCard(item, "record-preview-card")).join("") : `<div class="empty compact-empty">No ${escapeHtml(category.label.toLowerCase())} yet.</div>`}</div>
+            </section>
+          `;
+        }).join("")}
+      </div>
+    </section>
   `;
 }
 
 function renderHistoryModeSegment() {
   return `
     <div class="segment history-mode-segment" role="tablist" aria-label="History view">
+      <button class="${state.historyMode === "records" ? "is-active" : ""}" type="button" role="tab" aria-selected="${state.historyMode === "records"}" data-action="history-set-mode" data-history-mode="records">Records</button>
       <button class="${state.historyMode === "exercises" ? "is-active" : ""}" type="button" role="tab" aria-selected="${state.historyMode === "exercises"}" data-action="history-set-mode" data-history-mode="exercises">Exercises</button>
       <button class="${state.historyMode === "dates" ? "is-active" : ""}" type="button" role="tab" aria-selected="${state.historyMode === "dates"}" data-action="history-set-mode" data-history-mode="dates">Dates</button>
     </div>
@@ -5518,6 +5668,108 @@ function renderHistoryDatesMode() {
   `;
 }
 
+function recordCabinetItemById(id, records = allTimeRecords()) {
+  return recordCabinetItems(records).find((item) => item.id === id) || null;
+}
+
+function renderRecordEvidence(item) {
+  const record = item.record;
+  const workout = record.workout;
+  const metric = record.metric;
+  const rows = workout ? setRowsFromWorkout(workout) : [];
+  const aggregateWorkouts = Array.isArray(record.workouts)
+    ? record.workouts
+    : Array.isArray(record.sourceWorkouts) ? record.sourceWorkouts.map((source) => ({ workout: source, factor: 1 })) : [];
+  return `
+    <section class="section record-detail-evidence">
+      <div class="record-detail-section-heading"><h3>How this record was earned</h3><span>${escapeHtml(formatShortDate(record.date))}</span></div>
+      <div class="record-calculation"><span>Calculation</span><strong>${escapeHtml(item.formula || "Highest submitted value.")}</strong></div>
+      ${workout ? `
+        <div class="record-source-card">
+          <div><span>Exercise</span><strong>${escapeHtml(workout.exercise || item.context || "Workout")}</strong></div>
+          <div><span>Session volume</span><strong>${fmt(workoutVolume(workout))} lb</strong></div>
+          <div><span>Sets</span><strong>${rows.length}</strong></div>
+        </div>
+        <div class="record-evidence-sets">
+          ${rows.map((row, index) => `
+            <div class="record-evidence-set ${record.index === index ? "is-record-set" : ""}">
+              <span>Set ${index + 1}</span>
+              <strong>${fmt(row.weight, 1)} lb x ${fmt(row.reps)}</strong>
+              <small>${row.rir === null ? "--" : fmt(row.rir, 1)} RIR - ${formatRest(row.restSeconds)} rest</small>
+            </div>
+          `).join("")}
+        </div>
+        <button class="ghost-button full-button" type="button" data-action="history-select-exercise" data-exercise="${escapeHtml(workout.exercise || item.context || "")}">Open exercise history</button>
+      ` : ""}
+      ${metric ? `
+        <div class="record-source-card record-metric-source">
+          <div><span>Body weight</span><strong>${metric.bodyWeight > 0 ? `${fmt(metric.bodyWeight, 1)} lb` : "--"}</strong></div>
+          <div><span>Calories</span><strong>${metric.calories > 0 ? `${fmt(metric.calories)} cal` : "--"}</strong></div>
+          <div><span>Protein</span><strong>${metric.protein > 0 ? `${fmt(metric.protein)} g` : "--"}</strong></div>
+        </div>
+      ` : ""}
+      ${aggregateWorkouts.length ? `
+        <div class="record-contribution-list">
+          ${aggregateWorkouts.map(({ workout: source, factor }) => `
+            <div class="record-contribution-row">
+              <div><strong>${escapeHtml(source.exercise)}</strong><span>${factor === 1 ? "Primary" : "Secondary"} stimulus - ${fmt(factor, 1)}x credit</span></div>
+              <span>${setRowsFromWorkout(source).length} sets - ${fmt(workoutVolume(source) * factor)} lb credited</span>
+            </div>
+          `).join("")}
+        </div>
+      ` : ""}
+      ${Array.isArray(record.exercises) && record.exercises.length ? `
+        <div class="record-source-list">
+          ${record.exercises.map((exercise) => `<span>${escapeHtml(typeof exercise === "string" ? exercise : exercise.exercise)}</span>`).join("")}
+        </div>
+      ` : ""}
+      ${record.startDate ? `<p class="record-date-range">${escapeHtml(formatShortDate(record.startDate))} to ${escapeHtml(formatShortDate(record.endDate || record.date))}</p>` : ""}
+    </section>
+  `;
+}
+
+function renderHistoryRecordDetail(recordId) {
+  const item = recordCabinetItemById(recordId);
+  if (!item) return `<section class="section"><button class="ghost-button" type="button" data-action="history-record-back">Back</button><div class="empty">This record is no longer available.</div></section>`;
+  const previous = Number.isFinite(item.record.previousValue)
+    ? `${fmt(item.record.previousValue, item.decimals)}${item.suffix} on ${formatShortDate(item.record.previousDate)}`
+    : "No earlier record was available.";
+  const difference = Number.isFinite(item.record.previousValue) ? Math.abs(item.record.value - item.record.previousValue) : null;
+  return `
+    <section class="record-detail-screen">
+      <div class="section record-detail-nav"><button class="ghost-button" type="button" data-action="history-record-back">Back to records</button></div>
+      <div class="record-detail-hero">
+        <span class="record-medallion record-detail-medallion" aria-hidden="true">${escapeHtml(item.symbol)}</span>
+        <span class="eyebrow">ALL-TIME RECORD</span>
+        <h2>${escapeHtml(item.title)}</h2>
+        <strong>${escapeHtml(recordCabinetValue(item))}</strong>
+        <p>${escapeHtml([item.context, formatShortDate(item.record.date)].filter(Boolean).join(" - "))}</p>
+      </div>
+      <section class="section record-comparison-card">
+        <div><span>Previous record</span><strong>${escapeHtml(previous)}</strong></div>
+        <div><span>Difference</span><strong>${difference === null ? "First mark" : `${fmt(difference, item.decimals)}${escapeHtml(item.suffix)}`}</strong></div>
+      </section>
+      ${renderRecordEvidence(item)}
+    </section>
+  `;
+}
+
+function renderHistoryRecordCategory(categoryId) {
+  const category = RECORD_CABINET_CATEGORIES.find((item) => item.id === categoryId);
+  const items = recordCabinetItems().filter((item) => item.category === categoryId);
+  return `
+    <section class="record-category-screen">
+      <div class="section record-detail-nav"><button class="ghost-button" type="button" data-action="history-record-category-back">Back to cabinet</button></div>
+      <section class="hero record-category-hero">
+        <div><span class="eyebrow">RECORD SHELF</span><h2 class="hero-title">${escapeHtml(category?.label || "Records")}</h2><p class="hero-copy">${escapeHtml(category?.hint || "All-time submitted records")}</p></div>
+      </section>
+      <div class="record-category-full-list">
+        ${items.length ? items.map((item) => recordCabinetCard(item, "record-full-card")).join("") : `<div class="empty">No records in this shelf yet.</div>`}
+      </div>
+    </section>
+  `;
+}
+
 function renderHistoryList() {
   const search = state.historySearch.trim().toLowerCase();
   const exercises = historyExerciseNames().filter((name) => name.toLowerCase().includes(search));
@@ -5529,13 +5781,11 @@ function renderHistoryList() {
       </div>
     </section>
 
-    ${renderHistoryRecords()}
-
     <section class="section history-mode-shell">
       ${renderHistoryModeSegment()}
     </section>
 
-    ${state.historyMode === "dates" ? renderHistoryDatesMode() : renderHistoryExercisesMode(exercises)}
+    ${state.historyMode === "records" ? renderHistoryRecords() : state.historyMode === "dates" ? renderHistoryDatesMode() : renderHistoryExercisesMode(exercises)}
   `;
 }
 
@@ -5612,6 +5862,8 @@ function renderHistoryDetail(exerciseName) {
 }
 
 function renderHistory() {
+  if (state.historyRecordDetail) return renderHistoryRecordDetail(state.historyRecordDetail);
+  if (state.historyRecordCategory) return renderHistoryRecordCategory(state.historyRecordCategory);
   if (state.historyExercise) return renderHistoryDetail(state.historyExercise);
   return renderHistoryList();
 }
@@ -6517,6 +6769,8 @@ function pushReturnContext(kind, extra = {}) {
     scrollY: currentScrollY(),
     historyMode: state.historyMode,
     historyExercise: state.historyExercise,
+    historyRecordCategory: state.historyRecordCategory,
+    historyRecordDetail: state.historyRecordDetail,
     historyDate: state.historyDate,
     logHistoryExercise: state.logHistoryExercise,
     weeklyMuscleDetail: state.weeklyMuscleDetail ? { ...state.weeklyMuscleDetail } : null,
@@ -6548,8 +6802,10 @@ function clearReturnContexts() {
 function restoreReturnViewContext(context) {
   if (!context) return;
   if (context.activeTab) state.activeTab = context.activeTab;
-  state.historyMode = context.historyMode || "exercises";
+  state.historyMode = context.historyMode || "records";
   state.historyExercise = context.historyExercise || "";
+  state.historyRecordCategory = context.historyRecordCategory || "";
+  state.historyRecordDetail = context.historyRecordDetail || "";
   state.historyDate = context.historyDate || "";
   state.logHistoryExercise = context.logHistoryExercise || "";
   state.weeklyMuscleDetail = context.weeklyMuscleDetail || null;
@@ -7077,18 +7333,20 @@ function recordsDebugSummary(records = allTimeRecords()) {
   const compact = (record) => record ? {
     value: record.value,
     date: record.date || "",
+    previousValue: record.previousValue ?? null,
+    previousDate: record.previousDate || "",
     exercise: record.exercise || "",
     setIndex: Number.isFinite(record.index) ? record.index : null
   } : null;
   return {
     strength: Object.fromEntries(Object.entries(records.strength).map(([key, record]) => [key, compact(record)])),
-    bodyWeight: {
-      heaviest: compact(records.bodyWeight.heaviest),
-      lightest: compact(records.bodyWeight.lightest)
-    },
+    bodyWeight: Object.fromEntries(Object.entries(records.bodyWeight).map(([key, record]) => [key, compact(record)])),
+    nutrition: Object.fromEntries(Object.entries(records.nutrition).map(([key, record]) => [key, compact(record)])),
+    consistency: Object.fromEntries(Object.entries(records.consistency).map(([key, record]) => [key, compact(record)])),
     muscles: records.muscles.map((item) => ({
       muscleId: item.muscleId,
       muscle: item.muscle,
+      mostCreditedSets: compact(item.mostCreditedSets),
       mostReps: compact(item.mostReps),
       highestVolume: compact(item.highestVolume)
     })),
@@ -7099,6 +7357,7 @@ function recordsDebugSummary(records = allTimeRecords()) {
       heaviestWeight: compact(item.heaviestWeight),
       mostReps: compact(item.mostReps),
       highestSetVolume: compact(item.highestSetVolume),
+      bestEstimated1rm: compact(item.bestEstimated1rm),
       highestSessionVolume: compact(item.highestSessionVolume)
     }))
   };
@@ -8193,6 +8452,8 @@ async function handleAction(action, target) {
       await flashSelection(target);
       pushReturnContext("history-exercise-detail", { sourceAction: "history-select-exercise" });
       state.historyExercise = target.dataset.exercise || "";
+      state.historyRecordDetail = "";
+      state.historyRecordCategory = "";
       state.historyMode = "exercises";
       await render({ animate: true });
     },
@@ -8204,11 +8465,49 @@ async function handleAction(action, target) {
         return;
       }
       state.historyExercise = "";
-      state.historyMode = "exercises";
+      state.historyMode = "records";
       await render({ animate: true });
     },
     async "history-set-mode"() {
-      state.historyMode = target.dataset.historyMode === "dates" ? "dates" : "exercises";
+      state.historyMode = ["records", "dates"].includes(target.dataset.historyMode) ? target.dataset.historyMode : "exercises";
+      state.historyRecordCategory = "";
+      state.historyRecordDetail = "";
+      await render({ animate: true });
+    },
+    async "history-record-category"() {
+      const category = target.dataset.recordCategory || "";
+      if (!RECORD_CABINET_CATEGORIES.some((item) => item.id === category)) return;
+      pushReturnContext("history-record-category", { sourceAction: "history-record-category" });
+      state.historyRecordCategory = category;
+      state.historyRecordDetail = "";
+      await render({ animate: true });
+    },
+    async "history-record-category-back"() {
+      const context = popReturnContext("history-record-category");
+      if (context) {
+        restoreReturnViewContext(context);
+        await renderWithReturnScroll(context);
+        return;
+      }
+      state.historyRecordCategory = "";
+      state.historyRecordDetail = "";
+      await render({ animate: true });
+    },
+    async "history-record-open"() {
+      const recordId = target.dataset.recordId || "";
+      if (!recordCabinetItemById(recordId)) return;
+      pushReturnContext("history-record-detail", { sourceAction: "history-record-open", recordId });
+      state.historyRecordDetail = recordId;
+      await render({ animate: true });
+    },
+    async "history-record-back"() {
+      const context = popReturnContext("history-record-detail");
+      if (context) {
+        restoreReturnViewContext(context);
+        await renderWithReturnScroll(context);
+        return;
+      }
+      state.historyRecordDetail = "";
       await render({ animate: true });
     },
     async "open-weekly-muscle-detail"() {
