@@ -3,7 +3,7 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 3;
 const STORES = ["workouts", "metrics", "settings", "syncQueue"];
-const APP_VERSION = "1.5.51";
+const APP_VERSION = "1.5.52";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 const DRAFT_RECOVERY_KEY = "trainwise-draft-recovery-v1";
 const COPIED_COACH_PLAN_KEY = "trainwise-copied-coach-plan-v1";
@@ -15,6 +15,7 @@ const COLLAPSE_REVEAL_MS = 1600;
 const COLLAPSIBLE_SELECTOR = "details.collapsible-panel, details.coverage-row, details.inline-disclosure";
 const SILENT_UI_ACTIONS = new Set(["decrement-rir", "increment-rir", "scroll-top"]);
 const uiCueFallbackCache = new Map();
+const activeUiFallbackAudio = new Set();
 let dbOpenPromise = null;
 let chartId = 0;
 let reloadingForUpdate = false;
@@ -443,9 +444,13 @@ function playUiCueFallback(type) {
   if (typeof window.Audio !== "function" || typeof window.btoa !== "function") return false;
   try {
     const audio = new window.Audio(buildUiCueWavDataUri(type));
+    const release = () => activeUiFallbackAudio.delete(audio);
+    audio.addEventListener?.("ended", release, { once: true });
+    audio.addEventListener?.("error", release, { once: true });
+    activeUiFallbackAudio.add(audio);
     audio.volume = Math.min(1, (soundEffectsVolumePercent() / 100) * 1.8);
     const playback = audio.play();
-    playback?.catch?.(() => {});
+    playback?.catch?.(() => release());
     return true;
   } catch {
     return false;
@@ -481,12 +486,29 @@ function flushUiCueFallback() {
   return queued.length > 0;
 }
 
+function watchUiAudioContext(context) {
+  if (!context || context.__trainwiseStateListener) return context;
+  const handleStateChange = () => {
+    if (context !== uiAudioContext) return;
+    if (context.state === "closed") {
+      uiAudioContext = null;
+      uiAudioNeedsResume = true;
+      return;
+    }
+    uiAudioNeedsResume = context.state !== "running";
+    if (context.state === "running") flushUiCueQueue(context);
+  };
+  context.addEventListener?.("statechange", handleStateChange);
+  context.__trainwiseStateListener = handleStateChange;
+  return context;
+}
+
 function ensureUiAudioReady() {
   if (!soundEffectsEnabled()) return Promise.resolve(null);
   const AudioContextClass = window.AudioContext || window.webkitAudioContext;
   if (!AudioContextClass) return Promise.resolve(null);
   try {
-    if (!uiAudioContext || uiAudioContext.state === "closed") uiAudioContext = new AudioContextClass();
+    if (!uiAudioContext || uiAudioContext.state === "closed") uiAudioContext = watchUiAudioContext(new AudioContextClass());
     if (uiAudioContext.state === "running" && !uiAudioNeedsResume) return Promise.resolve(uiAudioContext);
     if (!uiAudioResumePromise) {
       uiAudioResumePromise = Promise.resolve(uiAudioContext.resume())
@@ -8802,8 +8824,16 @@ document.addEventListener("pointerdown", unlockUiAudio, { capture: true, passive
 document.addEventListener("touchstart", unlockUiAudio, { capture: true, passive: true });
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) markUiAudioForResume();
+  else unlockUiAudio();
 });
-window.addEventListener?.("pageshow", markUiAudioForResume);
+window.addEventListener?.("pageshow", () => {
+  markUiAudioForResume();
+  unlockUiAudio();
+});
+window.addEventListener?.("focus", () => {
+  if (uiAudioContext?.state !== "running") markUiAudioForResume();
+  unlockUiAudio();
+});
 
 document.addEventListener("toggle", (event) => {
   const panel = event.target?.closest?.("details[data-settings-panel]");

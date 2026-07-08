@@ -193,9 +193,9 @@ assert(!appCode.includes('selectedExercise: "Push-up"'), "Expected Log startup n
 assert(!appCode.includes('showBanner("Unsaved draft restored."'), "Expected startup draft recovery not to show a top banner.");
 assert(appCode.includes("notifyMetricSaved"), "Expected metrics saves to use a dedicated bottom-only notification helper.");
 assert(!stylesCode.includes(".mobile-quick-toggle"), "Expected floating quick action button styling to be removed.");
-assert(indexCode.includes("v=1.5.51"), "Expected index shell references to use bumped app version.");
+assert(indexCode.includes("v=1.5.52"), "Expected index shell references to use bumped app version.");
 assert(!indexCode.includes('id="app" class="app-content" aria-live'), "Expected broad app aria-live to be removed in favor of targeted live regions.");
-assert(serviceWorkerCode.includes("trainwise-cache-v73"), "Expected service worker cache version bump.");
+assert(serviceWorkerCode.includes("trainwise-cache-v74"), "Expected service worker cache version bump.");
 assert(appCode.includes("data-settings-panel"), "Expected Settings panels to preserve open state with stable panel ids.");
 assert(appCode.includes('forceSettingsPanelOpen("supabase-sync")'), "Expected Supabase actions to keep the Supabase panel open after rendering.");
 
@@ -884,6 +884,11 @@ assert.deepEqual(audioQueueReliability.semanticPriority, ["success"], `Expected 
 assert(audioQueueReliability.bounded.length <= 3, `Expected bounded audio queue, got ${audioQueueReliability.bounded.length}`);
 assert(audioQueueReliability.needsResume, "Expected page lifecycle changes to re-arm audio resume.");
 assert(/ensureUiAudioReady\(\)\.then\(\(context\) => \{\s*if \(context\) flushUiCueQueue\(context\)/.test(appCode), "Expected audio to resume before queued notes are emitted.");
+assert(appCode.includes('context.addEventListener?.("statechange", handleStateChange)'), "Expected browser-driven audio context interruptions to be observed.");
+assert(appCode.includes('if (context.state === "running") flushUiCueQueue(context)'), "Expected queued cues to flush when the audio context resumes.");
+assert(appCode.includes("activeUiFallbackAudio.add(audio)"), "Expected fallback audio players to stay retained until playback ends.");
+assert(/visibilitychange[\s\S]{0,180}else unlockUiAudio\(\)/.test(appCode), "Expected audio to retry when the app becomes visible again.");
+assert(/addEventListener\?\.\("focus"[\s\S]{0,180}unlockUiAudio\(\)/.test(appCode), "Expected audio to retry when the app regains focus.");
 
 const logLoadDirectionIndicator = runScenario(`
   ${reset}
