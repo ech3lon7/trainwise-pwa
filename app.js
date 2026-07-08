@@ -3,7 +3,7 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 3;
 const STORES = ["workouts", "metrics", "settings", "syncQueue"];
-const APP_VERSION = "1.5.50";
+const APP_VERSION = "1.5.51";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 const DRAFT_RECOVERY_KEY = "trainwise-draft-recovery-v1";
 const COPIED_COACH_PLAN_KEY = "trainwise-copied-coach-plan-v1";
@@ -24,7 +24,11 @@ let recordSyncTimer = null;
 let recordSyncPromise = null;
 let recordSyncLifecycleStarted = false;
 let uiAudioContext = null;
+let uiAudioResumePromise = null;
+let uiAudioNeedsResume = true;
+let pendingUiCues = [];
 let lastUiCueAt = 0;
+const MAX_PENDING_UI_CUES = 3;
 const SESSION_LIMIT_MINUTES = 60;
 const COACH_TIME_TOLERANCE_MINUTES = 3;
 const COACH_TIMEFRAME_OPTIONS = [
@@ -448,34 +452,81 @@ function playUiCueFallback(type) {
   }
 }
 
-function unlockUiAudio() {
-  if (!soundEffectsEnabled()) return false;
+function uiCuePriority(type) {
+  if (["error", "trophy-earned", "trophy-lost", "success"].includes(type)) return 3;
+  if (["warning"].includes(type)) return 2;
+  return 1;
+}
+
+function queueUiCue(type) {
+  const priority = uiCuePriority(type);
+  if (priority > 1) pendingUiCues = pendingUiCues.filter((cue) => uiCuePriority(cue) >= priority);
+  if (priority === 1 && pendingUiCues.some((cue) => uiCuePriority(cue) > 1)) return pendingUiCues;
+  if (priority === 1 && pendingUiCues.includes(type)) return pendingUiCues;
+  pendingUiCues.push(type);
+  if (pendingUiCues.length > MAX_PENDING_UI_CUES) pendingUiCues = pendingUiCues.slice(-MAX_PENDING_UI_CUES);
+  return pendingUiCues;
+}
+
+function flushUiCueQueue(context) {
+  if (!context || context.state !== "running") return false;
+  const queued = pendingUiCues.splice(0, pendingUiCues.length);
+  queued.forEach((type) => emitUiCue(context, type));
+  return queued.length > 0;
+}
+
+function flushUiCueFallback() {
+  const queued = pendingUiCues.splice(0, pendingUiCues.length);
+  queued.forEach((type) => playUiCueFallback(type));
+  return queued.length > 0;
+}
+
+function ensureUiAudioReady() {
+  if (!soundEffectsEnabled()) return Promise.resolve(null);
   const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-  if (!AudioContextClass) return false;
+  if (!AudioContextClass) return Promise.resolve(null);
   try {
     if (!uiAudioContext || uiAudioContext.state === "closed") uiAudioContext = new AudioContextClass();
-    if (uiAudioContext.state !== "running") uiAudioContext.resume().catch(() => {});
-    return true;
+    if (uiAudioContext.state === "running" && !uiAudioNeedsResume) return Promise.resolve(uiAudioContext);
+    if (!uiAudioResumePromise) {
+      uiAudioResumePromise = Promise.resolve(uiAudioContext.resume())
+        .then(() => {
+          uiAudioNeedsResume = uiAudioContext.state !== "running";
+          return uiAudioContext.state === "running" ? uiAudioContext : null;
+        })
+        .catch(() => null)
+        .finally(() => { uiAudioResumePromise = null; });
+    }
+    return uiAudioResumePromise;
   } catch {
-    return false;
+    return Promise.resolve(null);
   }
+}
+
+function unlockUiAudio() {
+  if (!soundEffectsEnabled()) return false;
+  ensureUiAudioReady().then((context) => {
+    if (context) flushUiCueQueue(context);
+  });
+  return true;
+}
+
+function markUiAudioForResume() {
+  uiAudioNeedsResume = true;
+  if (uiAudioContext?.state === "closed") uiAudioContext = null;
 }
 
 function playUiCue(type = "tap", options = {}) {
   if (!options.force && !soundEffectsEnabled()) return false;
-  const AudioContextClass = window.AudioContext || window.webkitAudioContext;
   const now = Date.now();
   if (["tap", "navigate"].includes(type) && now - lastUiCueAt < 45) return false;
   lastUiCueAt = now;
-  if (!AudioContextClass) return playUiCueFallback(type);
-  try {
-    if (!uiAudioContext || uiAudioContext.state === "closed") uiAudioContext = new AudioContextClass();
-    emitUiCue(uiAudioContext, type);
-    if (uiAudioContext.state !== "running") uiAudioContext.resume().catch(() => playUiCueFallback(type));
-    return true;
-  } catch {
-    return playUiCueFallback(type);
-  }
+  queueUiCue(type);
+  ensureUiAudioReady().then((context) => {
+    if (context) flushUiCueQueue(context);
+    else flushUiCueFallback();
+  });
+  return true;
 }
 
 function shouldPlayMeaningfulControlCue(target) {
@@ -1112,6 +1163,108 @@ function clampRirValue(value) {
 
 function workoutVolume(workout) {
   return setRowsFromWorkout(workout).reduce((sum, row) => sum + row.weight * row.reps, 0);
+}
+
+function recordBest(candidates = [], direction = "max") {
+  return candidates.filter((item) => Number.isFinite(item.value)).sort((a, b) => {
+    const valueDifference = direction === "min" ? a.value - b.value : b.value - a.value;
+    return valueDifference || String(b.date || "").localeCompare(String(a.date || ""));
+  })[0] || null;
+}
+
+function allTimeRecords(workouts = state.workouts, metrics = state.metrics) {
+  const submitted = workouts.filter((entry) => !entry.pendingDraft && !isSampleEntry(entry));
+  const setEntries = submitted.flatMap((workout) => setRowsFromWorkout(workout).map((row, index) => ({
+    workout,
+    row,
+    index,
+    date: workout.date || "",
+    exercise: workout.exercise || "",
+    value: 0
+  })));
+  const exerciseSessions = submitted.map((workout) => ({
+    workout,
+    date: workout.date || "",
+    exercise: workout.exercise || "",
+    volume: workoutVolume(workout),
+    reps: setRowsFromWorkout(workout).reduce((sum, row) => sum + row.reps, 0)
+  }));
+  const dayTotals = new Map();
+  for (const session of exerciseSessions) {
+    const current = dayTotals.get(session.date) || { date: session.date, volume: 0, reps: 0, exercises: [] };
+    current.volume += session.volume;
+    current.reps += session.reps;
+    current.exercises.push(session.exercise);
+    dayTotals.set(session.date, current);
+  }
+  const strength = {
+    heaviestWeight: recordBest(setEntries.filter((entry) => entry.row.weight > 0).map((entry) => ({ ...entry, value: entry.row.weight }))),
+    mostSetReps: recordBest(setEntries.filter((entry) => entry.row.reps > 0).map((entry) => ({ ...entry, value: entry.row.reps }))),
+    highestSetVolume: recordBest(setEntries.filter((entry) => entry.row.weight > 0).map((entry) => ({ ...entry, value: entry.row.weight * entry.row.reps }))),
+    highestExerciseVolume: recordBest(exerciseSessions.filter((entry) => entry.volume > 0).map((entry) => ({ ...entry, value: entry.volume }))),
+    mostExerciseReps: recordBest(exerciseSessions.filter((entry) => entry.reps > 0).map((entry) => ({ ...entry, value: entry.reps }))),
+    highestDayVolume: recordBest([...dayTotals.values()].filter((entry) => entry.volume > 0).map((entry) => ({ ...entry, value: entry.volume })))
+  };
+
+  const weightEntries = canonicalMetricEntries(metrics.filter((entry) => !isSampleEntry(entry)))
+    .filter((entry) => entry.bodyWeight > 0)
+    .map((entry) => ({ value: entry.bodyWeight, date: entry.date }));
+  const bodyWeight = {
+    heaviest: recordBest(weightEntries),
+    lightest: recordBest(weightEntries, "min")
+  };
+
+  const muscleDayTotals = new Map();
+  for (const workout of submitted) {
+    const meta = workoutMeta(workout);
+    const rows = setRowsFromWorkout(workout);
+    for (const muscle of muscleGroups) {
+      const factor = (meta.primaryMuscles || []).includes(muscle.id)
+        ? 1
+        : (meta.secondaryMuscles || []).includes(muscle.id) ? 0.5 : 0;
+      if (!factor) continue;
+      const key = `${muscle.id}|${workout.date}`;
+      const current = muscleDayTotals.get(key) || { muscleId: muscle.id, muscle: muscle.label, date: workout.date, reps: 0, volume: 0, exercises: [] };
+      current.reps += rows.reduce((sum, row) => sum + row.reps, 0) * factor;
+      current.volume += rows.reduce((sum, row) => sum + row.weight * row.reps, 0) * factor;
+      current.exercises.push({ exercise: workout.exercise, factor });
+      muscleDayTotals.set(key, current);
+    }
+  }
+  const muscleDays = [...muscleDayTotals.values()];
+  const muscles = muscleGroups.map((muscle) => {
+    const entries = muscleDays.filter((entry) => entry.muscleId === muscle.id);
+    return {
+      muscleId: muscle.id,
+      muscle: muscle.label,
+      mostReps: recordBest(entries.filter((entry) => entry.reps > 0).map((entry) => ({ ...entry, value: entry.reps }))),
+      highestVolume: recordBest(entries.filter((entry) => entry.volume > 0).map((entry) => ({ ...entry, value: entry.volume })))
+    };
+  }).filter((entry) => entry.mostReps || entry.highestVolume);
+
+  const exerciseGroups = new Map();
+  for (const workout of submitted) {
+    const key = workout.exerciseId ? `id:${workout.exerciseId}` : `name:${normalizeName(workout.exercise)}`;
+    const group = exerciseGroups.get(key) || { exercise: workout.exercise, exerciseId: workout.exerciseId || "", sessions: [] };
+    group.exercise = workout.exercise || group.exercise;
+    group.sessions.push(workout);
+    exerciseGroups.set(key, group);
+  }
+  const exercises = [...exerciseGroups.values()].map((group) => {
+    const rows = group.sessions.flatMap((workout) => setRowsFromWorkout(workout).map((row, index) => ({ workout, row, index, date: workout.date, exercise: group.exercise })));
+    const sessions = group.sessions.map((workout) => ({ workout, date: workout.date, exercise: group.exercise, value: workoutVolume(workout) }));
+    return {
+      exercise: group.exercise,
+      exerciseId: group.exerciseId,
+      sessionCount: group.sessions.length,
+      heaviestWeight: recordBest(rows.filter((entry) => entry.row.weight > 0).map((entry) => ({ ...entry, value: entry.row.weight }))),
+      mostReps: recordBest(rows.filter((entry) => entry.row.reps > 0).map((entry) => ({ ...entry, value: entry.row.reps }))),
+      highestSetVolume: recordBest(rows.filter((entry) => entry.row.weight > 0).map((entry) => ({ ...entry, value: entry.row.weight * entry.row.reps }))),
+      highestSessionVolume: recordBest(sessions.filter((entry) => entry.value > 0))
+    };
+  }).sort((a, b) => a.exercise.localeCompare(b.exercise));
+
+  return { strength, bodyWeight, muscles, exercises };
 }
 
 function draftVolume(draft) {
@@ -2061,21 +2214,45 @@ function exerciseUnderperformed(current, previous, options = {}) {
 function coachPerformanceMessage(exercise, status, detail = "") {
   if (status === "progressing") {
     const evidence = detail ? ` (${detail})` : "";
-    return `Nice work - ${exercise.name} moved forward last session${evidence}. Let's use the next small overload target without getting greedy.`;
+    return coachPhrase("performance-progressing", exercise.id || exercise.name, [
+      `Nice work - ${exercise.name} moved forward last session${evidence}. Let's use the next small overload target without getting greedy.`,
+      `${exercise.name} earned a green light last time${evidence}. Take the next small overload and make it clean.`,
+      `That ${exercise.name} performance had some teeth${evidence}. I'm nudging the target up, not launching it into orbit.`
+    ]);
   }
   if (status === "repeated-failure") {
-    return `We've seen ${exercise.name} slide in back-to-back sessions. Let's rotate it or pull the volume back before we pile on more.`;
+    return coachPhrase("performance-repeated", exercise.id || exercise.name, [
+      `We've seen ${exercise.name} slide in back-to-back sessions. Let's rotate it or pull the volume back before we pile on more.`,
+      `${exercise.name} has waved the white flag twice in a row. We rotate it or trim the workload before asking for more.`,
+      `Two straight dips on ${exercise.name} are a pattern, not bad luck. Let's rotate or deload it and rebuild.`
+    ]);
   }
   if (status === "isolated-failure") {
-    return `${exercise.name} took a real step back last session. Let's trim the load slightly and rebuild it with 1-2 RIR.`;
+    return coachPhrase("performance-failure", exercise.id || exercise.name, [
+      `${exercise.name} took a real step back last session. Let's trim the load slightly and rebuild it with 1-2 RIR.`,
+      `${exercise.name} had a rough outing. Take a small bite off the load and rebuild with 1-2 clean reps in reserve.`,
+      `Last ${exercise.name} session got away from us. Dial the load back slightly and own the next one.`
+    ]);
   }
   if (status === "minor-dip") {
-    return `${exercise.name} had a small one-session dip. Keep the load where it is and give me 1-2 clean reps in reserve before we change it.`;
+    return coachPhrase("performance-dip", exercise.id || exercise.name, [
+      `${exercise.name} had a small one-session dip. Keep the load where it is and give me 1-2 clean reps in reserve before we change it.`,
+      `${exercise.name} was a touch off, nothing dramatic. Hold the load and clean up the next performance.`,
+      `Small wobble on ${exercise.name}. No panic move - keep the load and leave 1-2 crisp reps in reserve.`
+    ]);
   }
   if (status === "reached-failure") {
-    return `You took ${exercise.name} to failure while staying in range. Hold the load, but leave me 1-2 good reps in the tank next time.`;
+    return coachPhrase("performance-failure-reached", exercise.id || exercise.name, [
+      `You took ${exercise.name} to failure while staying in range. Hold the load, but leave me 1-2 good reps in the tank next time.`,
+      `${exercise.name} reached the wall without missing the rep range. Same load next time, just stop 1-2 reps before the wall.`,
+      `You emptied the tank on ${exercise.name}. Productive, but next time leave me 1-2 reps so the rest of the session stays sharp.`
+    ]);
   }
-  return `${exercise.name} is holding steady. Let's chase one clean rep or a small load increase next.`;
+  return coachPhrase("performance-steady", exercise.id || exercise.name, [
+    `${exercise.name} is holding steady. Let's chase one clean rep or a small load increase next.`,
+    `${exercise.name} is steady as a rock. The next win is one cleaner rep or the smallest sensible load jump.`,
+    `No drama on ${exercise.name}; it's holding course. Let's earn the next rep before we get ambitious.`
+  ]);
 }
 
 function coachExercisePerformanceSignal(exercise, workouts = coachWorkoutEntries()) {
@@ -2284,12 +2461,50 @@ function isMuscleAvailableForPlanning(target) {
   return target.primaryDaysSince === null || target.primaryDaysSince >= COACH_MUSCLE_RECOVERY_DAYS;
 }
 
+function coachPhrase(category, key, choices) {
+  if (!choices?.length) return "";
+  const source = `${todayISO()}|${category}|${key || "default"}`;
+  let hash = 0;
+  for (let index = 0; index < source.length; index += 1) hash = ((hash << 5) - hash + source.charCodeAt(index)) | 0;
+  return choices[Math.abs(hash) % choices.length];
+}
+
+function coachList(labels = []) {
+  const clean = labels.filter(Boolean);
+  if (clean.length <= 1) return clean[0] || "";
+  if (clean.length === 2) return `${clean[0]} and ${clean[1]}`;
+  return `${clean.slice(0, -1).join(", ")}, and ${clean[clean.length - 1]}`;
+}
+
 function coachRecoveryMessage(target, options = {}) {
   const when = target.primaryDaysSince === 0 ? "today" : "yesterday";
-  const nextMove = options.pickedAlternative
-    ? " I'm putting that work toward another muscle that is ready today."
-    : "";
-  return `Easy there, champ - you trained ${target.label} directly ${when}. I want a 2-day gap by date before we hit it directly again.${nextMove}`;
+  if (options.directInteraction) {
+    return coachPhrase("recovery-warning", target.id, [
+      `Easy there, champ - you trained ${target.label} directly ${when}. Give me the full 2-day gap before we hit it directly again.`,
+      `Not so fast, boss. ${target.label} worked directly ${when}, so I'm blocking it until the 2-day recovery gap clears.`,
+      `I like the enthusiasm, but ${target.label} trained directly ${when}. Let it earn the full 2-day recovery gap.`
+    ]);
+  }
+  return coachPhrase("recovery-detail", target.id, [
+    `${target.label} was trained directly ${when}. I'm keeping it on recovery duty until the 2-day gap clears.`,
+    `We hit ${target.label} directly ${when}, so it stays out of direct work until its 2-day recovery window is clear.`,
+    `${target.label} already worked directly ${when}. It gets the bench today while the 2-day recovery gap does its job.`
+  ]);
+}
+
+function coachRecoverySummary(items = []) {
+  if (!items.length) return "";
+  const labels = items.map((item) => item.muscle?.label).filter(Boolean);
+  const displayedLabels = labels.length > 4 ? [...labels.slice(0, 3), `${labels.length - 3} others`] : labels;
+  const subject = coachList(displayedLabels);
+  const plural = labels.length > 1;
+  const todayCount = items.filter((item) => item.muscle?.primaryDaysSince === 0).length;
+  const timing = todayCount === items.length ? "today" : todayCount ? "today or yesterday" : "yesterday";
+  return coachPhrase("recovery-summary", labels.join("|"), [
+    `${subject} worked directly ${timing}, so ${plural ? "they're" : "it's"} on recovery duty until the 2-day gap clears. I'm spending today's work where it can actually pay off.`,
+    `Recovery call: ${subject} ${plural ? "were" : "was"} trained directly ${timing}. ${plural ? "They sit" : "It sits"} this one out until the 2-day window clears, and we attack fresher gaps instead.`,
+    `I'm putting the brakes on direct work for ${subject}. ${plural ? "They trained" : "It was trained"} ${timing}, and the 2-day recovery gap gets the final say today.`
+  ]);
 }
 
 function muscleDateGapReason(target) {
@@ -2305,13 +2520,19 @@ function coachTargetsMessage(targetMuscles, growthModes, globalGrowthMode) {
     .filter((muscle) => targetMuscles.includes(muscle.id))
     .map((muscle) => `${muscle.label} (${coachGrowthModeLabel(growthModes[muscle.id] || globalGrowthMode)})`);
   if (!targets.length) return "";
-  return `You asked me to prioritize ${targets.join(", ")}. I'll protect the weekly floors first, then give those targets the remaining recoverable work and keep Soft targets conservative.`;
+  const targetList = coachList(targets);
+  const plural = targets.length > 1;
+  return coachPhrase("targets", targetList, [
+    `You called your shot on ${targetList}. I'll protect the weekly floors first, then pour the remaining recoverable work into ${plural ? "those targets" : "that target"}.`,
+    `${targetList} ${plural ? "are your priorities" : "is your priority"}, loud and clear. We cover the floor, protect recovery, then press the advantage there.`,
+    `You want extra attention on ${targetList}. I'll handle the weekly floor first and make the remaining useful work count for ${plural ? "those targets" : "that target"}.`
+  ]);
 }
 
 function coachTargetSelectionWarning(muscleId, context = coachPlanningContext()) {
   const target = context.rankedStats.find((stat) => stat.id === muscleId);
   if (!target || isMuscleAvailableForPlanning(target)) return "";
-  return coachRecoveryMessage(target);
+  return coachRecoveryMessage(target, { directInteraction: true });
 }
 
 function scoreExerciseForMuscle(exercise, muscleId, options = {}) {
@@ -3222,6 +3443,7 @@ function buildTodayPlan(limitMinutes = selectedCoachTimeframeMinutes()) {
   const skippedReasons = [];
   const missingReasons = [];
   const notes = [];
+  let recoverySummary = "";
 
   if (restart) {
     why.push(daysSinceWorkout === null
@@ -3243,8 +3465,9 @@ function buildTodayPlan(limitMinutes = selectedCoachTimeframeMinutes()) {
     why.push(...targetLimitReasons.slice(0, 2));
   }
   if (sessionPlan.deprioritized.length) {
-    skippedReasons.push(...sessionPlan.deprioritized.map((item) => coachRecoveryMessage(item.muscle, { pickedAlternative: true })));
-    why.push(...skippedReasons.slice(0, 2));
+    skippedReasons.push(...sessionPlan.deprioritized.map((item) => coachRecoveryMessage(item.muscle)));
+    recoverySummary = coachRecoverySummary(sessionPlan.deprioritized);
+    why.push(recoverySummary);
   }
   if (sessionPlan.missing.length) {
     missingReasons.push(...sessionPlan.missing.map((muscle) => `I need a primary ${muscle.label} exercise in your library before I can program it safely.`));
@@ -3288,7 +3511,7 @@ function buildTodayPlan(limitMinutes = selectedCoachTimeframeMinutes()) {
             : `We're building toward the upper growth zone in about ${coachTimeframeLabel(limitMinutes)}.`,
       sessionPlan,
       why,
-      explanation: { selected: selectedReasons, skipped: skippedReasons, missing: missingReasons, notes },
+      explanation: { selected: selectedReasons, skipped: skippedReasons, missing: missingReasons, notes, recoverySummary },
       notes,
       progression
     });
@@ -3303,7 +3526,7 @@ function buildTodayPlan(limitMinutes = selectedCoachTimeframeMinutes()) {
         : "Give me more movement options, and I can keep building you toward the upper growth zone.",
       sessionPlan,
       why,
-      explanation: { selected: selectedReasons, skipped: skippedReasons, missing: missingReasons, notes },
+      explanation: { selected: selectedReasons, skipped: skippedReasons, missing: missingReasons, notes, recoverySummary },
       notes,
       progression
     });
@@ -3315,7 +3538,7 @@ function buildTodayPlan(limitMinutes = selectedCoachTimeframeMinutes()) {
     subtitle: progression ? progression.body : "You've covered the upper weekly targets. We can progress carefully or let recovery do its job if your joints feel beat up.",
     sessionPlan,
     why: why.length ? why : ["You've covered the weekly targets, so I'm not forcing junk volume just to make the plan look busy."],
-    explanation: { selected: selectedReasons, skipped: skippedReasons, missing: missingReasons, notes },
+    explanation: { selected: selectedReasons, skipped: skippedReasons, missing: missingReasons, notes, recoverySummary },
     notes,
     progression
   });
@@ -3324,17 +3547,18 @@ function buildTodayPlan(limitMinutes = selectedCoachTimeframeMinutes()) {
 function coachBriefingSummary(plan) {
   const items = plan.sessionPlan?.items || [];
   const briefing = [];
+  const recoveryMessage = plan.explanation?.recoverySummary || "";
   if (items.length) {
     const sets = items.reduce((sum, item) => sum + item.sets, 0);
     const muscles = [...new Set(items.map((item) => item.muscle.label))];
     briefing.push(`Here's the play: we're putting ${sets} sets into ${muscles.join(", ")} and landing around ${plan.sessionPlan.totalMinutes}/${plan.sessionPlan.limitMinutes} minutes.`);
   } else {
+    if (recoveryMessage) briefing.push(recoveryMessage);
     briefing.push(plan.subtitle);
   }
   const targetMessage = coachTargetsMessage(selectedCoachTargetMuscles(), selectedCoachGrowthModes(), selectedCoachGlobalGrowthMode());
   if (targetMessage) briefing.push(targetMessage);
-  const recoveryMessage = plan.explanation?.skipped?.find((message) => message.includes("2-day gap"));
-  if (recoveryMessage) briefing.push(recoveryMessage);
+  if (recoveryMessage && !briefing.includes(recoveryMessage)) briefing.push(recoveryMessage);
   else if (plan.sessionPlan?.performanceNotes?.length) briefing.push(plan.sessionPlan.performanceNotes[0]);
   else if (plan.explanation?.missing?.length) briefing.push(plan.explanation.missing[0]);
   return briefing.filter(Boolean).slice(0, 3);
@@ -3596,14 +3820,46 @@ function topUnderTargetMuscles(limit = 4) {
 }
 
 function coachTodayMessage(kind, data = {}) {
-  if (kind === "baseline") return "Give me 2-3 hard sets for a few muscles today. Once you log them, I'll start steering the weekly gaps with real data.";
-  if (kind === "restart") return `It's been ${data.days} days since your last lift. Let's ease back in with 2-3 sets and keep 1-3 good reps in reserve.`;
-  if (kind === "touches") return `${data.muscles} have work in the bank, but they still need a second weekly touch. Split a little work onto another day if recovery is clear.`;
-  if (kind === "high-rir") return `You had ${data.count} recent ${data.count === 1 ? "set" : "sets"} more than 3 reps from failure. Bring the effort closer next time so those sets do more for you.`;
-  if (kind === "protein-low") return `Your 7-day protein average is ${data.average}g. At your logged weight, I want at least ${data.floor}g per day so recovery has the materials it needs.`;
-  if (kind === "protein-covered") return `Nice - your 7-day protein average is ${data.average}g. Keep it inside roughly ${data.floor}-${data.upper}g per day.`;
-  if (kind === "protein-missing") return "Log body weight and protein for me. I need both before I can give you a useful daily protein floor.";
-  if (kind === "high-volume") return `${data.muscles} are above the default growth zone. That's not automatically a problem, but don't add more unless performance and recovery stay solid.`;
+  if (kind === "baseline") return coachPhrase(kind, "today", [
+    "Give me 2-3 hard sets for a few muscles today. Once you log them, I'll start steering the weekly gaps with real data.",
+    "Right now I'm coaching in the dark. Put 2-3 honest sets on the board for a few muscles and I'll take it from there.",
+    "First mission: establish the baseline. Log a few hard sets and give me something real to coach from."
+  ]);
+  if (kind === "restart") return coachPhrase(kind, data.days, [
+    `It's been ${data.days} days since your last lift. Let's ease back in with 2-3 sets and keep 1-3 good reps in reserve.`,
+    `${data.days} days away means we knock the rust off, not declare war. Start with 2-3 controlled sets and leave 1-3 reps.`,
+    `Welcome back. After ${data.days} days, today's win is sharp work and momentum - not burying yourself.`
+  ]);
+  if (kind === "touches") return coachPhrase(kind, data.muscles, [
+    `${data.muscles} have work in the bank, but they still need a second weekly touch. Split a little work onto another day if recovery is clear.`,
+    `${data.muscles} got one visit this week; I want a second clean touch if recovery gives us the green light.`,
+    `One touch is on the board for ${data.muscles}. A second recovered exposure would round the week out nicely.`
+  ]);
+  if (kind === "high-rir") return coachPhrase(kind, data.count, [
+    `You had ${data.count} recent ${data.count === 1 ? "set" : "sets"} more than 3 reps from failure. Bring the effort closer next time so those sets do more for you.`,
+    `${data.count} recent ${data.count === 1 ? "set was" : "sets were"} cruising a little too comfortably. Tighten the effort so the work earns full credit.`,
+    `I found ${data.count} recent ${data.count === 1 ? "set" : "sets"} with too much left in the tank. Next time, bring them closer to meaningful effort.`
+  ]);
+  if (kind === "protein-low") return coachPhrase(kind, `${data.average}|${data.floor}`, [
+    `Your 7-day protein average is ${data.average}g. At your logged weight, I want at least ${data.floor}g per day so recovery has the materials it needs.`,
+    `${data.average}g average against a ${data.floor}g floor is leaving gains hungry. Let's feed the work you're doing.`,
+    `Training is writing checks that ${data.average}g of protein cannot fully cash. Bring the daily average toward ${data.floor}g.`
+  ]);
+  if (kind === "protein-covered") return coachPhrase(kind, data.average, [
+    `Nice - your 7-day protein average is ${data.average}g. Keep it inside roughly ${data.floor}-${data.upper}g per day.`,
+    `Protein is doing its job at ${data.average}g on average. Stay in the ${data.floor}-${data.upper}g lane.`,
+    `${data.average}g average puts protein where I want it. Keep stacking days inside ${data.floor}-${data.upper}g.`
+  ]);
+  if (kind === "protein-missing") return coachPhrase(kind, "today", [
+    "Log body weight and protein for me. I need both before I can give you a useful daily protein floor.",
+    "I can coach the iron, but nutrition needs receipts. Log body weight and protein so I can set the floor.",
+    "Give me body weight plus protein logs and I'll stop guessing on the recovery side."
+  ]);
+  if (kind === "high-volume") return coachPhrase(kind, data.muscles, [
+    `${data.muscles} are above the default growth zone. That's not automatically a problem, but don't add more unless performance and recovery stay solid.`,
+    `${data.muscles} are living above the usual growth zone. They can stay there only while performance and recovery pay the rent.`,
+    `Volume is running hot for ${data.muscles}. No automatic panic, but no extra sets without solid recovery either.`
+  ]);
   return "";
 }
 
@@ -4075,6 +4331,7 @@ function copiedCoachPlanSnapshot(plan) {
     copiedAt: new Date().toISOString(),
     timeframeMinutes: selectedCoachTimeframeMinutes(),
     globalGrowthMode: selectedCoachGlobalGrowthMode(),
+    targetMuscles: selectedCoachTargetMuscles(),
     growthModes: selectedCoachGrowthModes()
   };
 }
@@ -4109,8 +4366,8 @@ function restoreCopiedCoachPlan() {
   state.copiedCoachPlan = copied;
 }
 
-function simulatedWorkoutFromPlanItem(item, index = 0) {
-  const rows = plannedSetRowsFromPreviousSession(item.exercise, item.sets, item.planTarget);
+function simulatedWorkoutFromPlanItem(item, index = 0, setCount = item.sets) {
+  const rows = plannedSetRowsFromPreviousSession(item.exercise, setCount, item.planTarget);
   return {
     id: `coach-sim-${item.exercise.id || item.exercise.name}-${index}`,
     date: todayISO(),
@@ -4131,25 +4388,63 @@ function simulatedWorkoutFromPlanItem(item, index = 0) {
   };
 }
 
+function copiedPlanCompletion(copiedPlan, workouts = state.workouts) {
+  const copiedDate = copiedPlan?.copiedDate || todayISO();
+  const items = copiedPlan?.sessionPlan?.items || [];
+  const progress = items.map((item) => {
+    const plannedSets = Math.max(0, Number(item.sets) || 0);
+    const completedSets = workouts
+      .filter((workout) => workout.date === copiedDate && sameExerciseIdentity(workout, item.exercise))
+      .reduce((sum, workout) => sum + setRowsFromWorkout(workout).length, 0);
+    return {
+      item,
+      plannedSets,
+      completedSets: Math.min(plannedSets, completedSets),
+      remainingSets: Math.max(0, plannedSets - completedSets)
+    };
+  });
+  const plannedSets = progress.reduce((sum, item) => sum + item.plannedSets, 0);
+  const completedSets = progress.reduce((sum, item) => sum + item.completedSets, 0);
+  const remainingSets = progress.reduce((sum, item) => sum + item.remainingSets, 0);
+  return {
+    copiedDate,
+    progress,
+    plannedSets,
+    completedSets,
+    remainingSets,
+    status: completedSets <= 0 ? "not-started" : remainingSets > 0 ? "partial" : "completed"
+  };
+}
+
 function buildNextCoachPlanPreview(copiedPlan = activeCopiedCoachPlan()) {
   const sourcePlan = copiedPlan || buildTodayPlan(selectedCoachTimeframeMinutes());
-  const simulated = (sourcePlan.sessionPlan?.items || []).map(simulatedWorkoutFromPlanItem);
+  const completion = copiedPlanCompletion(sourcePlan);
+  const simulated = completion.progress
+    .filter((entry) => entry.remainingSets > 0)
+    .map((entry, index) => simulatedWorkoutFromPlanItem(entry.item, index, entry.remainingSets));
   const context = coachPlanningContext([...state.workouts, ...simulated]);
   const restart = false;
-  const targetMuscles = selectedCoachTargetMuscles();
-  const globalGrowthMode = selectedCoachGlobalGrowthMode();
-  const growthModes = selectedCoachGrowthModes(targetMuscles);
-  const sessionPlan = buildSessionPlan(selectedCoachTimeframeMinutes(), { restart, targetMuscles, globalGrowthMode, growthModes, context });
+  const targetMuscles = Array.isArray(sourcePlan.targetMuscles) ? sourcePlan.targetMuscles : selectedCoachTargetMuscles();
+  const globalGrowthMode = sourcePlan.globalGrowthMode || selectedCoachGlobalGrowthMode();
+  const growthModes = sourcePlan.growthModes || selectedCoachGrowthModes(targetMuscles);
+  const timeframeMinutes = sourcePlan.timeframeMinutes || selectedCoachTimeframeMinutes();
+  const sessionPlan = buildSessionPlan(timeframeMinutes, { restart, targetMuscles, globalGrowthMode, growthModes, context });
+  const notice = completion.status === "completed"
+    ? "This preview uses the copied plan you actually completed today. Nothing was simulated twice."
+    : completion.status === "partial"
+      ? `You've completed ${completion.completedSets}/${completion.plannedSets} planned sets. I simulated only the ${completion.remainingSets} remaining sets.`
+      : "This is only the next plan if you complete the current copied plan.";
   return {
-    notice: "This is only the next plan if you complete the current copied plan.",
+    notice,
+    completion,
     plan: {
-      ...buildTodayPlan(selectedCoachTimeframeMinutes()),
+      ...buildTodayPlan(timeframeMinutes),
       mode: sessionPlan.items.length ? "session" : "recovery",
       title: "Next plan preview",
-      subtitle: "Projected from the copied plan being completed.",
+      subtitle: completion.status === "completed" ? "Built from today's submitted work." : "Projected from the remaining copied work being completed.",
       sessionPlan,
       why: sessionPlan.items.map((item) => item.reason),
-      explanation: { selected: sessionPlan.items.map((item) => item.reason), skipped: [], missing: [], notes: ["This preview does not save workouts."] },
+      explanation: { selected: sessionPlan.items.map((item) => item.reason), skipped: [], missing: [], notes: ["This preview does not save workouts."], recoverySummary: "" },
       notes: ["This preview does not save workouts."]
     }
   };
@@ -5050,6 +5345,73 @@ function effectiveHistoryDate(recentDates = recentHistoryDates()) {
   return state.historyDate || recentDates[0] || "";
 }
 
+function recordValueMarkup(label, record, options = {}) {
+  const suffix = options.suffix || "";
+  const detail = record
+    ? [record.exercise, record.date ? formatShortDate(record.date) : ""].filter(Boolean).join(" - ")
+    : "No record yet";
+  return `
+    <div class="record-stat">
+      <span>${escapeHtml(label)}</span>
+      <strong>${record ? `${fmt(record.value, options.decimals ?? 1)}${escapeHtml(suffix)}` : "--"}</strong>
+      <small>${escapeHtml(detail)}</small>
+    </div>
+  `;
+}
+
+function renderHistoryRecords(records = allTimeRecords()) {
+  const strength = records.strength;
+  return `
+    <details class="section chart-panel collapsible-panel history-records-panel">
+      <summary><span>Records</span><small>all time</small></summary>
+      <div class="records-stack">
+        <details class="record-category collapsible-panel">
+          <summary><span>All-time strength</span><small>best performances</small></summary>
+          <div class="records-grid">
+            ${recordValueMarkup("Heaviest weight", strength.heaviestWeight, { suffix: " lb" })}
+            ${recordValueMarkup("Most reps in one set", strength.mostSetReps, { suffix: " reps", decimals: 0 })}
+            ${recordValueMarkup("Highest set volume", strength.highestSetVolume, { suffix: " lb" })}
+            ${recordValueMarkup("Highest exercise volume", strength.highestExerciseVolume, { suffix: " lb" })}
+            ${recordValueMarkup("Most reps in one exercise session", strength.mostExerciseReps, { suffix: " reps", decimals: 0 })}
+            ${recordValueMarkup("Highest full-session volume", strength.highestDayVolume, { suffix: " lb" })}
+          </div>
+        </details>
+        <details class="record-category collapsible-panel">
+          <summary><span>Body weight</span><small>highest + lowest</small></summary>
+          <div class="records-grid">
+            ${recordValueMarkup("Heaviest", records.bodyWeight.heaviest, { suffix: " lb" })}
+            ${recordValueMarkup("Lightest", records.bodyWeight.lightest, { suffix: " lb" })}
+          </div>
+        </details>
+        <details class="record-category collapsible-panel">
+          <summary><span>Muscle records</span><small>${records.muscles.length} tracked</small></summary>
+          <div class="record-list">
+            ${records.muscles.length ? records.muscles.map((item) => `
+              <div class="record-row">
+                <strong>${escapeHtml(item.muscle)}</strong>
+                <span>${item.mostReps ? `${fmt(item.mostReps.value, 1)} credited reps - ${escapeHtml(formatShortDate(item.mostReps.date))}` : "No rep record"}</span>
+                <span>${item.highestVolume ? `${fmt(item.highestVolume.value, 1)} lb credited volume - ${escapeHtml(formatShortDate(item.highestVolume.date))}` : "No load-volume record"}</span>
+              </div>
+            `).join("") : `<div class="empty compact-empty">No muscle records yet.</div>`}
+          </div>
+        </details>
+        <details class="record-category collapsible-panel">
+          <summary><span>Exercise records</span><small>${records.exercises.length} exercises</small></summary>
+          <div class="record-list">
+            ${records.exercises.length ? records.exercises.map((item) => `
+              <button class="record-row record-exercise-row" type="button" data-action="history-select-exercise" data-exercise="${escapeHtml(item.exercise)}">
+                <strong>${escapeHtml(item.exercise)}</strong>
+                <span>${item.heaviestWeight ? `${fmt(item.heaviestWeight.value, 1)} lb heaviest` : "No load record"} - ${item.mostReps ? `${fmt(item.mostReps.value)} reps` : "no rep record"}</span>
+                <span>${item.highestSetVolume ? `${fmt(item.highestSetVolume.value)} lb best set volume` : "No set volume"} - ${item.highestSessionVolume ? `${fmt(item.highestSessionVolume.value)} lb best session` : "no session volume"}</span>
+              </button>
+            `).join("") : `<div class="empty compact-empty">No exercise records yet.</div>`}
+          </div>
+        </details>
+      </div>
+    </details>
+  `;
+}
+
 function renderHistoryModeSegment() {
   return `
     <div class="segment history-mode-segment" role="tablist" aria-label="History view">
@@ -5144,6 +5506,8 @@ function renderHistoryList() {
         <p class="hero-copy">Exercise performance, PRs, load volume, and progressive overload from your logged sessions.</p>
       </div>
     </section>
+
+    ${renderHistoryRecords()}
 
     <section class="section history-mode-shell">
       ${renderHistoryModeSegment()}
@@ -5504,16 +5868,20 @@ function renderCopiedCoachPlan() {
     `;
   }
   const itemCount = copied.sessionPlan?.items?.length || 0;
+  const completion = copiedPlanCompletion(copied);
   const preview = state.previewNextCoachPlan ? buildNextCoachPlanPreview(copied) : null;
+  const completionLabel = completion.status === "completed"
+    ? "completed"
+    : completion.status === "partial" ? `${completion.completedSets}/${completion.plannedSets} sets done` : "not started";
   return `
     <section class="section card coach-copied-plan-card">
       <div class="chart-header">
         <h3>Copied plan</h3>
-        <span class="muted small">${itemCount} lift${itemCount === 1 ? "" : "s"}</span>
+        <span class="muted small">${itemCount} lift${itemCount === 1 ? "" : "s"} - ${escapeHtml(completionLabel)}</span>
       </div>
       <p class="muted small">${escapeHtml(copied.title || "Coach plan")} copied to Log. Return here to keep context while logging.</p>
       <div class="grid two">
-        <button class="ghost-button" type="button" data-action="preview-next-coach-plan">Preview next plan</button>
+        <button class="ghost-button" type="button" data-action="preview-next-coach-plan">${state.previewNextCoachPlan ? "Hide next plan" : "Preview next plan"}</button>
         <button class="ghost-button" type="button" data-action="clear-copied-coach-plan">Clear copied plan</button>
       </div>
       ${preview ? `
@@ -6683,6 +7051,37 @@ function recentDebugMetrics(days = 30) {
     .sort((a, b) => b.date.localeCompare(a.date));
 }
 
+function recordsDebugSummary(records = allTimeRecords()) {
+  const compact = (record) => record ? {
+    value: record.value,
+    date: record.date || "",
+    exercise: record.exercise || "",
+    setIndex: Number.isFinite(record.index) ? record.index : null
+  } : null;
+  return {
+    strength: Object.fromEntries(Object.entries(records.strength).map(([key, record]) => [key, compact(record)])),
+    bodyWeight: {
+      heaviest: compact(records.bodyWeight.heaviest),
+      lightest: compact(records.bodyWeight.lightest)
+    },
+    muscles: records.muscles.map((item) => ({
+      muscleId: item.muscleId,
+      muscle: item.muscle,
+      mostReps: compact(item.mostReps),
+      highestVolume: compact(item.highestVolume)
+    })),
+    exercises: records.exercises.map((item) => ({
+      exercise: item.exercise,
+      exerciseId: item.exerciseId,
+      sessionCount: item.sessionCount,
+      heaviestWeight: compact(item.heaviestWeight),
+      mostReps: compact(item.mostReps),
+      highestSetVolume: compact(item.highestSetVolume),
+      highestSessionVolume: compact(item.highestSessionVolume)
+    }))
+  };
+}
+
 function buildCoachDebugReport() {
   const planningContext = coachPlanningContext();
   const todayPlan = buildTodayPlan(selectedCoachTimeframeMinutes());
@@ -6728,6 +7127,7 @@ function buildCoachDebugReport() {
       muscleAudit: coachDebugMuscleAudit(planningContext),
       libraryCoverage: coachDebugLibraryCoverage()
     },
+    records: recordsDebugSummary(),
     submitted: {
       workoutCount: state.workouts.filter((entry) => !isSampleEntry(entry)).length,
       recentWorkouts: recentDebugWorkouts()
@@ -7874,7 +8274,7 @@ async function handleAction(action, target) {
     },
     async "export-coach-debug"() { await downloadCoachDebugReport(); },
     async "preview-next-coach-plan"() {
-      state.previewNextCoachPlan = true;
+      state.previewNextCoachPlan = !state.previewNextCoachPlan;
       await render();
     },
     async "clear-copied-coach-plan"() {
@@ -8400,6 +8800,10 @@ function restoreCoachTargetScroll(scrollLeft) {
 
 document.addEventListener("pointerdown", unlockUiAudio, { capture: true, passive: true });
 document.addEventListener("touchstart", unlockUiAudio, { capture: true, passive: true });
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) markUiAudioForResume();
+});
+window.addEventListener?.("pageshow", markUiAudioForResume);
 
 document.addEventListener("toggle", (event) => {
   const panel = event.target?.closest?.("details[data-settings-panel]");

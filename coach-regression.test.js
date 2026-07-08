@@ -392,7 +392,7 @@ const repeatedFailureRotatesExercise = runScenario(`
 `);
 
 assert.strictEqual(repeatedFailureRotatesExercise.exercise, "Incline Dumbbell Press", `Expected repeated bench failure to rotate to incline, got ${repeatedFailureRotatesExercise.exercise}`);
-assert((repeatedFailureRotatesExercise.note + repeatedFailureRotatesExercise.why).includes("back-to-back sessions"), `Expected conversational repeated failure explanation, got ${repeatedFailureRotatesExercise.note} ${repeatedFailureRotatesExercise.why}`);
+assert((repeatedFailureRotatesExercise.note + repeatedFailureRotatesExercise.why).includes("rotate") && (repeatedFailureRotatesExercise.note + repeatedFailureRotatesExercise.why).includes("sessions") || (repeatedFailureRotatesExercise.note + repeatedFailureRotatesExercise.why).includes("Two straight dips"), `Expected conversational repeated failure explanation, got ${repeatedFailureRotatesExercise.note} ${repeatedFailureRotatesExercise.why}`);
 
 const topSetPrAvoidsFalseFailure = runScenario(`
   ${resetAndHelpers}
@@ -626,7 +626,7 @@ const targetedMuscles = runScenario(`
 assert.strictEqual(targetedMuscles.mode, "session", `Expected target focus to create a session, got ${targetedMuscles.mode}`);
 assert(targetedMuscles.muscles.includes("biceps"), `Expected biceps target in plan, got ${targetedMuscles.muscles.join(", ")}`);
 assert(targetedMuscles.bicepsSets > 0, `Expected biceps target to receive work, got ${targetedMuscles.bicepsSets}`);
-assert(targetedMuscles.why.includes("You asked me to prioritize") && targetedMuscles.why.includes("weekly floors"), `Expected conversational target priority explanation, got ${targetedMuscles.why}`);
+assert(targetedMuscles.why.includes("Biceps (Medium)") && targetedMuscles.why.includes("weekly floor"), `Expected conversational target priority explanation, got ${targetedMuscles.why}`);
 
 const targetsPrioritizeBeforeGeneralFill = runScenario(`
   ${resetAndHelpers}
@@ -650,7 +650,7 @@ const targetsPrioritizeBeforeGeneralFill = runScenario(`
 assert(targetsPrioritizeBeforeGeneralFill.bicepsIndex >= 0, `Expected selected Biceps target in plan, got ${targetsPrioritizeBeforeGeneralFill.muscles.join(", ")}`);
 assert(targetsPrioritizeBeforeGeneralFill.firstNonTargetIndex < 0 || targetsPrioritizeBeforeGeneralFill.bicepsIndex < targetsPrioritizeBeforeGeneralFill.firstNonTargetIndex, `Expected selected target before non-target optional fill, got ${targetsPrioritizeBeforeGeneralFill.muscles.join(", ")}`);
 assert(targetsPrioritizeBeforeGeneralFill.bicepsSets > 0, "Expected Soft target to receive conservative work before non-target optional work.");
-assert(targetsPrioritizeBeforeGeneralFill.why.includes("keep Soft targets conservative"), `Expected conversational Soft target wording, got ${targetsPrioritizeBeforeGeneralFill.why}`);
+assert(targetsPrioritizeBeforeGeneralFill.why.includes("Biceps (Soft)") && targetsPrioritizeBeforeGeneralFill.why.includes("floor"), `Expected conversational Soft target wording, got ${targetsPrioritizeBeforeGeneralFill.why}`);
 
 const targetTouchesSatisfiedStillAddsVolume = runScenario(`
   ${resetAndHelpers}
@@ -705,9 +705,9 @@ const targetSelectionRecoveryWarning = runScenario(`
   });
 `);
 
-assert(targetSelectionRecoveryWarning.directWarning.includes("Easy there, champ"), `Expected direct recent target warning to sound conversational, got ${targetSelectionRecoveryWarning.directWarning}`);
-assert(targetSelectionRecoveryWarning.directWarning.includes("trained Triceps directly yesterday"), `Expected warning to identify recent direct work, got ${targetSelectionRecoveryWarning.directWarning}`);
-assert(targetSelectionRecoveryWarning.directWarning.includes("2-day gap"), `Expected firm recovery wording, got ${targetSelectionRecoveryWarning.directWarning}`);
+assert(/champ|boss|enthusiasm/.test(targetSelectionRecoveryWarning.directWarning), `Expected direct target warning to use high-personality Coach voice, got ${targetSelectionRecoveryWarning.directWarning}`);
+assert(targetSelectionRecoveryWarning.directWarning.includes("Triceps") && targetSelectionRecoveryWarning.directWarning.includes("yesterday"), `Expected warning to identify recent direct work, got ${targetSelectionRecoveryWarning.directWarning}`);
+assert(targetSelectionRecoveryWarning.directWarning.includes("2-day"), `Expected firm recovery wording, got ${targetSelectionRecoveryWarning.directWarning}`);
 assert.strictEqual(targetSelectionRecoveryWarning.secondaryWarning, "", `Expected secondary-only work not to warn, got ${targetSelectionRecoveryWarning.secondaryWarning}`);
 assert.strictEqual(targetSelectionRecoveryWarning.readyWarning, "", `Expected ready target not to warn, got ${targetSelectionRecoveryWarning.readyWarning}`);
 
@@ -722,15 +722,38 @@ const conversationalCoachBriefing = runScenario(`
     briefing: plan.briefing || [],
     whyMarkup,
     todayBody: todayAction.body,
-    skipped: plan.explanation.skipped.join(" ")
+    skipped: plan.explanation.skipped.join(" "),
+    recoverySummary: plan.explanation.recoverySummary || ""
   });
 `);
 
 assert(conversationalCoachBriefing.briefing.length > 0, "Expected Coach to provide a short briefing summary.");
 assert(conversationalCoachBriefing.briefing[0].includes("Here's the play"), `Expected briefing to speak directly, got ${conversationalCoachBriefing.briefing.join(" ")}`);
 assert(conversationalCoachBriefing.whyMarkup.includes("Coach's read"), "Expected Why this? to render the briefing above detailed reasons.");
-assert(conversationalCoachBriefing.skipped.includes("Easy there, champ"), `Expected skipped recovery reason to use Coach voice, got ${conversationalCoachBriefing.skipped}`);
+assert(conversationalCoachBriefing.recoverySummary.includes("Chest") && conversationalCoachBriefing.recoverySummary.includes("2-day"), `Expected one aggregated recovery summary, got ${conversationalCoachBriefing.recoverySummary}`);
+assert(!/champ|boss/.test(conversationalCoachBriefing.skipped), `Expected routine skipped reasons not to spam nicknames, got ${conversationalCoachBriefing.skipped}`);
 assert(conversationalCoachBriefing.todayBody.includes("Here's the play"), `Expected Today action to reuse Coach briefing, got ${conversationalCoachBriefing.todayBody}`);
+
+const coachVoiceVarietyAndAggregation = runScenario(`
+  ${resetAndHelpers}
+  state.workouts = muscleGroups.slice(0, 7).map((muscle) => makeWorkout(muscle, 1, 3));
+  var plan = buildTodayPlan(60);
+  var firstPhrase = coachPhrase("test", "stable-key", ["one", "two", "three"]);
+  var secondPhrase = coachPhrase("test", "stable-key", ["one", "two", "three"]);
+  var allCopy = [...plan.why, ...plan.explanation.skipped, ...(plan.briefing || [])].join(" ");
+  ({
+    stable: firstPhrase === secondPhrase,
+    recoverySummary: plan.explanation.recoverySummary,
+    recoverySummaryCount: plan.why.filter((item) => item === plan.explanation.recoverySummary).length,
+    nicknameCount: (allCopy.match(/champ|boss/gi) || []).length,
+    detailedCount: plan.explanation.skipped.length
+  });
+`);
+
+assert(coachVoiceVarietyAndAggregation.stable, "Expected deterministic Coach phrases to remain stable during rerenders.");
+assert.strictEqual(coachVoiceVarietyAndAggregation.recoverySummaryCount, 1, "Expected one aggregated recovery message in Why this?.");
+assert(coachVoiceVarietyAndAggregation.detailedCount >= 5, "Expected exact per-muscle recovery details to remain available.");
+assert.strictEqual(coachVoiceVarietyAndAggregation.nicknameCount, 0, "Expected routine plan rendering not to repeat nicknames.");
 
 const targetSelectionBlocksRecoveryConflict = runScenario(`
   ${resetAndHelpers}
@@ -753,7 +776,7 @@ const targetSelectionBlocksRecoveryConflict = runScenario(`
 `);
 
 assert(!targetSelectionBlocksRecoveryConflict.selected.includes("triceps"), `Expected recovery-conflicting Triceps target to stay unselected, got ${targetSelectionBlocksRecoveryConflict.selected.join(", ")}`);
-assert(targetSelectionBlocksRecoveryConflict.toastMessage.includes("2-day gap"), `Expected blocked selection toast, got ${targetSelectionBlocksRecoveryConflict.toastMessage}`);
+assert(targetSelectionBlocksRecoveryConflict.toastMessage.includes("2-day"), `Expected blocked selection toast, got ${targetSelectionBlocksRecoveryConflict.toastMessage}`);
 
 const targetAboveGrowthZoneStillGetsReserve = runScenario(`
   ${resetAndHelpers}
@@ -1487,6 +1510,53 @@ assert(copiedPlanPreview.copiedItems > 0, "Expected copied-plan snapshot to keep
 assert(copiedPlanPreview.workoutsUnchanged && copiedPlanPreview.workoutsStillUnchanged, "Expected next-plan preview to avoid writing simulated workouts.");
 assert(copiedPlanPreview.hasPreviewButton, "Expected copied Coach plan to expose a next-plan preview button.");
 assert(copiedPlanPreview.previewNotice.includes("only the next plan"), `Expected preview advisory, got ${copiedPlanPreview.previewNotice}`);
+
+const copiedPlanCompletionAwarePreview = runScenario(`
+  ${resetAndHelpers}
+  var plan = buildTodayPlan(60);
+  copyCoachPlanToLog(plan);
+  var copied = state.copiedCoachPlan;
+  var first = copied.sessionPlan.items[0];
+  var partialSets = Math.max(1, first.sets - 1);
+  state.workouts = [{
+    id: "partial-copy",
+    date: todayISO(),
+    exercise: first.exercise.name,
+    exerciseId: first.exercise.id,
+    primaryMuscles: first.exercise.primaryMuscles,
+    secondaryMuscles: first.exercise.secondaryMuscles,
+    setRows: Array.from({ length: partialSets }, () => ({ weight: 20, reps: 10, rir: 2, restSeconds: 90 }))
+  }];
+  var partial = buildNextCoachPlanPreview(copied);
+  state.workouts = copied.sessionPlan.items.map((item, index) => ({
+    id: "complete-copy-" + index,
+    date: todayISO(),
+    exercise: item.exercise.name,
+    exerciseId: item.exercise.id,
+    primaryMuscles: item.exercise.primaryMuscles,
+    secondaryMuscles: item.exercise.secondaryMuscles,
+    setRows: Array.from({ length: item.sets }, () => ({ weight: 20, reps: 10, rir: 2, restSeconds: 90 }))
+  }));
+  var beforeCount = state.workouts.length;
+  var complete = buildNextCoachPlanPreview(copied);
+  ({
+    partialStatus: partial.completion.status,
+    partialRemaining: partial.completion.remainingSets,
+    partialNotice: partial.notice,
+    completeStatus: complete.completion.status,
+    completeRemaining: complete.completion.remainingSets,
+    completeNotice: complete.notice,
+    workoutsUnchanged: state.workouts.length === beforeCount
+  });
+`);
+
+assert.strictEqual(copiedPlanCompletionAwarePreview.partialStatus, "partial", `Expected partial copied-plan status, got ${copiedPlanCompletionAwarePreview.partialStatus}`);
+assert(copiedPlanCompletionAwarePreview.partialRemaining > 0 && copiedPlanCompletionAwarePreview.partialNotice.includes("remaining sets"), `Expected only missing copied work to be simulated, got ${copiedPlanCompletionAwarePreview.partialNotice}`);
+assert.strictEqual(copiedPlanCompletionAwarePreview.completeStatus, "completed", `Expected completed copied-plan status, got ${copiedPlanCompletionAwarePreview.completeStatus}`);
+assert.strictEqual(copiedPlanCompletionAwarePreview.completeRemaining, 0, `Expected no simulation after completion, got ${copiedPlanCompletionAwarePreview.completeRemaining}`);
+assert(copiedPlanCompletionAwarePreview.completeNotice.includes("Nothing was simulated twice"), `Expected completed preview explanation, got ${copiedPlanCompletionAwarePreview.completeNotice}`);
+assert(copiedPlanCompletionAwarePreview.workoutsUnchanged, "Expected preview simulation never to write workouts.");
+assert(appCode.includes("state.previewNextCoachPlan = !state.previewNextCoachPlan"), "Expected Preview next plan control to toggle open and closed.");
 
 const coachCopiedPlanEmptyStateAndAudit = runScenario(`
   ${resetAndHelpers}

@@ -193,9 +193,9 @@ assert(!appCode.includes('selectedExercise: "Push-up"'), "Expected Log startup n
 assert(!appCode.includes('showBanner("Unsaved draft restored."'), "Expected startup draft recovery not to show a top banner.");
 assert(appCode.includes("notifyMetricSaved"), "Expected metrics saves to use a dedicated bottom-only notification helper.");
 assert(!stylesCode.includes(".mobile-quick-toggle"), "Expected floating quick action button styling to be removed.");
-assert(indexCode.includes("v=1.5.50"), "Expected index shell references to use bumped app version.");
+assert(indexCode.includes("v=1.5.51"), "Expected index shell references to use bumped app version.");
 assert(!indexCode.includes('id="app" class="app-content" aria-live'), "Expected broad app aria-live to be removed in favor of targeted live regions.");
-assert(serviceWorkerCode.includes("trainwise-cache-v72"), "Expected service worker cache version bump.");
+assert(serviceWorkerCode.includes("trainwise-cache-v73"), "Expected service worker cache version bump.");
 assert(appCode.includes("data-settings-panel"), "Expected Settings panels to preserve open state with stable panel ids.");
 assert(appCode.includes('forceSettingsPanelOpen("supabase-sync")'), "Expected Supabase actions to keep the Supabase panel open after rendering.");
 
@@ -786,6 +786,58 @@ assert(liveTrophySlots.hasSlot, "Expected set rows to include live trophy slots.
 assert(liveTrophySlots.hasTrophy, "Expected live trophy slot to render a set trophy when row is a record.");
 assert(liveTrophySlots.removedAfterEdit, "Expected live trophy helper to remove trophy when edited below record.");
 
+const allTimeRecordsCoverage = runScenario(`
+  ${reset}
+  state.workouts = [
+    makeWorkout({ id: "bench-a", date: "2026-06-10", exercise: "Archived Bench", exerciseId: "archived-bench", primaryMuscles: ["chest"], secondaryMuscles: ["triceps"], setRows: [
+      { weight: 200, reps: 10, rir: 1, restSeconds: 120 },
+      { weight: 180, reps: 12, rir: 1, restSeconds: 120 }
+    ] }),
+    makeWorkout({ id: "row-a", date: "2026-06-10", exercise: "Cable Row", exerciseId: "row", primaryMuscles: ["back"], secondaryMuscles: ["biceps"], setRows: [
+      { weight: 150, reps: 15, rir: 2, restSeconds: 90 }
+    ] }),
+    makeWorkout({ id: "bench-b", date: "2026-06-17", exercise: "Archived Bench", exerciseId: "archived-bench", primaryMuscles: ["chest"], secondaryMuscles: ["triceps"], setRows: [
+      { weight: 205, reps: 8, rir: 2, restSeconds: 120 }
+    ] })
+  ];
+  state.metrics = [
+    { id: "m1", date: "2026-06-09", bodyWeight: 180 },
+    { id: "m2", date: "2026-06-16", bodyWeight: 175 },
+    { id: "m3", date: "2026-06-17", bodyWeight: 185 }
+  ];
+  state.workoutDraft = [{ draftId: "draft", exercise: "Draft Lift", setRows: [{ weight: 999, reps: 99, rir: 0 }] }];
+  var records = allTimeRecords();
+  var chest = records.muscles.find((item) => item.muscleId === "chest");
+  var triceps = records.muscles.find((item) => item.muscleId === "triceps");
+  var archived = records.exercises.find((item) => item.exercise === "Archived Bench");
+  var markup = renderHistoryRecords();
+  ({
+    heaviest: records.strength.heaviestWeight.value,
+    mostReps: records.strength.mostSetReps.value,
+    setVolume: records.strength.highestSetVolume.value,
+    dayVolume: records.strength.highestDayVolume.value,
+    heaviestBodyWeight: records.bodyWeight.heaviest.value,
+    lightestBodyWeight: records.bodyWeight.lightest.value,
+    chestReps: chest.mostReps.value,
+    tricepsReps: triceps.mostReps.value,
+    archivedSessions: archived.sessionCount,
+    hasRecordsPanel: markup.includes("Records") && markup.includes("All-time strength"),
+    draftExcluded: records.strength.heaviestWeight.value !== 999
+  });
+`);
+
+assert.strictEqual(allTimeRecordsCoverage.heaviest, 205, `Expected heaviest submitted load 205, got ${allTimeRecordsCoverage.heaviest}`);
+assert.strictEqual(allTimeRecordsCoverage.mostReps, 15, `Expected most set reps 15, got ${allTimeRecordsCoverage.mostReps}`);
+assert.strictEqual(allTimeRecordsCoverage.setVolume, 2250, `Expected best set volume 2250, got ${allTimeRecordsCoverage.setVolume}`);
+assert.strictEqual(allTimeRecordsCoverage.dayVolume, 6410, `Expected same-date full session volume 6410, got ${allTimeRecordsCoverage.dayVolume}`);
+assert.strictEqual(allTimeRecordsCoverage.heaviestBodyWeight, 185, `Expected heaviest body weight 185, got ${allTimeRecordsCoverage.heaviestBodyWeight}`);
+assert.strictEqual(allTimeRecordsCoverage.lightestBodyWeight, 175, `Expected lightest body weight 175, got ${allTimeRecordsCoverage.lightestBodyWeight}`);
+assert.strictEqual(allTimeRecordsCoverage.chestReps, 22, `Expected full-credit Chest reps 22, got ${allTimeRecordsCoverage.chestReps}`);
+assert.strictEqual(allTimeRecordsCoverage.tricepsReps, 11, `Expected half-credit Triceps reps 11, got ${allTimeRecordsCoverage.tricepsReps}`);
+assert.strictEqual(allTimeRecordsCoverage.archivedSessions, 2, "Expected historical archived exercise sessions to remain in Records.");
+assert(allTimeRecordsCoverage.hasRecordsPanel, "Expected History to render the collapsed Records panel and nested categories.");
+assert(allTimeRecordsCoverage.draftExcluded, "Expected unsaved drafts to be excluded from all-time records.");
+
 const trophyAudioTransitions = runScenario(`
   ${reset}
   var earned = recordTrophyAudioTransition(
@@ -808,6 +860,30 @@ assert.strictEqual(trophyAudioTransitions.lost, "trophy-lost", `Expected trophy 
 assert.strictEqual(trophyAudioTransitions.unchanged, "", `Expected unchanged trophy state to stay silent, got ${trophyAudioTransitions.unchanged}`);
 assert(trophyAudioTransitions.earnedNotes.length >= 3, "Expected trophy-earned to use a celebratory multi-note cue.");
 assert(trophyAudioTransitions.lostNotes.length >= 2, "Expected trophy-lost to use a distinct descending cue.");
+
+const audioQueueReliability = runScenario(`
+  ${reset}
+  pendingUiCues = [];
+  queueUiCue("tap");
+  queueUiCue("tap");
+  var deduped = pendingUiCues.slice();
+  queueUiCue("success");
+  var semanticPriority = pendingUiCues.slice();
+  queueUiCue("warning");
+  queueUiCue("trophy-earned");
+  queueUiCue("error");
+  queueUiCue("navigate");
+  var bounded = pendingUiCues.slice();
+  uiAudioNeedsResume = false;
+  markUiAudioForResume();
+  ({ deduped, semanticPriority, bounded, needsResume: uiAudioNeedsResume });
+`);
+
+assert.deepEqual(audioQueueReliability.deduped, ["tap"], `Expected duplicate generic taps to collapse, got ${audioQueueReliability.deduped}`);
+assert.deepEqual(audioQueueReliability.semanticPriority, ["success"], `Expected semantic cue to replace pending tap, got ${audioQueueReliability.semanticPriority}`);
+assert(audioQueueReliability.bounded.length <= 3, `Expected bounded audio queue, got ${audioQueueReliability.bounded.length}`);
+assert(audioQueueReliability.needsResume, "Expected page lifecycle changes to re-arm audio resume.");
+assert(/ensureUiAudioReady\(\)\.then\(\(context\) => \{\s*if \(context\) flushUiCueQueue\(context\)/.test(appCode), "Expected audio to resume before queued notes are emitted.");
 
 const logLoadDirectionIndicator = runScenario(`
   ${reset}
@@ -1928,6 +2004,7 @@ const coachDebugReport = runScenario(`
     restoredMode: state.coachGlobalGrowthMode,
     hasSubmitted: report.submitted.workoutCount,
     hasDraftOnly: report.draftOnly.entries.length,
+    hasRecords: Boolean(report.records?.strength?.heaviestWeight),
     hasSecret: serialized.includes("secret-password") || serialized.includes("anon-secret") || serialized.includes("access-secret") || serialized.includes("refresh-secret")
   });
 `);
@@ -1943,6 +2020,7 @@ assert(Object.values(coachDebugReport.modeMinutes).every((count) => Number.isFin
 assert.strictEqual(coachDebugReport.restoredMode, "medium", `Expected debug mode comparison not to mutate selected Coach mode, got ${coachDebugReport.restoredMode}`);
 assert.strictEqual(coachDebugReport.hasSubmitted, 1, `Expected Coach debug report to include submitted workout count, got ${coachDebugReport.hasSubmitted}`);
 assert.strictEqual(coachDebugReport.hasDraftOnly, 1, `Expected Coach debug report to include draft-only entries separately, got ${coachDebugReport.hasDraftOnly}`);
+assert(coachDebugReport.hasRecords, "Expected Coach debug report to include calculated record summaries.");
 assert(appCode.includes('data-action="export-coach-debug"'), "Expected Settings to expose a Coach debug export action.");
 assert.strictEqual(coachDebugReport.hasSecret, false, "Expected Coach debug report to exclude Supabase secrets and sessions.");
 
