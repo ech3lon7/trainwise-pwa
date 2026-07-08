@@ -931,6 +931,44 @@ const modeAwarePerExerciseCaps = runScenario(`
 assert(modeAwarePerExerciseCaps.softSets < modeAwarePerExerciseCaps.mediumSets, `Expected Medium Calves to exceed Soft, got soft=${modeAwarePerExerciseCaps.softSets}, medium=${modeAwarePerExerciseCaps.mediumSets}`);
 assert(modeAwarePerExerciseCaps.aggressiveSets > modeAwarePerExerciseCaps.mediumSets, `Expected Aggressive Calves to exceed the old 8-set Medium cap, got medium=${modeAwarePerExerciseCaps.mediumSets}, aggressive=${modeAwarePerExerciseCaps.aggressiveSets}`);
 
+const manyFloorGapsKeepModesDistinct = runScenario(`
+  ${resetAndHelpers}
+  state.settings.customExercises = muscleGroups.map((muscle) => ({
+    id: "custom-" + muscle.id,
+    name: muscle.label + " Exercise",
+    primaryMuscles: [muscle.id],
+    secondaryMuscles: [],
+    equipment: "dumbbells",
+    reps: "8-12",
+    rest: muscle.id === "calves" ? "120 sec" : "90 sec",
+    cue: "Test exercise for " + muscle.label,
+    userCreated: true
+  }));
+  state.workouts = muscleGroups.map((muscle) => makeWorkout(
+    muscle,
+    2,
+    ["chest", "back", "quads", "abs", "biceps", "calves", "shoulders"].includes(muscle.id) ? 4 : 10,
+    { restSeconds: muscle.id === "calves" ? 120 : 90 }
+  ));
+  state.coachTargetMuscles = [];
+  state.coachGrowthModes = {};
+  var plans = {};
+  for (var mode of ["soft", "medium", "aggressive"]) {
+    state.coachGlobalGrowthMode = mode;
+    var plan = buildTodayPlan(60).sessionPlan;
+    plans[mode] = {
+      totalSets: plan.items.reduce((sum, item) => sum + item.sets, 0),
+      totalMinutes: plan.totalMinutes,
+      allocation: plan.items.map((item) => item.muscle.id + ":" + item.sets).join(",")
+    };
+  }
+  plans;
+`);
+
+assert(manyFloorGapsKeepModesDistinct.soft.totalSets < manyFloorGapsKeepModesDistinct.medium.totalSets, `Expected Soft to stay conservative when many muscles are below floor, got soft=${JSON.stringify(manyFloorGapsKeepModesDistinct.soft)} medium=${JSON.stringify(manyFloorGapsKeepModesDistinct.medium)}`);
+assert(manyFloorGapsKeepModesDistinct.medium.totalMinutes <= 63 && manyFloorGapsKeepModesDistinct.aggressive.totalMinutes <= 63, `Expected Medium/Aggressive to stay inside hard cap, got ${JSON.stringify(manyFloorGapsKeepModesDistinct)}`);
+assert.notStrictEqual(manyFloorGapsKeepModesDistinct.medium.allocation, manyFloorGapsKeepModesDistinct.aggressive.allocation, `Expected Aggressive allocation to remain visibly different from Medium when time-capped, got ${manyFloorGapsKeepModesDistinct.medium.allocation}`);
+
 const realisticModeComparisonExplainsAggressiveLimits = runScenario(`
   ${resetAndHelpers}
   state.workouts = [

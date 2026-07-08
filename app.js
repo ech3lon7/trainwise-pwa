@@ -78,7 +78,7 @@ const RIR_MAX = 100;
 const COACH_GROWTH_MODE_OPTIONS = [
   { id: "soft", label: "Soft", targetSets: 16, allowHighVolume: false, startSets: 2, rank: 0 },
   { id: "medium", label: "Medium", targetSets: HYPERTROPHY.growthHigh, allowHighVolume: false, startSets: 3, rank: 1 },
-  { id: "aggressive", label: "Aggressive", targetSets: HYPERTROPHY.highVolumeFillMax, allowHighVolume: true, startSets: 4, rank: 2 }
+  { id: "aggressive", label: "Aggressive", targetSets: HYPERTROPHY.highVolumeFillMax, allowHighVolume: true, startSets: 3, rank: 2 }
 ];
 
 const muscleGroups = [
@@ -3241,6 +3241,7 @@ function buildSessionPlan(limitMinutes = SESSION_LIMIT_MINUTES, options = {}) {
   const performanceNoteKeys = new Set();
   let totalMinutes = 0;
   const usedExercises = new Set();
+  const conservativeSoftPlan = globalGrowthMode === "soft" && !targetMuscles.length && stats.length > 0;
 
   const addPerformanceNote = (signal) => {
     if (!signal?.message || !["isolated-failure", "repeated-failure"].includes(signal.status)) return;
@@ -3509,12 +3510,46 @@ function buildSessionPlan(limitMinutes = SESSION_LIMIT_MINUTES, options = {}) {
     return changed;
   };
 
+  const rebalanceGlobalAggressiveSets = () => {
+    if (restart || targetMuscles.length || globalGrowthMode !== "aggressive" || items.length < 2) return false;
+    const receivers = items
+      .filter((item) => item.sets < maxSetsForPlanTarget(item.muscle, caps, true, true, item.growthMode, false))
+      .sort((a, b) => coachMusclePrioritySort(a.muscle, b.muscle));
+    const donors = [...items]
+      .reverse()
+      .filter((item) => item.sets > caps.minSets);
+
+    for (const receiver of receivers) {
+      for (const donor of donors) {
+        if (donor.muscle.id === receiver.muscle.id) continue;
+        const donorMinutes = donor.minutes;
+        const reducedDonorMinutes = plannedExerciseMinutes(donor, donor.sets - 1);
+        const freedMinutes = donorMinutes - reducedDonorMinutes;
+        const receiverMinutes = receiver.minutes;
+        const increasedReceiverMinutes = plannedExerciseMinutes(receiver, receiver.sets + 1);
+        const extraMinutes = increasedReceiverMinutes - receiverMinutes;
+        if (freedMinutes <= 0 || extraMinutes <= 0) continue;
+        if (totalMinutes - freedMinutes + extraMinutes > hardLimit) continue;
+        donor.sets -= 1;
+        donor.minutes = reducedDonorMinutes;
+        receiver.sets += 1;
+        receiver.minutes = increasedReceiverMinutes;
+        if (receiver.muscle.sets + receiver.sets > HYPERTROPHY.growthHigh) receiver.phase = "high-volume";
+        totalMinutes = totalMinutes - freedMinutes + extraMinutes;
+        return true;
+      }
+    }
+    return false;
+  };
+
   if (globalGrowthMode === "aggressive" || items.some((item) => item.growthMode === "aggressive")) {
     addSetsToExisting({ floorGrowthMode: "medium" });
   }
-  addSetsToExisting();
+  if (!conservativeSoftPlan) {
+    addSetsToExisting();
+  }
 
-  if (!restart && totalMinutes < targetFloor) {
+  if (!restart && totalMinutes < targetFloor && !conservativeSoftPlan) {
     if (globalGrowthMode === "aggressive") {
       addSetsToExisting({ allowHighVolume: true });
     }
@@ -3533,15 +3568,20 @@ function buildSessionPlan(limitMinutes = SESSION_LIMIT_MINUTES, options = {}) {
     }
   }
 
-  if (totalMinutes < targetFloor) {
+  if (totalMinutes < targetFloor && !conservativeSoftPlan) {
     addSetsToExisting({ allowHighVolume: !restart });
   }
+
+  rebalanceGlobalAggressiveSets();
 
   if (enforceTargetModeContracts()) {
     addSetsToExisting({ allowHighVolume: !restart });
   }
 
-  const shortfallReason = sessionShortfallReason({ totalMinutes, cappedLimit, targetFloor, allStats, items, missing });
+  let shortfallReason = sessionShortfallReason({ totalMinutes, cappedLimit, targetFloor, allStats, items, missing });
+  if (conservativeSoftPlan && totalMinutes < targetFloor) {
+    shortfallReason = `Estimated ${totalMinutes}/${cappedLimit} min because Soft keeps volume conservative while weekly floor gaps are spread across multiple muscles.`;
+  }
 
   const plannedIds = new Set(items.map((item) => item.muscle.id));
   const deprioritized = stats
