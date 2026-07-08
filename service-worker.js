@@ -1,15 +1,15 @@
 "use strict";
 
-const CACHE_NAME = "trainwise-cache-v76";
+const CACHE_NAME = "trainwise-cache-v77";
 const ASSETS = [
   "./",
   "./index.html",
-  "./styles.css?v=1.5.54",
-  "./app.js?v=1.5.54",
-  "./manifest.webmanifest?v=1.5.54",
-  "./icon.svg?v=1.5.54",
-  "./icon-512.png?v=1.5.54",
-  "./apple-touch-icon.png?v=1.5.54",
+  "./styles.css?v=1.5.55",
+  "./app.js?v=1.5.55",
+  "./manifest.webmanifest?v=1.5.55",
+  "./icon.svg?v=1.5.55",
+  "./icon-512.png?v=1.5.55",
+  "./apple-touch-icon.png?v=1.5.55",
   "./assets/muscles/abs.png?v=1.5.43",
   "./assets/muscles/back.png?v=1.5.43",
   "./assets/muscles/bicep.png?v=1.5.43",
@@ -21,7 +21,30 @@ const ASSETS = [
   "./assets/muscles/shoulders.png?v=1.5.43",
   "./assets/muscles/triceps.png?v=1.5.43",
   "./assets/dumbbell.png?v=1.5.43",
-  "./assets/dumbbell.svg?v=1.5.43"
+  "./assets/dumbbell.svg?v=1.5.43",
+  "./assets/records/average.svg?v=1.5.55",
+  "./assets/records/calories.svg?v=1.5.55",
+  "./assets/records/e1rm.svg?v=1.5.55",
+  "./assets/records/load.svg?v=1.5.55",
+  "./assets/records/protein.svg?v=1.5.55",
+  "./assets/records/reps.svg?v=1.5.55",
+  "./assets/records/session-volume.svg?v=1.5.55",
+  "./assets/records/sets.svg?v=1.5.55",
+  "./assets/records/streak.svg?v=1.5.55",
+  "./assets/records/trend-down.svg?v=1.5.55",
+  "./assets/records/trend-up.svg?v=1.5.55",
+  "./assets/records/volume.svg?v=1.5.55",
+  "./assets/records/weekly.svg?v=1.5.55",
+  "./assets/records/muscles/abs.png?v=1.5.55",
+  "./assets/records/muscles/back.png?v=1.5.55",
+  "./assets/records/muscles/bicep.png?v=1.5.55",
+  "./assets/records/muscles/calves.png?v=1.5.55",
+  "./assets/records/muscles/chest.png?v=1.5.55",
+  "./assets/records/muscles/glutes.png?v=1.5.55",
+  "./assets/records/muscles/hamstrings.png?v=1.5.55",
+  "./assets/records/muscles/quads.png?v=1.5.55",
+  "./assets/records/muscles/shoulders.png?v=1.5.55",
+  "./assets/records/muscles/triceps.png?v=1.5.55"
 ];
 
 function shouldHandleRequest(request) {

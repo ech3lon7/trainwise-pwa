@@ -195,9 +195,9 @@ assert(!appCode.includes('selectedExercise: "Push-up"'), "Expected Log startup n
 assert(!appCode.includes('showBanner("Unsaved draft restored."'), "Expected startup draft recovery not to show a top banner.");
 assert(appCode.includes("notifyMetricSaved"), "Expected metrics saves to use a dedicated bottom-only notification helper.");
 assert(!stylesCode.includes(".mobile-quick-toggle"), "Expected floating quick action button styling to be removed.");
-assert(indexCode.includes("v=1.5.54"), "Expected index shell references to use bumped app version.");
+assert(indexCode.includes("v=1.5.55"), "Expected index shell references to use bumped app version.");
 assert(!indexCode.includes('id="app" class="app-content" aria-live'), "Expected broad app aria-live to be removed in favor of targeted live regions.");
-assert(serviceWorkerCode.includes("trainwise-cache-v76"), "Expected service worker cache version bump.");
+assert(serviceWorkerCode.includes("trainwise-cache-v77"), "Expected service worker cache version bump.");
 assert(appCode.includes("data-settings-panel"), "Expected Settings panels to preserve open state with stable panel ids.");
 assert(appCode.includes('forceSettingsPanelOpen("supabase-sync")'), "Expected Supabase actions to keep the Supabase panel open after rendering.");
 
@@ -826,7 +826,7 @@ const allTimeRecordsCoverage = runScenario(`
     chestSets: chest.mostCreditedSets.value,
     tricepsReps: triceps.mostReps.value,
     archivedSessions: archived.sessionCount,
-    hasCabinet: markup.includes("PERSONAL TROPHY CABINET") && markup.includes("Recently earned") && markup.includes("All-time highlights"),
+    hasCabinet: markup.includes("PERSONAL RECORDS") && markup.includes("Recently earned") && markup.includes("All-time highlights"),
     hasWeightShelf: markup.includes("Body weight") && markup.includes("Heaviest body weight") && markup.includes("Lightest body weight"),
     hasEveryShelf: ["Strength", "Nutrition", "Muscle records", "Exercise records", "Consistency"].every((label) => markup.includes(label)),
     hasDetailAction: markup.includes('data-action="history-record-open"'),
@@ -883,6 +883,63 @@ assert(recordCabinetDetailCoverage.strengthHasCalculation, "Expected record deta
 assert(recordCabinetDetailCoverage.bodyHasEvidence, "Expected body-weight detail to show the complete source health entry.");
 assert(recordCabinetDetailCoverage.nutritionHasAll, "Expected the Nutrition shelf to expose calorie, protein, and streak records.");
 assert(recordCabinetDetailCoverage.recordsMode, "Expected Records to be a dedicated History mode.");
+
+const goldRecordIconCoverage = runScenario(`
+  ${reset}
+  state.workouts = [makeWorkout({
+    id: "curl-record",
+    date: "2026-06-17",
+    exercise: "Supinated Curls",
+    exerciseId: "curl",
+    primaryMuscles: ["biceps"],
+    secondaryMuscles: [],
+    setRows: [{ weight: 30, reps: 12, rir: 1, restSeconds: 90 }]
+  })];
+  state.metrics = [
+    { id: "w1", date: "2026-06-01", bodyWeight: 179 },
+    { id: "w2", date: "2026-06-03", bodyWeight: 181 },
+    { id: "w3", date: "2026-06-08", bodyWeight: 181 },
+    { id: "w4", date: "2026-06-10", bodyWeight: 183 },
+    { id: "w5", date: "2026-06-15", bodyWeight: 178 },
+    { id: "w6", date: "2026-06-17", bodyWeight: 180 }
+  ];
+  var records = allTimeRecords();
+  var gain = records.bodyWeight.greatestWeeklyGain;
+  var loss = records.bodyWeight.greatestWeeklyLoss;
+  var bicepsItem = recordCabinetItems(records).find((item) => item.id === "muscle-biceps-reps");
+  var exerciseItem = recordCabinetItems(records).find((item) => item.id === "exercise-curl-weight");
+  var gainItem = recordCabinetItems(records).find((item) => item.id === "weight-weekly-gain");
+  var gainDetail = renderHistoryRecordDetail("weight-weekly-gain");
+  var cabinet = renderHistoryRecords(records);
+  ({
+    gain: gain?.value,
+    gainStart: gain?.startAverage,
+    gainEnd: gain?.endAverage,
+    loss: loss?.value,
+    muscleIcon: recordIconMarkup(bicepsItem),
+    exerciseIcon: recordIconMarkup(exerciseItem),
+    gainIcon: recordIconMarkup(gainItem),
+    gainDetail,
+    cabinet
+  });
+`);
+
+assert.strictEqual(goldRecordIconCoverage.gain, 2, `Expected greatest weekly average gain 2 lb, got ${goldRecordIconCoverage.gain}`);
+assert.strictEqual(goldRecordIconCoverage.gainStart, 180, `Expected starting weekly average 180 lb, got ${goldRecordIconCoverage.gainStart}`);
+assert.strictEqual(goldRecordIconCoverage.gainEnd, 182, `Expected ending weekly average 182 lb, got ${goldRecordIconCoverage.gainEnd}`);
+assert.strictEqual(goldRecordIconCoverage.loss, 3, `Expected greatest weekly average loss 3 lb, got ${goldRecordIconCoverage.loss}`);
+assert(goldRecordIconCoverage.muscleIcon.includes("assets/records/muscles/bicep.png"), "Expected Biceps records to use the gold Biceps anatomical icon.");
+assert(goldRecordIconCoverage.exerciseIcon.includes("assets/records/muscles/bicep.png") && goldRecordIconCoverage.exerciseIcon.includes("record-icon-metric-badge") && goldRecordIconCoverage.exerciseIcon.includes("assets/records/load.svg"), "Expected exercise records to combine primary-muscle and metric icons.");
+assert(goldRecordIconCoverage.gainIcon.includes("assets/records/trend-up.svg"), "Expected weekly weight gain to use the rising trend icon.");
+assert(goldRecordIconCoverage.gainDetail.includes("Starting weekly average") && goldRecordIconCoverage.gainDetail.includes("Ending weekly average") && goldRecordIconCoverage.gainDetail.includes("2 logs"), "Expected weekly weight detail to show averages, ranges, and sample counts.");
+assert(!goldRecordIconCoverage.cabinet.includes("&#127942;") && !goldRecordIconCoverage.cabinet.includes("PERSONAL TROPHY"), "Expected Records to contain no trophy fallback or trophy wording.");
+
+[
+  "load.svg", "reps.svg", "volume.svg", "e1rm.svg", "session-volume.svg", "trend-up.svg", "trend-down.svg",
+  "average.svg", "calories.svg", "protein.svg", "streak.svg", "weekly.svg", "sets.svg"
+].forEach((asset) => assert(fs.existsSync(`assets/records/${asset}`), `Expected gold record asset ${asset}.`));
+["abs.png", "back.png", "bicep.png", "calves.png", "chest.png", "glutes.png", "hamstrings.png", "quads.png", "shoulders.png", "triceps.png"]
+  .forEach((asset) => assert(fs.existsSync(`assets/records/muscles/${asset}`), `Expected gold muscle record asset ${asset}.`));
 
 const trophyAudioTransitions = runScenario(`
   ${reset}

@@ -2814,26 +2814,65 @@ textarea {
   font-size: 12px;
 }
 
-.records-cabinet-trophy,
-.record-medallion {
+.record-icon-chip {
+  position: relative;
   display: inline-flex;
   flex: 0 0 auto;
   align-items: center;
   justify-content: center;
   width: 42px;
   height: 42px;
-  border: 1px solid rgba(242, 208, 107, 0.42);
-  border-radius: 50%;
-  background: rgba(242, 208, 107, 0.14);
-  color: #f2d06b;
-  font-size: 11px;
-  font-weight: 900;
+  border: 2px solid rgba(242, 208, 107, 0.82);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow: 0 4px 12px rgba(242, 208, 107, 0.12);
+  overflow: visible;
 }
 
-.records-cabinet-trophy {
+.record-icon-art {
+  width: 78%;
+  height: 78%;
+  object-fit: contain;
+}
+
+.record-icon-metric-badge {
+  position: absolute;
+  right: -5px;
+  bottom: -5px;
+  display: grid;
+  place-items: center;
+  width: 19px;
+  height: 19px;
+  border: 2px solid #121713;
+  border-radius: 6px;
+  background: #fff;
+}
+
+.record-icon-metric-badge img {
+  width: 14px;
+  height: 14px;
+}
+
+.record-icon-extra {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 3px;
+  border: 2px solid #121713;
+  border-radius: 9px;
+  background: #f2d06b;
+  color: #17160f;
+  font-size: 9px;
+  font-weight: 900;
+  line-height: 14px;
+  text-align: center;
+}
+
+.records-cabinet-icon {
   width: 56px;
   height: 56px;
-  font-size: 22px;
 }
 
 .record-shelf {
@@ -2860,7 +2899,7 @@ textarea {
   scrollbar-width: thin;
 }
 
-.record-trophy-card {
+.record-achievement-card {
   display: flex;
   min-width: 0;
   gap: 10px;
@@ -2872,7 +2911,7 @@ textarea {
   text-align: left;
 }
 
-.record-trophy-card:active {
+.record-achievement-card:active {
   transform: scale(0.985);
 }
 
@@ -2916,7 +2955,7 @@ textarea {
   display: grid;
 }
 
-.record-highlight-card .record-medallion {
+.record-highlight-card .record-icon-chip {
   width: 34px;
   height: 34px;
 }
@@ -2974,7 +3013,7 @@ textarea {
   color: var(--muted);
 }
 
-.record-detail-medallion {
+.record-detail-icon {
   width: 52px;
   height: 52px;
 }
@@ -3012,6 +3051,26 @@ textarea {
 .record-contribution-list {
   display: grid;
   gap: 8px;
+}
+
+.record-weight-change-evidence {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.record-weight-change-evidence > div {
+  padding: 10px;
+  border: 1px solid rgba(242, 208, 107, 0.2);
+  border-radius: 7px;
+  background: rgba(242, 208, 107, 0.06);
+}
+
+.record-weight-change-evidence span,
+.record-weight-change-evidence small {
+  display: block;
+  color: var(--muted);
+  font-size: 11px;
 }
 
 .record-source-card {
@@ -3069,14 +3128,15 @@ textarea {
     padding: 14px;
   }
 
-  .records-cabinet-trophy {
+  .records-cabinet-icon {
     width: 48px;
     height: 48px;
   }
 
   .record-category-full-list,
   .record-comparison-card,
-  .record-evidence-sets {
+  .record-evidence-sets,
+  .record-weight-change-evidence {
     grid-template-columns: minmax(0, 1fr);
   }
 
