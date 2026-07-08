@@ -3,7 +3,7 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 3;
 const STORES = ["workouts", "metrics", "settings", "syncQueue"];
-const APP_VERSION = "1.5.53";
+const APP_VERSION = "1.5.54";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 const DRAFT_RECOVERY_KEY = "trainwise-draft-recovery-v1";
 const COPIED_COACH_PLAN_KEY = "trainwise-copied-coach-plan-v1";
@@ -5531,7 +5531,7 @@ function recordCabinetCard(item, className = "") {
     : "First recorded mark";
   return `
     <button class="record-trophy-card ${escapeHtml(className)}" type="button" data-action="history-record-open" data-record-id="${escapeHtml(item.id)}">
-      <span class="record-medallion" aria-hidden="true">${escapeHtml(item.symbol)}</span>
+      <span class="record-medallion" aria-hidden="true">&#127942;</span>
       <span class="record-card-copy">
         <small>${escapeHtml(item.title)}</small>
         <strong>${escapeHtml(recordCabinetValue(item))}</strong>
@@ -5739,7 +5739,7 @@ function renderHistoryRecordDetail(recordId) {
     <section class="record-detail-screen">
       <div class="section record-detail-nav"><button class="ghost-button" type="button" data-action="history-record-back">Back to records</button></div>
       <div class="record-detail-hero">
-        <span class="record-medallion record-detail-medallion" aria-hidden="true">${escapeHtml(item.symbol)}</span>
+        <span class="record-medallion record-detail-medallion" aria-hidden="true">&#127942;</span>
         <span class="eyebrow">ALL-TIME RECORD</span>
         <h2>${escapeHtml(item.title)}</h2>
         <strong>${escapeHtml(recordCabinetValue(item))}</strong>
