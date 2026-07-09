@@ -7,6 +7,7 @@ appCode = appCode.replace(/init\(\)\.catch\([\s\S]*?\n\}\);\s*$/, "");
 const stylesCode = fs.readFileSync("styles.css", "utf8");
 const serviceWorkerCode = fs.readFileSync("service-worker.js", "utf8");
 const indexCode = fs.readFileSync("index.html", "utf8");
+const supabaseSchemaCode = fs.readFileSync("supabase-schema.sql", "utf8");
 
 const context = {
   console,
@@ -23,11 +24,17 @@ const context = {
   Promise,
   setTimeout,
   clearTimeout,
+  requestAnimationFrame: (callback) => {
+    callback();
+    return 1;
+  },
   navigator: { storage: {} },
   localStorage: { getItem() { return null; }, setItem() {}, removeItem() {} },
   window: {
     clearTimeout,
     setTimeout,
+    scrollY: 0,
+    scrollTo() {},
     location: { reload() {} },
     matchMedia: () => ({ matches: false, addEventListener() {}, removeEventListener() {} })
   },
@@ -89,6 +96,9 @@ const reset = `
   state.workoutDraft = [];
   state.dismissedRecordTrophies = new Set();
   state.weeklyMuscleDetail = null;
+  state.returnStack = [];
+  state.historyRecordCategory = "";
+  state.historyRecordDetail = "";
   var makeWorkout = (overrides = {}) => ({
     id: overrides.id || "workout-" + Math.random(),
     date: overrides.date || "2026-06-10",
@@ -147,6 +157,30 @@ assert(stylesCode.includes(".data-safety-grid"), "Expected data safety summary s
 assert(stylesCode.includes(".widget-preference-list"), "Expected Today widget preference styling.");
 assert(stylesCode.includes(".collapsible-panel"), "Expected secondary settings/notes panels to be collapsible.");
 assert(stylesCode.includes(".settings-panel.collapsible-panel"), "Expected Settings panels to use collapsible panel styling.");
+assert(appCode.includes("initializeCollapsiblePanels"), "Expected rendered collapse panels to use the shared animation initializer.");
+assert(appCode.includes("animateCollapsiblePanel"), "Expected collapse panels to use reversible open/close animation handling.");
+assert(appCode.includes("triggerCollapseDataReveal"), "Expected expanded data panels to replay chart, progress, and muscle-audit reveals.");
+assert(appCode.includes("summary.parentElement !== panel"), "Expected nested collapse summaries to animate independently from parent panels.");
+assert(stylesCode.includes(".collapse-content"), "Expected collapsible content to have shared height/fade/slide transitions.");
+assert(stylesCode.includes(".collapse-flash-open"), "Expected opening panels to briefly brighten green.");
+assert(stylesCode.includes(".collapse-flash-close"), "Expected closing panels to briefly brighten purple.");
+assert(stylesCode.includes("collapseChartLineReveal"), "Expected chart lines to redraw when their panel opens.");
+assert(stylesCode.includes("collapseMuscleRowReveal"), "Expected muscle audit rows to reveal with a subtle stagger.");
+assert(stylesCode.includes(".is-data-revealing .progress-bar span"), "Expected progress bars to animate when revealed.");
+assert(appCode.includes("if (opening) triggerCollapseDataReveal(panel)"), "Expected data reveals to begin after collapse motion finishes.");
+assert(stylesCode.includes("animation: fillBar 1.35s"), "Expected expanded progress bars to use a clearly visible slower fill.");
+assert(stylesCode.includes(".collapse-feedback-ring"), "Expected border feedback to use a lightweight composited ring.");
+assert(!/\.collapse-flash-open\s*\{[^}]*box-shadow/s.test(stylesCode), "Expected opening feedback not to animate painted box shadows.");
+assert(stylesCode.includes("prefers-reduced-motion: reduce"), "Expected collapse effects to respect reduced-motion preferences.");
+assert(appCode.includes("playUiCue"), "Expected a centralized app audio cue helper.");
+assert(appCode.includes("unlockUiAudio"), "Expected touch/pointer gestures to unlock mobile audio before click cues.");
+assert(appCode.includes("playUiCueFallback"), "Expected generated WAV playback when Web Audio is unavailable or rejected.");
+assert(appCode.includes("buildUiCueWavDataUri"), "Expected the audio fallback to remain self-contained without external sound assets.");
+assert(appCode.includes("shouldPlayMeaningfulControlCue"), "Expected meaningful-control audio classification.");
+assert(appCode.includes("data-sound-effects-enabled"), "Expected Settings to expose an audio enable control.");
+assert(appCode.includes("data-sound-effects-volume"), "Expected Settings to expose an audio volume control.");
+assert(appCode.includes('"preview-sound"'), "Expected Settings to provide a sound preview action.");
+assert(!/SYNC_SAFE_PREFERENCES\s*=\s*\[[^\]]*soundEffects/s.test(appCode), "Expected sound preferences to remain device-local instead of cloud synced.");
 assert(stylesCode.includes(".empty-restore-row"), "Expected inline Log empty-state restore styling.");
 assert(appCode.includes("muscle-audit-panel"), "Expected long Coach muscle set audit to be collapsible.");
 assert(appCode.includes("scrollTopButtonShouldShow"), "Expected scroll-to-top threshold helper.");
@@ -161,9 +195,9 @@ assert(!appCode.includes('selectedExercise: "Push-up"'), "Expected Log startup n
 assert(!appCode.includes('showBanner("Unsaved draft restored."'), "Expected startup draft recovery not to show a top banner.");
 assert(appCode.includes("notifyMetricSaved"), "Expected metrics saves to use a dedicated bottom-only notification helper.");
 assert(!stylesCode.includes(".mobile-quick-toggle"), "Expected floating quick action button styling to be removed.");
-assert(indexCode.includes("v=1.5.42"), "Expected index shell references to use bumped app version.");
+assert(indexCode.includes("v=1.5.56"), "Expected index shell references to use bumped app version.");
 assert(!indexCode.includes('id="app" class="app-content" aria-live'), "Expected broad app aria-live to be removed in favor of targeted live regions.");
-assert(serviceWorkerCode.includes("trainwise-cache-v64"), "Expected service worker cache version bump.");
+assert(serviceWorkerCode.includes("trainwise-cache-v78"), "Expected service worker cache version bump.");
 assert(appCode.includes("data-settings-panel"), "Expected Settings panels to preserve open state with stable panel ids.");
 assert(appCode.includes('forceSettingsPanelOpen("supabase-sync")'), "Expected Supabase actions to keep the Supabase panel open after rendering.");
 
@@ -184,6 +218,19 @@ const settingsPanelOpenState = runScenario(`
 assert.strictEqual(settingsPanelOpenState.closedHasOpen, false, "Expected Supabase settings panel to start collapsed without session state.");
 assert.strictEqual(settingsPanelOpenState.openHasOpen, true, "Expected Supabase settings panel to render open after session preservation.");
 assert.strictEqual(settingsPanelOpenState.closedAgainHasOpen, false, "Expected Supabase settings panel to respect user collapse.");
+
+const soundDefaults = runScenario(`
+  state.settings = {};
+  ({
+    enabled: soundEffectsEnabled(),
+    volume: soundEffectsVolumePercent(),
+    excludesRir: shouldPlayMeaningfulControlCue({ dataset: { action: "increment-rir" }, matches: () => true })
+  });
+`);
+
+assert.strictEqual(soundDefaults.enabled, true, "Expected sound effects to default on.");
+assert.strictEqual(soundDefaults.volume, 35, `Expected default sound volume to be 35%, got ${soundDefaults.volume}`);
+assert.strictEqual(soundDefaults.excludesRir, false, "Expected rapid RIR controls to remain silent.");
 
 const nutritionQuickTotals = runScenario(`
   ${reset}
@@ -741,6 +788,211 @@ assert(liveTrophySlots.hasSlot, "Expected set rows to include live trophy slots.
 assert(liveTrophySlots.hasTrophy, "Expected live trophy slot to render a set trophy when row is a record.");
 assert(liveTrophySlots.removedAfterEdit, "Expected live trophy helper to remove trophy when edited below record.");
 
+const allTimeRecordsCoverage = runScenario(`
+  ${reset}
+  state.workouts = [
+    makeWorkout({ id: "bench-a", date: "2026-06-10", exercise: "Archived Bench", exerciseId: "archived-bench", primaryMuscles: ["chest"], secondaryMuscles: ["triceps"], setRows: [
+      { weight: 200, reps: 10, rir: 1, restSeconds: 120 },
+      { weight: 180, reps: 12, rir: 1, restSeconds: 120 }
+    ] }),
+    makeWorkout({ id: "row-a", date: "2026-06-10", exercise: "Cable Row", exerciseId: "row", primaryMuscles: ["back"], secondaryMuscles: ["biceps"], setRows: [
+      { weight: 150, reps: 15, rir: 2, restSeconds: 90 }
+    ] }),
+    makeWorkout({ id: "bench-b", date: "2026-06-17", exercise: "Archived Bench", exerciseId: "archived-bench", primaryMuscles: ["chest"], secondaryMuscles: ["triceps"], setRows: [
+      { weight: 205, reps: 8, rir: 2, restSeconds: 120 }
+    ] })
+  ];
+  state.metrics = [
+    { id: "m1", date: "2026-06-09", bodyWeight: 180, calories: 2200, protein: 140 },
+    { id: "m2", date: "2026-06-16", bodyWeight: 175, calories: 2400, protein: 150 },
+    { id: "m3", date: "2026-06-17", bodyWeight: 185, calories: 2600, protein: 175 }
+  ];
+  state.workoutDraft = [{ draftId: "draft", exercise: "Draft Lift", setRows: [{ weight: 999, reps: 99, rir: 0 }] }];
+  var records = allTimeRecords();
+  var chest = records.muscles.find((item) => item.muscleId === "chest");
+  var triceps = records.muscles.find((item) => item.muscleId === "triceps");
+  var archived = records.exercises.find((item) => item.exercise === "Archived Bench");
+  var markup = renderHistoryRecords();
+  ({
+    heaviest: records.strength.heaviestWeight.value,
+    mostReps: records.strength.mostSetReps.value,
+    setVolume: records.strength.highestSetVolume.value,
+    dayVolume: records.strength.highestDayVolume.value,
+    heaviestBodyWeight: records.bodyWeight.heaviest.value,
+    lightestBodyWeight: records.bodyWeight.lightest.value,
+    highestCalories: records.nutrition.highestCalories.value,
+    highestProtein: records.nutrition.highestProtein.value,
+    chestReps: chest.mostReps.value,
+    chestSets: chest.mostCreditedSets.value,
+    tricepsReps: triceps.mostReps.value,
+    archivedSessions: archived.sessionCount,
+    hasCabinet: markup.includes("PERSONAL RECORDS") && markup.includes("Recently earned") && markup.includes("All-time highlights"),
+    hasWeightShelf: markup.includes("Body weight") && markup.includes("Heaviest body weight") && markup.includes("Lightest body weight"),
+    hasEveryShelf: ["Strength", "Nutrition", "Muscle records", "Exercise records", "Consistency"].every((label) => markup.includes(label)),
+    hasDetailAction: markup.includes('data-action="history-record-open"'),
+    draftExcluded: records.strength.heaviestWeight.value !== 999
+  });
+`);
+
+assert.strictEqual(allTimeRecordsCoverage.heaviest, 205, `Expected heaviest submitted load 205, got ${allTimeRecordsCoverage.heaviest}`);
+assert.strictEqual(allTimeRecordsCoverage.mostReps, 15, `Expected most set reps 15, got ${allTimeRecordsCoverage.mostReps}`);
+assert.strictEqual(allTimeRecordsCoverage.setVolume, 2250, `Expected best set volume 2250, got ${allTimeRecordsCoverage.setVolume}`);
+assert.strictEqual(allTimeRecordsCoverage.dayVolume, 6410, `Expected same-date full session volume 6410, got ${allTimeRecordsCoverage.dayVolume}`);
+assert.strictEqual(allTimeRecordsCoverage.heaviestBodyWeight, 185, `Expected heaviest body weight 185, got ${allTimeRecordsCoverage.heaviestBodyWeight}`);
+assert.strictEqual(allTimeRecordsCoverage.lightestBodyWeight, 175, `Expected lightest body weight 175, got ${allTimeRecordsCoverage.lightestBodyWeight}`);
+assert.strictEqual(allTimeRecordsCoverage.highestCalories, 2600, `Expected highest calorie record 2600, got ${allTimeRecordsCoverage.highestCalories}`);
+assert.strictEqual(allTimeRecordsCoverage.highestProtein, 175, `Expected highest protein record 175, got ${allTimeRecordsCoverage.highestProtein}`);
+assert.strictEqual(allTimeRecordsCoverage.chestReps, 22, `Expected full-credit Chest reps 22, got ${allTimeRecordsCoverage.chestReps}`);
+assert.strictEqual(allTimeRecordsCoverage.chestSets, 2, `Expected full-credit Chest set record 2, got ${allTimeRecordsCoverage.chestSets}`);
+assert.strictEqual(allTimeRecordsCoverage.tricepsReps, 11, `Expected half-credit Triceps reps 11, got ${allTimeRecordsCoverage.tricepsReps}`);
+assert.strictEqual(allTimeRecordsCoverage.archivedSessions, 2, "Expected historical archived exercise sessions to remain in Records.");
+assert(allTimeRecordsCoverage.hasCabinet, "Expected History Records to render a recent-first personal trophy cabinet.");
+assert(allTimeRecordsCoverage.hasWeightShelf, "Expected explicit heaviest and lightest all-time body-weight records.");
+assert(allTimeRecordsCoverage.hasEveryShelf, "Expected Strength, Nutrition, Muscle, Exercise, and Consistency shelves.");
+assert(allTimeRecordsCoverage.hasDetailAction, "Expected record cards to open dedicated evidence screens.");
+assert(allTimeRecordsCoverage.draftExcluded, "Expected unsaved drafts to be excluded from all-time records.");
+
+const recordCabinetDetailCoverage = runScenario(`
+  ${reset}
+  state.workouts = [
+    makeWorkout({ id: "bench-old", date: "2026-06-10", exercise: "Bench Press", setRows: [{ weight: 185, reps: 8, rir: 2, restSeconds: 120 }] }),
+    makeWorkout({ id: "bench-record", date: "2026-06-17", exercise: "Bench Press", setRows: [{ weight: 205, reps: 8, rir: 1, restSeconds: 150 }] })
+  ];
+  state.metrics = [
+    { id: "metric-old", date: "2026-06-10", bodyWeight: 175, calories: 2200, protein: 140 },
+    { id: "metric-record", date: "2026-06-17", bodyWeight: 182, calories: 2500, protein: 170 }
+  ];
+  var weightItem = recordCabinetItemById("strength-heaviest");
+  var strengthDetail = renderHistoryRecordDetail("strength-heaviest");
+  var bodyDetail = renderHistoryRecordDetail("weight-heaviest");
+  var nutritionShelf = renderHistoryRecordCategory("nutrition");
+  var modes = renderHistoryModeSegment();
+  ({
+    previousWeight: weightItem.record.previousValue,
+    strengthHasSets: strengthDetail.includes("Set 1") && strengthDetail.includes("205 lb x 8"),
+    strengthHasCalculation: strengthDetail.includes("Highest valid load entered for one submitted set"),
+    bodyHasEvidence: bodyDetail.includes("182 lb") && bodyDetail.includes("2,500 cal") && bodyDetail.includes("170 g"),
+    nutritionHasAll: nutritionShelf.includes("Highest calorie day") && nutritionShelf.includes("Highest protein day") && nutritionShelf.includes("Longest nutrition logging streak"),
+    recordsMode: modes.includes('data-history-mode="records"')
+  });
+`);
+
+assert.strictEqual(recordCabinetDetailCoverage.previousWeight, 185, `Expected previous heaviest-load record 185, got ${recordCabinetDetailCoverage.previousWeight}`);
+assert(recordCabinetDetailCoverage.strengthHasSets, "Expected strength record detail to show the exact source set rows.");
+assert(recordCabinetDetailCoverage.strengthHasCalculation, "Expected record detail to explain its calculation.");
+assert(recordCabinetDetailCoverage.bodyHasEvidence, "Expected body-weight detail to show the complete source health entry.");
+assert(recordCabinetDetailCoverage.nutritionHasAll, "Expected the Nutrition shelf to expose calorie, protein, and streak records.");
+assert(recordCabinetDetailCoverage.recordsMode, "Expected Records to be a dedicated History mode.");
+
+const goldRecordIconCoverage = runScenario(`
+  ${reset}
+  state.workouts = [makeWorkout({
+    id: "curl-record",
+    date: "2026-06-17",
+    exercise: "Supinated Curls",
+    exerciseId: "curl",
+    primaryMuscles: ["biceps"],
+    secondaryMuscles: [],
+    setRows: [{ weight: 30, reps: 12, rir: 1, restSeconds: 90 }]
+  })];
+  state.metrics = [
+    { id: "w1", date: "2026-06-01", bodyWeight: 179 },
+    { id: "w2", date: "2026-06-03", bodyWeight: 181 },
+    { id: "w3", date: "2026-06-08", bodyWeight: 181 },
+    { id: "w4", date: "2026-06-10", bodyWeight: 183 },
+    { id: "w5", date: "2026-06-15", bodyWeight: 178 },
+    { id: "w6", date: "2026-06-17", bodyWeight: 180 }
+  ];
+  var records = allTimeRecords();
+  var gain = records.bodyWeight.greatestWeeklyGain;
+  var loss = records.bodyWeight.greatestWeeklyLoss;
+  var bicepsItem = recordCabinetItems(records).find((item) => item.id === "muscle-biceps-reps");
+  var exerciseItem = recordCabinetItems(records).find((item) => item.id === "exercise-curl-weight");
+  var gainItem = recordCabinetItems(records).find((item) => item.id === "weight-weekly-gain");
+  var gainDetail = renderHistoryRecordDetail("weight-weekly-gain");
+  var cabinet = renderHistoryRecords(records);
+  ({
+    gain: gain?.value,
+    gainStart: gain?.startAverage,
+    gainEnd: gain?.endAverage,
+    loss: loss?.value,
+    muscleIcon: recordIconMarkup(bicepsItem),
+    exerciseIcon: recordIconMarkup(exerciseItem),
+    gainIcon: recordIconMarkup(gainItem),
+    gainDetail,
+    cabinet
+  });
+`);
+
+assert.strictEqual(goldRecordIconCoverage.gain, 2, `Expected greatest weekly average gain 2 lb, got ${goldRecordIconCoverage.gain}`);
+assert.strictEqual(goldRecordIconCoverage.gainStart, 180, `Expected starting weekly average 180 lb, got ${goldRecordIconCoverage.gainStart}`);
+assert.strictEqual(goldRecordIconCoverage.gainEnd, 182, `Expected ending weekly average 182 lb, got ${goldRecordIconCoverage.gainEnd}`);
+assert.strictEqual(goldRecordIconCoverage.loss, 3, `Expected greatest weekly average loss 3 lb, got ${goldRecordIconCoverage.loss}`);
+assert(goldRecordIconCoverage.muscleIcon.includes("assets/records/muscles/bicep.png"), "Expected Biceps records to use the gold Biceps anatomical icon.");
+assert(goldRecordIconCoverage.exerciseIcon.includes("assets/records/muscles/bicep.png") && goldRecordIconCoverage.exerciseIcon.includes("record-icon-metric-badge") && goldRecordIconCoverage.exerciseIcon.includes("assets/records/load.svg"), "Expected exercise records to combine primary-muscle and metric icons.");
+assert(goldRecordIconCoverage.gainIcon.includes("assets/records/trend-up.svg"), "Expected weekly weight gain to use the rising trend icon.");
+assert(goldRecordIconCoverage.gainDetail.includes("Starting weekly average") && goldRecordIconCoverage.gainDetail.includes("Ending weekly average") && goldRecordIconCoverage.gainDetail.includes("2 logs"), "Expected weekly weight detail to show averages, ranges, and sample counts.");
+assert(!goldRecordIconCoverage.cabinet.includes("&#127942;") && !goldRecordIconCoverage.cabinet.includes("PERSONAL TROPHY"), "Expected Records to contain no trophy fallback or trophy wording.");
+
+[
+  "load.svg", "reps.svg", "volume.svg", "e1rm.svg", "session-volume.svg", "trend-up.svg", "trend-down.svg",
+  "average.svg", "calories.svg", "protein.svg", "streak.svg", "weekly.svg", "sets.svg"
+].forEach((asset) => assert(fs.existsSync(`assets/records/${asset}`), `Expected gold record asset ${asset}.`));
+["abs.png", "back.png", "bicep.png", "calves.png", "chest.png", "glutes.png", "hamstrings.png", "quads.png", "shoulders.png", "triceps.png"]
+  .forEach((asset) => assert(fs.existsSync(`assets/records/muscles/${asset}`), `Expected gold muscle record asset ${asset}.`));
+
+const trophyAudioTransitions = runScenario(`
+  ${reset}
+  var earned = recordTrophyAudioTransition(
+    new Map([["set:0", false], ["volume", false]]),
+    new Map([["set:0", true], ["volume", false]])
+  );
+  var lost = recordTrophyAudioTransition(
+    new Map([["set:0", true], ["volume", false]]),
+    new Map([["set:0", false], ["volume", false]])
+  );
+  var unchanged = recordTrophyAudioTransition(
+    new Map([["set:0", true], ["volume", false]]),
+    new Map([["set:0", true], ["volume", false]])
+  );
+  ({ earned, lost, unchanged, earnedNotes: uiCueNotes("trophy-earned"), lostNotes: uiCueNotes("trophy-lost") });
+`);
+
+assert.strictEqual(trophyAudioTransitions.earned, "trophy-earned", `Expected trophy appearance cue, got ${trophyAudioTransitions.earned}`);
+assert.strictEqual(trophyAudioTransitions.lost, "trophy-lost", `Expected trophy correction cue, got ${trophyAudioTransitions.lost}`);
+assert.strictEqual(trophyAudioTransitions.unchanged, "", `Expected unchanged trophy state to stay silent, got ${trophyAudioTransitions.unchanged}`);
+assert(trophyAudioTransitions.earnedNotes.length >= 3, "Expected trophy-earned to use a celebratory multi-note cue.");
+assert(trophyAudioTransitions.lostNotes.length >= 2, "Expected trophy-lost to use a distinct descending cue.");
+
+const audioQueueReliability = runScenario(`
+  ${reset}
+  pendingUiCues = [];
+  queueUiCue("tap");
+  queueUiCue("tap");
+  var deduped = pendingUiCues.slice();
+  queueUiCue("success");
+  var semanticPriority = pendingUiCues.slice();
+  queueUiCue("warning");
+  queueUiCue("trophy-earned");
+  queueUiCue("error");
+  queueUiCue("navigate");
+  var bounded = pendingUiCues.slice();
+  uiAudioNeedsResume = false;
+  markUiAudioForResume();
+  ({ deduped, semanticPriority, bounded, needsResume: uiAudioNeedsResume });
+`);
+
+assert.deepEqual(audioQueueReliability.deduped, ["tap"], `Expected duplicate generic taps to collapse, got ${audioQueueReliability.deduped}`);
+assert.deepEqual(audioQueueReliability.semanticPriority, ["success"], `Expected semantic cue to replace pending tap, got ${audioQueueReliability.semanticPriority}`);
+assert(audioQueueReliability.bounded.length <= 3, `Expected bounded audio queue, got ${audioQueueReliability.bounded.length}`);
+assert(audioQueueReliability.needsResume, "Expected page lifecycle changes to re-arm audio resume.");
+assert(/ensureUiAudioReady\(\)\.then\(\(context\) => \{\s*if \(context\) flushUiCueQueue\(context\)/.test(appCode), "Expected audio to resume before queued notes are emitted.");
+assert(appCode.includes('context.addEventListener?.("statechange", handleStateChange)'), "Expected browser-driven audio context interruptions to be observed.");
+assert(appCode.includes('if (context.state === "running") flushUiCueQueue(context)'), "Expected queued cues to flush when the audio context resumes.");
+assert(appCode.includes("activeUiFallbackAudio.add(audio)"), "Expected fallback audio players to stay retained until playback ends.");
+assert(/visibilitychange[\s\S]{0,180}else unlockUiAudio\(\)/.test(appCode), "Expected audio to retry when the app becomes visible again.");
+assert(/addEventListener\?\.\("focus"[\s\S]{0,180}unlockUiAudio\(\)/.test(appCode), "Expected audio to retry when the app regains focus.");
+
 const logLoadDirectionIndicator = runScenario(`
   ${reset}
   state.workouts = [
@@ -1222,6 +1474,78 @@ const supabaseSessionRefresh = runScenario(`
 assert.strictEqual(supabaseSessionRefresh.expired, true, "Expected expired Supabase session to require refresh.");
 assert.strictEqual(supabaseSessionRefresh.fresh, false, "Expected fresh Supabase session not to require refresh.");
 
+const syncBootstrapRecords = runScenario(`
+  ${reset}
+  state.workouts = [makeWorkout({ id: "existing-workout", date: "2026-06-22" })];
+  state.metrics = [{ id: "existing-metric", date: "2026-06-22", calories: 2200, protein: 170 }];
+  state.settings.dayTemplates = [{ id: "template-1", name: "Push", exercises: [] }];
+  state.settings.nutritionGoal = "maintain";
+  state.settings.supabasePassword = "never-sync";
+  state.settings.supabaseSession = { access_token: "never-sync" };
+  state.workoutDraft = [{ draftId: "draft-only", exercise: "Bench Press", setRows: [{ weight: 999, reps: 99, rir: 0 }] }];
+  var records = buildLocalSyncRecords();
+  ({
+    workout: records.find((record) => record.recordType === "workout"),
+    metric: records.find((record) => record.recordType === "metric"),
+    hasTemplate: records.some((record) => record.recordType === "template" && record.recordId === "template-1"),
+    hasMaintainGoal: records.some((record) => record.recordType === "preference" && record.recordId === "nutritionGoal" && record.payload.value === "maintain"),
+    serialized: JSON.stringify(records)
+  });
+`);
+
+assert.strictEqual(syncBootstrapRecords.workout.recordId, "existing-workout", "Expected sync bootstrap to preserve existing workout IDs.");
+assert.strictEqual(syncBootstrapRecords.workout.payload.date, "2026-06-22", "Expected sync bootstrap to preserve workout history contents.");
+assert.strictEqual(syncBootstrapRecords.metric.recordId, "2026-06-22", "Expected nutrition sync identity to be canonical by date.");
+assert.strictEqual(syncBootstrapRecords.hasTemplate, true, "Expected templates to participate in safe record sync.");
+assert.strictEqual(syncBootstrapRecords.hasMaintainGoal, true, "Expected safe preferences to participate in record sync.");
+assert(!syncBootstrapRecords.serialized.includes("draft-only"), "Expected unsaved workout drafts to stay device-local.");
+assert(!syncBootstrapRecords.serialized.includes("never-sync"), "Expected Supabase secrets and sessions to stay device-local.");
+
+const syncConflictBehavior = runScenario(`
+  var pending = {
+    id: syncRecordKey("workout", "existing-workout"),
+    recordType: "workout",
+    recordId: "existing-workout",
+    baseRevision: 2,
+    status: "pending",
+    payload: { id: "existing-workout", notes: "local" }
+  };
+  var remote = {
+    record_type: "workout",
+    record_id: "existing-workout",
+    revision: 3,
+    payload: { id: "existing-workout", notes: "cloud" }
+  };
+  var conflict = syncConflictFromRemote(pending, remote);
+  ({ id: conflict.id, status: conflict.status, localNotes: conflict.payload.notes, cloudNotes: conflict.remoteRecord.payload.notes });
+`);
+
+assert.strictEqual(syncConflictBehavior.id, "workout:existing-workout", "Expected stable per-record sync queue identity.");
+assert.strictEqual(syncConflictBehavior.status, "conflict", "Expected same-record revision mismatch to require review.");
+assert.strictEqual(syncConflictBehavior.localNotes, "local", "Expected conflict handling to preserve the local version.");
+assert.strictEqual(syncConflictBehavior.cloudNotes, "cloud", "Expected conflict handling to preserve the cloud version.");
+assert.strictEqual(
+  runScenario('syncPayloadFingerprint({ b: 2, a: { d: 4, c: 3 } }) === syncPayloadFingerprint({ a: { c: 3, d: 4 }, b: 2 })'),
+  true,
+  "Expected sync fingerprints to ignore JSON object key order."
+);
+
+assert(supabaseSchemaCode.includes("fitness_sync_records"), "Expected record-level Supabase sync table schema.");
+assert(supabaseSchemaCode.includes("apply_fitness_sync_change"), "Expected revision-aware Supabase sync function.");
+assert(appCode.includes("const DB_VERSION = 3"), "Expected IndexedDB migration for persistent sync queue storage.");
+assert(appCode.includes('createObjectStore("syncQueue"'), "Expected offline sync operations to persist in IndexedDB.");
+assert(appCode.includes('data-action="push-supabase-sync"'), "Expected manual Push to use record-level sync.");
+assert(appCode.includes('data-action="pull-supabase-sync"'), "Expected manual Pull to use record-level sync.");
+assert(!appCode.includes('data-action="push-supabase">'), "Expected snapshot Push control to be retired from the active UI.");
+assert(appCode.includes('queueSyncChange("workout", entry.id, entry)'), "Expected locked and updated workouts to enter record sync.");
+assert(appCode.includes('queueSyncChange("workout", id, null, { deleted: true })'), "Expected deleted workouts to synchronize as tombstones.");
+assert(appCode.includes('queueSyncChange("metric", date, entry)'), "Expected saved nutrition to enter record sync by date.");
+assert(appCode.includes('queueSyncChange("metric", metricDate, null, { deleted: true })'), "Expected deleted nutrition to synchronize as a date tombstone.");
+assert(appCode.includes('queueSyncChange("exercise", exercise.id, exercise)'), "Expected saved exercises to enter record sync.");
+assert(appCode.includes('queueSyncChange("template", template.id, template)'), "Expected saved templates to enter record sync.");
+assert(appCode.includes("scheduleRecordSync();"), "Expected completed local mutations to schedule automatic synchronization.");
+assert(appCode.includes('saveSetting("syncBootstrapVersion", 0)'), "Expected backup imports to reset sync bootstrap metadata before merging.");
+
 const archivedExerciseBehavior = runScenario(`
   ${reset}
   state.settings.customExercises = [
@@ -1566,6 +1890,46 @@ assert.strictEqual(bodyWeightAverage.latestAvg, 184, `Expected latest 7-day aver
 assert.strictEqual(bodyWeightAverage.dashboardHasAvg, true, "Expected Today body weight card to include 7d avg label.");
 assert.strictEqual(bodyWeightAverage.trendsHasOverlay, true, "Expected Trends body weight chart to include average overlay.");
 
+const chartAxesAndAverages = runScenario(`
+  ${reset}
+  state.workouts = [
+    { id: "w1", date: "2026-06-01", exercise: "Bench Press", primaryMuscles: ["chest"], secondaryMuscles: ["triceps"], setRows: [{ weight: 100, reps: 10, rir: 2 }] },
+    { id: "w2", date: "2026-06-02", exercise: "Bench Press", primaryMuscles: ["chest"], secondaryMuscles: ["triceps"], setRows: [{ weight: 200, reps: 10, rir: 2 }] },
+    { id: "w3", date: "2026-06-03", exercise: "Bench Press", primaryMuscles: ["chest"], secondaryMuscles: ["triceps"], setRows: [{ weight: 300, reps: 10, rir: 2 }] }
+  ];
+  state.metrics = [
+    { id: "m1", date: "2026-06-01", bodyWeight: 180, calories: 2000, protein: 140 },
+    { id: "m2", date: "2026-06-02", bodyWeight: 185, calories: 2500, protein: 160 },
+    { id: "m3", date: "2026-06-03", bodyWeight: 187, calories: 3000, protein: 180 }
+  ];
+  state.selectedExercise = "Bench Press";
+  state.selectedMuscle = "chest";
+  var volumeChart = lineChart([{ label: "06-01", value: 1000 }, { label: "06-02", value: 2000 }, { label: "06-03", value: 3000 }], "#35d58c", " lb");
+  var setChart = lineChart([{ label: "06-01", value: 1 }, { label: "06-02", value: 2 }, { label: "06-03", value: 3 }], "#f2d06b", " sets");
+  var weightChart = lineChart([{ label: "06-01", value: 180 }, { label: "06-02", value: 185 }, { label: "06-03", value: 187 }], "#f2d06b", " lb");
+  var emptyChart = lineChart([], "#35d58c", " lb");
+  var trends = renderTrends();
+  ({
+    volumeHasKLabels: volumeChart.includes("chart-y-axis") && volumeChart.includes(">3k<") && volumeChart.includes(">2k<") && volumeChart.includes(">1k<"),
+    setHasAxisLabels: setChart.includes(">3<") && setChart.includes(">2<") && setChart.includes(">1<"),
+    weightHasNiceLabels: weightChart.includes(">190<") && weightChart.includes(">185<") && weightChart.includes(">180<"),
+    hasXAxisLabels: volumeChart.includes("chart-x-axis") && volumeChart.includes("06-01") && volumeChart.includes("06-02") && volumeChart.includes("06-03"),
+    emptyHasNoAxis: !emptyChart.includes("chart-y-axis") && !emptyChart.includes("chart-x-axis"),
+    trendsOverlayCount: (trends.match(/comparison-polyline/g) || []).length,
+    trendsUsesEntryWording: trends.includes("7-entry avg"),
+    trendsUsesDayWordingForHealth: trends.includes("daily grams - 7d avg") && trends.includes("daily intake - 7d avg")
+  });
+`);
+
+assert.strictEqual(chartAxesAndAverages.volumeHasKLabels, true, "Expected large volume charts to render compact k-value Y-axis labels.");
+assert.strictEqual(chartAxesAndAverages.setHasAxisLabels, true, "Expected set charts to render small-number Y-axis labels.");
+assert.strictEqual(chartAxesAndAverages.weightHasNiceLabels, true, "Expected body-weight style charts to render rounded Y-axis labels.");
+assert.strictEqual(chartAxesAndAverages.hasXAxisLabels, true, "Expected charts to render compact first/middle/last X-axis labels.");
+assert.strictEqual(chartAxesAndAverages.emptyHasNoAxis, true, "Expected empty charts to remain a clean empty state without axis labels.");
+assert(chartAxesAndAverages.trendsOverlayCount >= 7, `Expected every Trends chart to render an average overlay, got ${chartAxesAndAverages.trendsOverlayCount}.`);
+assert.strictEqual(chartAxesAndAverages.trendsUsesEntryWording, true, "Expected workout-derived Trends charts to use 7-entry average wording.");
+assert.strictEqual(chartAxesAndAverages.trendsUsesDayWordingForHealth, true, "Expected health Trends charts to use 7d average wording.");
+
 const mobileQolMarkup = runScenario(`
   ${reset}
   state.activeTab = "log";
@@ -1788,6 +2152,7 @@ const coachDebugReport = runScenario(`
     restoredMode: state.coachGlobalGrowthMode,
     hasSubmitted: report.submitted.workoutCount,
     hasDraftOnly: report.draftOnly.entries.length,
+    hasRecords: Boolean(report.records?.strength?.heaviestWeight),
     hasSecret: serialized.includes("secret-password") || serialized.includes("anon-secret") || serialized.includes("access-secret") || serialized.includes("refresh-secret")
   });
 `);
@@ -1803,7 +2168,180 @@ assert(Object.values(coachDebugReport.modeMinutes).every((count) => Number.isFin
 assert.strictEqual(coachDebugReport.restoredMode, "medium", `Expected debug mode comparison not to mutate selected Coach mode, got ${coachDebugReport.restoredMode}`);
 assert.strictEqual(coachDebugReport.hasSubmitted, 1, `Expected Coach debug report to include submitted workout count, got ${coachDebugReport.hasSubmitted}`);
 assert.strictEqual(coachDebugReport.hasDraftOnly, 1, `Expected Coach debug report to include draft-only entries separately, got ${coachDebugReport.hasDraftOnly}`);
+assert(coachDebugReport.hasRecords, "Expected Coach debug report to include calculated record summaries.");
 assert(appCode.includes('data-action="export-coach-debug"'), "Expected Settings to expose a Coach debug export action.");
 assert.strictEqual(coachDebugReport.hasSecret, false, "Expected Coach debug report to exclude Supabase secrets and sessions.");
+
+const returnStackWeeklyDetail = runScenario(`
+  ${reset}
+  state.activeTab = "coach";
+  window.scrollY = 642;
+  var context = pushReturnContext("weekly-muscle-detail", { sourceAction: "open-weekly-muscle-detail", muscleId: "abs" });
+  state.weeklyMuscleDetail = { muscleId: "abs", returnTab: "coach" };
+  ({
+    depth: state.returnStack.length,
+    kind: state.returnStack[0].kind,
+    activeTab: state.returnStack[0].activeTab,
+    scrollY: state.returnStack[0].scrollY,
+    muscleId: state.returnStack[0].muscleId,
+    contextScroll: context.scrollY
+  });
+`);
+
+assert.strictEqual(returnStackWeeklyDetail.depth, 1, "Expected opening weekly muscle detail to store one return context.");
+assert.strictEqual(returnStackWeeklyDetail.kind, "weekly-muscle-detail", `Expected weekly detail return kind, got ${returnStackWeeklyDetail.kind}`);
+assert.strictEqual(returnStackWeeklyDetail.activeTab, "coach", `Expected weekly detail source tab to be Coach, got ${returnStackWeeklyDetail.activeTab}`);
+assert.strictEqual(returnStackWeeklyDetail.scrollY, 642, `Expected weekly detail source scroll to be captured, got ${returnStackWeeklyDetail.scrollY}`);
+assert.strictEqual(returnStackWeeklyDetail.muscleId, "abs", `Expected weekly detail context to record muscle, got ${returnStackWeeklyDetail.muscleId}`);
+
+const returnStackWeeklyCloseRestores = runScenario(`
+  ${reset}
+  var restored = [];
+  window.scrollTo = (options) => restored.push(options);
+  state.activeTab = "coach";
+  state.weeklyMuscleDetail = { muscleId: "abs", returnTab: "coach" };
+  state.returnStack = [{
+    kind: "weekly-muscle-detail",
+    activeTab: "dashboard",
+    scrollY: 518,
+    historyMode: "exercises",
+    historyExercise: "",
+    historyDate: "",
+    logHistoryExercise: "",
+    weeklyMuscleDetail: null,
+    selectedExercise: "Bench Press",
+    selectedMuscle: "chest"
+  }];
+  var context = popReturnContext("weekly-muscle-detail");
+  restoreReturnViewContext(context);
+  state.weeklyMuscleDetail = null;
+  restoreScrollAfterRender(context.scrollY);
+  ({
+    activeTab: state.activeTab,
+    detail: state.weeklyMuscleDetail,
+    restoredTop: restored[0]?.top,
+    behavior: restored[0]?.behavior,
+    remaining: state.returnStack.length
+  });
+`);
+
+assert.strictEqual(returnStackWeeklyCloseRestores.activeTab, "dashboard", `Expected weekly detail back to restore source tab, got ${returnStackWeeklyCloseRestores.activeTab}`);
+assert.strictEqual(returnStackWeeklyCloseRestores.detail, null, "Expected weekly detail back to clear the detail screen.");
+assert.strictEqual(returnStackWeeklyCloseRestores.restoredTop, 518, `Expected weekly detail back to restore scroll, got ${returnStackWeeklyCloseRestores.restoredTop}`);
+assert.strictEqual(returnStackWeeklyCloseRestores.behavior, "auto", `Expected scroll restoration to be instant, got ${returnStackWeeklyCloseRestores.behavior}`);
+assert.strictEqual(returnStackWeeklyCloseRestores.remaining, 0, "Expected weekly detail return context to be popped.");
+
+const returnStackLogHistory = runScenario(`
+  ${reset}
+  var restored = [];
+  window.scrollTo = (options) => restored.push(options);
+  state.activeTab = "log";
+  state.logHistoryExercise = "Bench Press";
+  state.returnStack = [{
+    kind: "log-exercise-history",
+    activeTab: "log",
+    scrollY: 901,
+    historyMode: "exercises",
+    historyExercise: "",
+    historyDate: "",
+    logHistoryExercise: "",
+    weeklyMuscleDetail: null,
+    selectedExercise: "Bench Press",
+    selectedMuscle: "chest"
+  }];
+  var context = popReturnContext("log-exercise-history");
+  restoreReturnViewContext(context);
+  restoreScrollAfterRender(context.scrollY);
+  ({
+    activeTab: state.activeTab,
+    logHistoryExercise: state.logHistoryExercise,
+    restoredTop: restored[0]?.top
+  });
+`);
+
+assert.strictEqual(returnStackLogHistory.activeTab, "log", `Expected Log history back to restore Log tab, got ${returnStackLogHistory.activeTab}`);
+assert.strictEqual(returnStackLogHistory.logHistoryExercise, "", "Expected Log history back to clear temporary history screen.");
+assert.strictEqual(returnStackLogHistory.restoredTop, 901, `Expected Log history back to restore scroll, got ${returnStackLogHistory.restoredTop}`);
+
+const returnStackHistoryDetail = runScenario(`
+  ${reset}
+  var restored = [];
+  window.scrollTo = (options) => restored.push(options);
+  state.activeTab = "history";
+  state.historyMode = "exercises";
+  state.historyExercise = "Bench Press";
+  state.returnStack = [{
+    kind: "history-exercise-detail",
+    activeTab: "history",
+    scrollY: 734,
+    historyMode: "exercises",
+    historyExercise: "",
+    historyDate: "",
+    logHistoryExercise: "",
+    weeklyMuscleDetail: null,
+    selectedExercise: "Bench Press",
+    selectedMuscle: "chest"
+  }];
+  var context = popReturnContext("history-exercise-detail");
+  restoreReturnViewContext(context);
+  restoreScrollAfterRender(context.scrollY);
+  ({
+    activeTab: state.activeTab,
+    historyMode: state.historyMode,
+    historyExercise: state.historyExercise,
+    restoredTop: restored[0]?.top
+  });
+`);
+
+assert.strictEqual(returnStackHistoryDetail.activeTab, "history", `Expected History detail back to stay in History, got ${returnStackHistoryDetail.activeTab}`);
+assert.strictEqual(returnStackHistoryDetail.historyMode, "exercises", `Expected History detail back to restore exercise list mode, got ${returnStackHistoryDetail.historyMode}`);
+assert.strictEqual(returnStackHistoryDetail.historyExercise, "", "Expected History detail back to clear selected exercise.");
+assert.strictEqual(returnStackHistoryDetail.restoredTop, 734, `Expected History detail back to restore list scroll, got ${returnStackHistoryDetail.restoredTop}`);
+
+const returnStackGlobalHistoryRestoresSource = runScenario(`
+  ${reset}
+  var restored = [];
+  window.scrollTo = (options) => restored.push(options);
+  state.activeTab = "exercises";
+  window.scrollY = 477;
+  pushReturnContext("history-exercise-detail", { sourceAction: "open-exercise-history-global", exercise: "Bench Press" });
+  state.activeTab = "history";
+  state.historyMode = "exercises";
+  state.historyExercise = "Bench Press";
+  var context = popReturnContext("history-exercise-detail");
+  restoreReturnViewContext(context);
+  restoreScrollAfterRender(context.scrollY);
+  ({
+    activeTab: state.activeTab,
+    historyExercise: state.historyExercise,
+    sourceAction: context.sourceAction,
+    restoredTop: restored[0]?.top
+  });
+`);
+
+assert.strictEqual(returnStackGlobalHistoryRestoresSource.activeTab, "exercises", `Expected global History back to restore source Exercises tab, got ${returnStackGlobalHistoryRestoresSource.activeTab}`);
+assert.strictEqual(returnStackGlobalHistoryRestoresSource.historyExercise, "", "Expected global History back to restore the prior source state.");
+assert.strictEqual(returnStackGlobalHistoryRestoresSource.sourceAction, "open-exercise-history-global", `Expected global History context to preserve source action, got ${returnStackGlobalHistoryRestoresSource.sourceAction}`);
+assert.strictEqual(returnStackGlobalHistoryRestoresSource.restoredTop, 477, `Expected global History back to restore source scroll, got ${returnStackGlobalHistoryRestoresSource.restoredTop}`);
+
+const returnStackNormalTabClears = runScenario(`
+  ${reset}
+  state.returnStack = [{ kind: "history-exercise-detail", scrollY: 400 }];
+  clearReturnContexts();
+  state.returnStack.length;
+`);
+
+assert.strictEqual(returnStackNormalTabClears, 0, "Expected normal tab changes to clear stale return contexts.");
+
+const invalidScrollFallsBack = runScenario(`
+  ${reset}
+  var restored = [];
+  window.scrollTo = (options) => restored.push(options);
+  restoreScrollAfterRender(-20);
+  restoreScrollAfterRender("not-a-number");
+  restored.map((entry) => entry.top);
+`);
+
+assert.deepEqual(invalidScrollFallsBack, [0, 0], `Expected invalid saved scroll positions to fall back to top, got ${invalidScrollFallsBack.join(", ")}`);
 
 console.log("log regression tests passed");

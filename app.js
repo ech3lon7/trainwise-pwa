@@ -1,17 +1,35 @@
 "use strict";
 
 const DB_NAME = "trainwise-db";
-const DB_VERSION = 2;
-const STORES = ["workouts", "metrics", "settings"];
-const APP_VERSION = "1.5.42";
+const DB_VERSION = 3;
+const STORES = ["workouts", "metrics", "settings", "syncQueue"];
+const APP_VERSION = "1.5.56";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 const DRAFT_RECOVERY_KEY = "trainwise-draft-recovery-v1";
 const COPIED_COACH_PLAN_KEY = "trainwise-copied-coach-plan-v1";
+const SYNC_BOOTSTRAP_VERSION = 1;
+const SYNC_POLL_MS = 60000;
+const SYNC_SAFE_PREFERENCES = ["hypertrophyProfile", "nutritionGoal", "dashboardWidgets", "dashboardWidgetOrder"];
+const COLLAPSE_ANIMATION_MS = 360;
+const COLLAPSE_REVEAL_MS = 1600;
+const COLLAPSIBLE_SELECTOR = "details.collapsible-panel, details.coverage-row, details.inline-disclosure";
+const SILENT_UI_ACTIONS = new Set(["decrement-rir", "increment-rir", "scroll-top"]);
+const uiCueFallbackCache = new Map();
+const activeUiFallbackAudio = new Set();
 let dbOpenPromise = null;
 let chartId = 0;
 let reloadingForUpdate = false;
 let renderToken = 0;
 let scrollTopTimer = null;
+let recordSyncTimer = null;
+let recordSyncPromise = null;
+let recordSyncLifecycleStarted = false;
+let uiAudioContext = null;
+let uiAudioResumePromise = null;
+let uiAudioNeedsResume = true;
+let pendingUiCues = [];
+let lastUiCueAt = 0;
+const MAX_PENDING_UI_CUES = 3;
 const SESSION_LIMIT_MINUTES = 60;
 const COACH_TIME_TOLERANCE_MINUTES = 3;
 const COACH_TIMEFRAME_OPTIONS = [
@@ -60,7 +78,7 @@ const RIR_MAX = 100;
 const COACH_GROWTH_MODE_OPTIONS = [
   { id: "soft", label: "Soft", targetSets: 16, allowHighVolume: false, startSets: 2, rank: 0 },
   { id: "medium", label: "Medium", targetSets: HYPERTROPHY.growthHigh, allowHighVolume: false, startSets: 3, rank: 1 },
-  { id: "aggressive", label: "Aggressive", targetSets: HYPERTROPHY.highVolumeFillMax, allowHighVolume: true, startSets: 4, rank: 2 }
+  { id: "aggressive", label: "Aggressive", targetSets: HYPERTROPHY.highVolumeFillMax, allowHighVolume: true, startSets: 3, rank: 2 }
 ];
 
 const muscleGroups = [
@@ -109,6 +127,27 @@ const muscleIconPaths = {
   abs: "./assets/muscles/abs.png"
 };
 
+const recordMuscleIconPaths = Object.fromEntries(Object.entries(muscleIconPaths).map(([muscle, path]) => [
+  muscle,
+  path.replace("./assets/muscles/", "./assets/records/muscles/")
+]));
+
+const recordMetricIconPaths = {
+  load: "./assets/records/load.svg",
+  reps: "./assets/records/reps.svg",
+  volume: "./assets/records/volume.svg",
+  e1rm: "./assets/records/e1rm.svg",
+  sessionVolume: "./assets/records/session-volume.svg",
+  trendUp: "./assets/records/trend-up.svg",
+  trendDown: "./assets/records/trend-down.svg",
+  average: "./assets/records/average.svg",
+  calories: "./assets/records/calories.svg",
+  protein: "./assets/records/protein.svg",
+  streak: "./assets/records/streak.svg",
+  weekly: "./assets/records/weekly.svg",
+  sets: "./assets/records/sets.svg"
+};
+
 
 const legacyExerciseMetadata = [
   { name: "Bench Press", primaryMuscles: ["chest"], secondaryMuscles: ["triceps", "shoulders"], equipment: "barbell", reps: "6-12", rest: "90-180 sec" },
@@ -139,11 +178,14 @@ const state = {
   logHistoryExercise: "",
   workoutDraft: [],
   loadedWorkoutDateIds: [],
-  historyMode: "exercises",
+  historyMode: "records",
   historyExercise: "",
+  historyRecordCategory: "",
+  historyRecordDetail: "",
   historySearch: "",
   historyDate: "",
   weeklyMuscleDetail: null,
+  returnStack: [],
   coachTimeframeMinutes: SESSION_LIMIT_MINUTES,
   coachGlobalGrowthMode: "medium",
   coachTargetMuscles: [],
@@ -157,6 +199,9 @@ const state = {
   logDraftNotice: null,
   undoAction: null,
   pendingImport: null,
+  syncQueue: [],
+  syncStatus: "idle",
+  syncMessage: "",
   dismissedRecordTrophies: new Set(),
   templateQueue: [],
   draftDate: todayISO(),
@@ -314,13 +359,237 @@ function showBanner(message, options = {}) {
   };
 }
 
+function soundEffectsEnabled() {
+  return state.settings.soundEffectsEnabled !== false;
+}
+
+function soundEffectsVolumePercent() {
+  const value = Number(state.settings.soundEffectsVolume);
+  return Number.isFinite(value) ? Math.max(0, Math.min(100, value)) : 35;
+}
+
+function uiCueNotes(type) {
+  const cues = {
+    tap: [{ frequency: 520, endFrequency: 580, duration: 0.065, gain: 0.12, wave: "sine" }],
+    navigate: [{ frequency: 440, endFrequency: 620, duration: 0.095, gain: 0.14, wave: "sine" }],
+    expand: [{ frequency: 390, endFrequency: 610, duration: 0.12, gain: 0.15, wave: "sine" }],
+    collapse: [{ frequency: 610, endFrequency: 390, duration: 0.11, gain: 0.14, wave: "sine" }],
+    success: [
+      { frequency: 620, endFrequency: 700, duration: 0.11, gain: 0.16, wave: "sine" },
+      { frequency: 840, endFrequency: 920, duration: 0.12, gain: 0.14, wave: "sine", delay: 0.075 }
+    ],
+    "trophy-earned": [
+      { frequency: 523, endFrequency: 587, duration: 0.12, gain: 0.17, wave: "sine" },
+      { frequency: 659, endFrequency: 740, duration: 0.14, gain: 0.16, wave: "sine", delay: 0.085 },
+      { frequency: 784, endFrequency: 988, duration: 0.2, gain: 0.18, wave: "sine", delay: 0.18 }
+    ],
+    "trophy-lost": [
+      { frequency: 440, endFrequency: 349, duration: 0.16, gain: 0.12, wave: "triangle" },
+      { frequency: 311, endFrequency: 247, duration: 0.2, gain: 0.1, wave: "triangle", delay: 0.12 }
+    ],
+    warning: [{ frequency: 330, endFrequency: 245, duration: 0.16, gain: 0.14, wave: "triangle" }],
+    error: [
+      { frequency: 245, endFrequency: 205, duration: 0.12, gain: 0.15, wave: "triangle" },
+      { frequency: 190, endFrequency: 165, duration: 0.14, gain: 0.14, wave: "triangle", delay: 0.095 }
+    ]
+  };
+  return cues[type] || cues.tap;
+}
+
+function emitUiCue(context, type) {
+  const volume = soundEffectsVolumePercent() / 100;
+  if (!volume) return;
+  const start = context.currentTime + 0.006;
+  uiCueNotes(type).forEach((note) => {
+    const oscillator = context.createOscillator();
+    const gain = context.createGain();
+    const noteStart = start + Number(note.delay || 0);
+    const noteEnd = noteStart + note.duration;
+    oscillator.type = note.wave;
+    oscillator.frequency.setValueAtTime(note.frequency, noteStart);
+    oscillator.frequency.exponentialRampToValueAtTime(note.endFrequency, noteEnd);
+    gain.gain.setValueAtTime(0.0001, noteStart);
+    gain.gain.exponentialRampToValueAtTime(Math.max(0.0001, note.gain * volume), noteStart + 0.012);
+    gain.gain.exponentialRampToValueAtTime(0.0001, noteEnd);
+    oscillator.connect(gain);
+    gain.connect(context.destination);
+    oscillator.start(noteStart);
+    oscillator.stop(noteEnd + 0.01);
+  });
+}
+
+function buildUiCueWavDataUri(type) {
+  if (uiCueFallbackCache.has(type)) return uiCueFallbackCache.get(type);
+  const sampleRate = 22050;
+  const notes = uiCueNotes(type);
+  const duration = Math.max(...notes.map((note) => Number(note.delay || 0) + note.duration)) + 0.025;
+  const sampleCount = Math.ceil(duration * sampleRate);
+  const samples = new Float32Array(sampleCount);
+  notes.forEach((note) => {
+    const start = Math.floor(Number(note.delay || 0) * sampleRate);
+    const end = Math.min(sampleCount, start + Math.ceil(note.duration * sampleRate));
+    let phase = 0;
+    for (let index = start; index < end; index += 1) {
+      const progress = (index - start) / Math.max(1, end - start - 1);
+      const frequency = note.frequency + (note.endFrequency - note.frequency) * progress;
+      phase += (Math.PI * 2 * frequency) / sampleRate;
+      const raw = note.wave === "triangle" ? (2 / Math.PI) * Math.asin(Math.sin(phase)) : Math.sin(phase);
+      const envelope = Math.min(1, progress / 0.12, (1 - progress) / 0.22);
+      samples[index] += raw * envelope * note.gain * 3.2;
+    }
+  });
+
+  const buffer = new ArrayBuffer(44 + sampleCount * 2);
+  const view = new DataView(buffer);
+  const writeText = (offset, value) => Array.from(value).forEach((character, index) => view.setUint8(offset + index, character.charCodeAt(0)));
+  writeText(0, "RIFF");
+  view.setUint32(4, 36 + sampleCount * 2, true);
+  writeText(8, "WAVEfmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  writeText(36, "data");
+  view.setUint32(40, sampleCount * 2, true);
+  samples.forEach((sample, index) => view.setInt16(44 + index * 2, Math.max(-1, Math.min(1, sample)) * 0x7fff, true));
+  const bytes = new Uint8Array(buffer);
+  let binary = "";
+  for (let index = 0; index < bytes.length; index += 1) binary += String.fromCharCode(bytes[index]);
+  const dataUri = `data:audio/wav;base64,${window.btoa(binary)}`;
+  uiCueFallbackCache.set(type, dataUri);
+  return dataUri;
+}
+
+function playUiCueFallback(type) {
+  if (typeof window.Audio !== "function" || typeof window.btoa !== "function") return false;
+  try {
+    const audio = new window.Audio(buildUiCueWavDataUri(type));
+    const release = () => activeUiFallbackAudio.delete(audio);
+    audio.addEventListener?.("ended", release, { once: true });
+    audio.addEventListener?.("error", release, { once: true });
+    activeUiFallbackAudio.add(audio);
+    audio.volume = Math.min(1, (soundEffectsVolumePercent() / 100) * 1.8);
+    const playback = audio.play();
+    playback?.catch?.(() => release());
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function uiCuePriority(type) {
+  if (["error", "trophy-earned", "trophy-lost", "success"].includes(type)) return 3;
+  if (["warning"].includes(type)) return 2;
+  return 1;
+}
+
+function queueUiCue(type) {
+  const priority = uiCuePriority(type);
+  if (priority > 1) pendingUiCues = pendingUiCues.filter((cue) => uiCuePriority(cue) >= priority);
+  if (priority === 1 && pendingUiCues.some((cue) => uiCuePriority(cue) > 1)) return pendingUiCues;
+  if (priority === 1 && pendingUiCues.includes(type)) return pendingUiCues;
+  pendingUiCues.push(type);
+  if (pendingUiCues.length > MAX_PENDING_UI_CUES) pendingUiCues = pendingUiCues.slice(-MAX_PENDING_UI_CUES);
+  return pendingUiCues;
+}
+
+function flushUiCueQueue(context) {
+  if (!context || context.state !== "running") return false;
+  const queued = pendingUiCues.splice(0, pendingUiCues.length);
+  queued.forEach((type) => emitUiCue(context, type));
+  return queued.length > 0;
+}
+
+function flushUiCueFallback() {
+  const queued = pendingUiCues.splice(0, pendingUiCues.length);
+  queued.forEach((type) => playUiCueFallback(type));
+  return queued.length > 0;
+}
+
+function watchUiAudioContext(context) {
+  if (!context || context.__trainwiseStateListener) return context;
+  const handleStateChange = () => {
+    if (context !== uiAudioContext) return;
+    if (context.state === "closed") {
+      uiAudioContext = null;
+      uiAudioNeedsResume = true;
+      return;
+    }
+    uiAudioNeedsResume = context.state !== "running";
+    if (context.state === "running") flushUiCueQueue(context);
+  };
+  context.addEventListener?.("statechange", handleStateChange);
+  context.__trainwiseStateListener = handleStateChange;
+  return context;
+}
+
+function ensureUiAudioReady() {
+  if (!soundEffectsEnabled()) return Promise.resolve(null);
+  const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+  if (!AudioContextClass) return Promise.resolve(null);
+  try {
+    if (!uiAudioContext || uiAudioContext.state === "closed") uiAudioContext = watchUiAudioContext(new AudioContextClass());
+    if (uiAudioContext.state === "running" && !uiAudioNeedsResume) return Promise.resolve(uiAudioContext);
+    if (!uiAudioResumePromise) {
+      uiAudioResumePromise = Promise.resolve(uiAudioContext.resume())
+        .then(() => {
+          uiAudioNeedsResume = uiAudioContext.state !== "running";
+          return uiAudioContext.state === "running" ? uiAudioContext : null;
+        })
+        .catch(() => null)
+        .finally(() => { uiAudioResumePromise = null; });
+    }
+    return uiAudioResumePromise;
+  } catch {
+    return Promise.resolve(null);
+  }
+}
+
+function unlockUiAudio() {
+  if (!soundEffectsEnabled()) return false;
+  ensureUiAudioReady().then((context) => {
+    if (context) flushUiCueQueue(context);
+  });
+  return true;
+}
+
+function markUiAudioForResume() {
+  uiAudioNeedsResume = true;
+  if (uiAudioContext?.state === "closed") uiAudioContext = null;
+}
+
+function playUiCue(type = "tap", options = {}) {
+  if (!options.force && !soundEffectsEnabled()) return false;
+  const now = Date.now();
+  if (["tap", "navigate"].includes(type) && now - lastUiCueAt < 45) return false;
+  lastUiCueAt = now;
+  queueUiCue(type);
+  ensureUiAudioReady().then((context) => {
+    if (context) flushUiCueQueue(context);
+    else flushUiCueFallback();
+  });
+  return true;
+}
+
+function shouldPlayMeaningfulControlCue(target) {
+  if (!target || target.disabled) return false;
+  const action = String(target.dataset?.action || "");
+  if (SILENT_UI_ACTIONS.has(action) || action.startsWith("move-") || action.startsWith("reorder-")) return false;
+  return Boolean(target.matches?.("button, [role='button']"));
+}
+
 function announce(message, options = {}) {
   showBanner(message, options);
   toast(message);
+  if (options.sound) playUiCue(options.sound);
 }
 
 function notifyMetricSaved(existing) {
   toast(existing ? "Metrics updated." : "Metrics saved.", { duration: 2000 });
+  playUiCue("success");
 }
 
 function scrollTopButtonShouldShow(scrollY = 0, scrollHeight = 0, clientHeight = 0) {
@@ -412,6 +681,9 @@ async function saveDashboardWidgets(enabled, order = dashboardWidgetOrder()) {
   const nextOrder = order.filter((id, index, items) => valid.has(id) && items.indexOf(id) === index);
   await saveSetting("dashboardWidgets", nextEnabled.length ? nextEnabled : [...DEFAULT_TODAY_WIDGETS]);
   await saveSetting("dashboardWidgetOrder", nextOrder.length ? nextOrder : [...DEFAULT_TODAY_WIDGETS]);
+  await queueSyncChange("preference", "dashboardWidgets", { value: selectedDashboardWidgets() });
+  await queueSyncChange("preference", "dashboardWidgetOrder", { value: dashboardWidgetOrder() });
+  scheduleRecordSync();
 }
 
 function sleep(ms) {
@@ -441,6 +713,11 @@ function openDB() {
       }
       if (!db.objectStoreNames.contains("settings")) {
         db.createObjectStore("settings", { keyPath: "key" });
+      }
+      if (!db.objectStoreNames.contains("syncQueue")) {
+        const store = db.createObjectStore("syncQueue", { keyPath: "id" });
+        store.createIndex("status", "status");
+        store.createIndex("createdAt", "createdAt");
       }
     };
     request.onsuccess = () => {
@@ -563,19 +840,70 @@ function workoutsForDate(date) {
 }
 
 async function loadState() {
-  const [workouts, metrics, settingsRows] = await Promise.all([
+  const [workouts, metrics, settingsRows, syncQueue] = await Promise.all([
     dbAll("workouts"),
     dbAll("metrics"),
-    dbAll("settings")
+    dbAll("settings"),
+    dbAll("syncQueue")
   ]);
   state.workouts = sortByDateDesc(workouts);
   state.metrics = sortByDateDesc(metrics);
   state.settings = Object.fromEntries(settingsRows.map((row) => [row.key, row.value]));
+  state.syncQueue = syncQueue;
 }
 
 async function saveSetting(key, value) {
   state.settings[key] = value;
   await dbPut("settings", { key, value });
+}
+
+function syncRecordKey(recordType, recordId) {
+  return `${String(recordType || "").trim()}:${String(recordId || "").trim()}`;
+}
+
+function localSyncRecord(recordType, recordId, payload) {
+  return {
+    recordType,
+    recordId: String(recordId),
+    payload: clonePlain(payload)
+  };
+}
+
+function safePreferenceValue(key) {
+  if (key === "hypertrophyProfile") return hypertrophySettings();
+  if (key === "nutritionGoal") return selectedNutritionGoal();
+  if (key === "dashboardWidgets") return selectedDashboardWidgets();
+  if (key === "dashboardWidgetOrder") return dashboardWidgetOrder();
+  return undefined;
+}
+
+function buildLocalSyncRecords() {
+  const records = [];
+  state.workouts
+    .filter((entry) => !isSampleEntry(entry) && entry?.id)
+    .forEach((entry) => records.push(localSyncRecord("workout", entry.id, entry)));
+  canonicalMetricEntries(state.metrics.filter((entry) => !isSampleEntry(entry)))
+    .filter((entry) => entry?.date)
+    .forEach((entry) => records.push(localSyncRecord("metric", entry.date, entry)));
+  getCustomExercises({ includeArchived: true })
+    .filter((entry) => entry?.id)
+    .forEach((entry) => records.push(localSyncRecord("exercise", entry.id, entry)));
+  getDayTemplates()
+    .filter((entry) => entry?.id)
+    .forEach((entry) => records.push(localSyncRecord("template", entry.id, entry)));
+  SYNC_SAFE_PREFERENCES.forEach((key) => {
+    records.push(localSyncRecord("preference", key, { value: safePreferenceValue(key) }));
+  });
+  return records;
+}
+
+function syncConflictFromRemote(pending, remoteRecord) {
+  return {
+    ...pending,
+    status: "conflict",
+    remoteRecord: clonePlain(remoteRecord),
+    conflictAt: new Date().toISOString()
+  };
 }
 
 function recentDays(days) {
@@ -882,6 +1210,236 @@ function workoutVolume(workout) {
   return setRowsFromWorkout(workout).reduce((sum, row) => sum + row.weight * row.reps, 0);
 }
 
+function recordBest(candidates = [], direction = "max") {
+  return candidates.filter((item) => Number.isFinite(item.value)).sort((a, b) => {
+    const valueDifference = direction === "min" ? a.value - b.value : b.value - a.value;
+    return valueDifference || String(b.date || "").localeCompare(String(a.date || ""));
+  })[0] || null;
+}
+
+function recordBestWithPrevious(candidates = [], direction = "max") {
+  const winner = recordBest(candidates, direction);
+  if (!winner) return null;
+  const previous = recordBest(candidates.filter((item) => String(item.date || "") < String(winner.date || "")), direction);
+  return {
+    ...winner,
+    previousValue: previous?.value ?? null,
+    previousDate: previous?.date || ""
+  };
+}
+
+function longestDateStreak(dates = []) {
+  const uniqueDates = [...new Set(dates.filter(Boolean))].sort();
+  let best = null;
+  let current = null;
+  for (const date of uniqueDates) {
+    if (!current || shiftISODate(current.endDate, 1) !== date) {
+      current = { value: 1, date, startDate: date, endDate: date };
+    } else {
+      current.value += 1;
+      current.endDate = date;
+      current.date = date;
+    }
+    if (!best || current.value > best.value || (current.value === best.value && current.endDate > best.endDate)) best = { ...current };
+  }
+  return best;
+}
+
+function trainingWeekKey(date) {
+  return isoFromLocalDate(currentTrainingWeekStart(parseLocalDate(date)));
+}
+
+function weeklyWeightChangeRecords(weightEntries = []) {
+  const grouped = new Map();
+  for (const entry of weightEntries) {
+    const weekStart = trainingWeekKey(entry.date);
+    const current = grouped.get(weekStart) || { weekStart, values: [], entries: [] };
+    current.values.push(entry.value);
+    current.entries.push(entry);
+    grouped.set(weekStart, current);
+  }
+  const weeks = [...grouped.values()]
+    .filter((week) => week.values.length >= 2)
+    .map((week) => ({
+      ...week,
+      value: week.values.reduce((sum, value) => sum + value, 0) / week.values.length,
+      weekEnd: shiftISODate(week.weekStart, 6)
+    }))
+    .sort((a, b) => a.weekStart.localeCompare(b.weekStart));
+  const changes = [];
+  for (let index = 1; index < weeks.length; index += 1) {
+    const previous = weeks[index - 1];
+    const current = weeks[index];
+    if (daysBetween(previous.weekStart, current.weekStart) !== 7) continue;
+    const change = current.value - previous.value;
+    changes.push({
+      value: Math.abs(change),
+      signedChange: change,
+      date: current.weekEnd,
+      startAverage: previous.value,
+      endAverage: current.value,
+      startWeek: previous.weekStart,
+      startWeekEnd: previous.weekEnd,
+      endWeek: current.weekStart,
+      endWeekEnd: current.weekEnd,
+      startEntries: previous.entries,
+      endEntries: current.entries
+    });
+  }
+  return {
+    greatestGain: recordBestWithPrevious(changes.filter((entry) => entry.signedChange > 0)),
+    greatestLoss: recordBestWithPrevious(changes.filter((entry) => entry.signedChange < 0))
+  };
+}
+
+function allTimeRecords(workouts = state.workouts, metrics = state.metrics) {
+  const submitted = workouts.filter((entry) => !entry.pendingDraft && !isSampleEntry(entry));
+  const setEntries = submitted.flatMap((workout) => setRowsFromWorkout(workout).map((row, index) => ({
+    workout,
+    row,
+    index,
+    date: workout.date || "",
+    exercise: workout.exercise || "",
+    value: 0
+  })));
+  const exerciseSessions = submitted.map((workout) => ({
+    workout,
+    date: workout.date || "",
+    exercise: workout.exercise || "",
+    volume: workoutVolume(workout),
+    reps: setRowsFromWorkout(workout).reduce((sum, row) => sum + row.reps, 0)
+  }));
+  const dayTotals = new Map();
+  for (const session of exerciseSessions) {
+    const current = dayTotals.get(session.date) || { date: session.date, volume: 0, reps: 0, sets: 0, exercises: [], workouts: [] };
+    current.volume += session.volume;
+    current.reps += session.reps;
+    current.sets += setRowsFromWorkout(session.workout).length;
+    current.exercises.push(session.exercise);
+    current.workouts.push({ workout: session.workout, factor: 1 });
+    dayTotals.set(session.date, current);
+  }
+  const dayEntries = [...dayTotals.values()];
+  const strength = {
+    heaviestWeight: recordBestWithPrevious(setEntries.filter((entry) => entry.row.weight > 0).map((entry) => ({ ...entry, value: entry.row.weight }))),
+    mostSetReps: recordBestWithPrevious(setEntries.filter((entry) => entry.row.reps > 0).map((entry) => ({ ...entry, value: entry.row.reps }))),
+    highestSetVolume: recordBestWithPrevious(setEntries.filter((entry) => entry.row.weight > 0).map((entry) => ({ ...entry, value: entry.row.weight * entry.row.reps }))),
+    bestEstimated1rm: recordBestWithPrevious(setEntries.filter((entry) => entry.row.weight > 0 && entry.row.reps > 0).map((entry) => ({ ...entry, value: entry.row.weight * (1 + entry.row.reps / 30) }))),
+    highestExerciseVolume: recordBestWithPrevious(exerciseSessions.filter((entry) => entry.volume > 0).map((entry) => ({ ...entry, value: entry.volume }))),
+    mostExerciseReps: recordBestWithPrevious(exerciseSessions.filter((entry) => entry.reps > 0).map((entry) => ({ ...entry, value: entry.reps }))),
+    highestDayVolume: recordBestWithPrevious(dayEntries.filter((entry) => entry.volume > 0).map((entry) => ({ ...entry, value: entry.volume }))),
+    mostDayReps: recordBestWithPrevious(dayEntries.filter((entry) => entry.reps > 0).map((entry) => ({ ...entry, value: entry.reps }))),
+    mostDaySets: recordBestWithPrevious(dayEntries.filter((entry) => entry.sets > 0).map((entry) => ({ ...entry, value: entry.sets }))),
+    mostDayExercises: recordBestWithPrevious(dayEntries.filter((entry) => entry.exercises.length > 0).map((entry) => ({ ...entry, value: entry.exercises.length })))
+  };
+
+  const metricEntries = canonicalMetricEntries(metrics.filter((entry) => !isSampleEntry(entry)));
+  const weightEntries = metricEntries
+    .filter((entry) => entry.bodyWeight > 0)
+    .map((entry) => ({ value: entry.bodyWeight, date: entry.date, metric: entry }));
+  const weightAverageEntries = [...weightEntries].sort((a, b) => a.date.localeCompare(b.date)).map((entry, index, entries) => {
+    const window = entries.slice(Math.max(0, index - 6), index + 1);
+    return { ...entry, value: window.reduce((sum, item) => sum + item.value, 0) / window.length, sampleCount: window.length };
+  });
+  const weightChanges = weeklyWeightChangeRecords(weightEntries);
+  const bodyWeight = {
+    heaviest: recordBestWithPrevious(weightEntries),
+    lightest: recordBestWithPrevious(weightEntries, "min"),
+    highestAverage: recordBestWithPrevious(weightAverageEntries),
+    lowestAverage: recordBestWithPrevious(weightAverageEntries, "min"),
+    greatestWeeklyGain: weightChanges.greatestGain,
+    greatestWeeklyLoss: weightChanges.greatestLoss
+  };
+
+  const calorieEntries = metricEntries.filter((entry) => entry.calories > 0).map((entry) => ({ value: entry.calories, date: entry.date, metric: entry }));
+  const proteinEntries = metricEntries.filter((entry) => entry.protein > 0).map((entry) => ({ value: entry.protein, date: entry.date, metric: entry }));
+  const nutrition = {
+    highestCalories: recordBestWithPrevious(calorieEntries),
+    lowestCalories: recordBestWithPrevious(calorieEntries, "min"),
+    highestProtein: recordBestWithPrevious(proteinEntries),
+    lowestProtein: recordBestWithPrevious(proteinEntries, "min"),
+    longestLoggingStreak: longestDateStreak(metricEntries.filter((entry) => entry.calories > 0 || entry.protein > 0 || entry.bodyWeight > 0).map((entry) => entry.date))
+  };
+
+  const muscleDayTotals = new Map();
+  for (const workout of submitted) {
+    const meta = workoutMeta(workout);
+    const rows = setRowsFromWorkout(workout);
+    for (const muscle of muscleGroups) {
+      const factor = (meta.primaryMuscles || []).includes(muscle.id)
+        ? 1
+        : (meta.secondaryMuscles || []).includes(muscle.id) ? 0.5 : 0;
+      if (!factor) continue;
+      const key = `${muscle.id}|${workout.date}`;
+      const current = muscleDayTotals.get(key) || { muscleId: muscle.id, muscle: muscle.label, date: workout.date, reps: 0, volume: 0, sets: 0, exercises: [], workouts: [] };
+      current.reps += rows.reduce((sum, row) => sum + row.reps, 0) * factor;
+      current.volume += rows.reduce((sum, row) => sum + row.weight * row.reps, 0) * factor;
+      current.sets += hardSetCount(workout) * factor;
+      current.exercises.push({ exercise: workout.exercise, factor });
+      current.workouts.push({ workout, factor });
+      muscleDayTotals.set(key, current);
+    }
+  }
+  const muscleDays = [...muscleDayTotals.values()];
+  const muscles = muscleGroups.map((muscle) => {
+    const entries = muscleDays.filter((entry) => entry.muscleId === muscle.id);
+    return {
+      muscleId: muscle.id,
+      muscle: muscle.label,
+      mostReps: recordBestWithPrevious(entries.filter((entry) => entry.reps > 0).map((entry) => ({ ...entry, value: entry.reps }))),
+      highestVolume: recordBestWithPrevious(entries.filter((entry) => entry.volume > 0).map((entry) => ({ ...entry, value: entry.volume }))),
+      mostCreditedSets: recordBestWithPrevious(entries.filter((entry) => entry.sets > 0).map((entry) => ({ ...entry, value: entry.sets })))
+    };
+  }).filter((entry) => entry.mostReps || entry.highestVolume);
+
+  const exerciseGroups = new Map();
+  for (const workout of submitted) {
+    const key = workout.exerciseId ? `id:${workout.exerciseId}` : `name:${normalizeName(workout.exercise)}`;
+    const group = exerciseGroups.get(key) || { exercise: workout.exercise, exerciseId: workout.exerciseId || "", sessions: [] };
+    group.exercise = workout.exercise || group.exercise;
+    group.sessions.push(workout);
+    exerciseGroups.set(key, group);
+  }
+  const exercises = [...exerciseGroups.values()].map((group) => {
+    const rows = group.sessions.flatMap((workout) => setRowsFromWorkout(workout).map((row, index) => ({ workout, row, index, date: workout.date, exercise: group.exercise })));
+    const sessions = group.sessions.map((workout) => ({ workout, date: workout.date, exercise: group.exercise, value: workoutVolume(workout) }));
+    const meta = workoutMeta(group.sessions[group.sessions.length - 1] || {});
+    return {
+      exercise: group.exercise,
+      exerciseId: group.exerciseId,
+      primaryMuscles: [...(meta.primaryMuscles || [])],
+      sessionCount: group.sessions.length,
+      heaviestWeight: recordBestWithPrevious(rows.filter((entry) => entry.row.weight > 0).map((entry) => ({ ...entry, value: entry.row.weight }))),
+      mostReps: recordBestWithPrevious(rows.filter((entry) => entry.row.reps > 0).map((entry) => ({ ...entry, value: entry.row.reps }))),
+      highestSetVolume: recordBestWithPrevious(rows.filter((entry) => entry.row.weight > 0).map((entry) => ({ ...entry, value: entry.row.weight * entry.row.reps }))),
+      bestEstimated1rm: recordBestWithPrevious(rows.filter((entry) => entry.row.weight > 0 && entry.row.reps > 0).map((entry) => ({ ...entry, value: entry.row.weight * (1 + entry.row.reps / 30) }))),
+      highestSessionVolume: recordBestWithPrevious(sessions.filter((entry) => entry.value > 0))
+    };
+  }).sort((a, b) => a.exercise.localeCompare(b.exercise));
+
+  const weekTotals = new Map();
+  for (const workout of submitted) {
+    const key = trainingWeekKey(workout.date);
+    const current = weekTotals.get(key) || { date: key, workouts: 0, sets: 0, volume: 0, trainingDates: new Set(), sourceWorkouts: [] };
+    current.workouts += 1;
+    current.sets += setRowsFromWorkout(workout).length;
+    current.volume += workoutVolume(workout);
+    current.trainingDates.add(workout.date);
+    current.sourceWorkouts.push(workout);
+    weekTotals.set(key, current);
+  }
+  const weeks = [...weekTotals.values()].map((entry) => ({ ...entry, trainingDays: entry.trainingDates.size }));
+  const consistency = {
+    longestWorkoutStreak: longestDateStreak(submitted.map((entry) => entry.date)),
+    mostTrainingDaysWeek: recordBestWithPrevious(weeks.map((entry) => ({ ...entry, value: entry.trainingDays }))),
+    mostWorkoutsWeek: recordBestWithPrevious(weeks.map((entry) => ({ ...entry, value: entry.workouts }))),
+    mostSetsWeek: recordBestWithPrevious(weeks.map((entry) => ({ ...entry, value: entry.sets }))),
+    highestWeeklyVolume: recordBestWithPrevious(weeks.map((entry) => ({ ...entry, value: entry.volume })))
+  };
+
+  return { strength, bodyWeight, nutrition, muscles, exercises, consistency };
+}
+
 function draftVolume(draft) {
   return normalizeSetRows(draft.setRows).reduce((sum, row) => sum + row.weight * row.reps, 0);
 }
@@ -1082,19 +1640,24 @@ function progressionTargetForExercise(exerciseName) {
   if (!top) return null;
   const meta = resolveExerciseMeta(exerciseName);
   const range = parseRepRange(meta.reps);
+  const workingRows = setRowsFromWorkout(latest).filter((row) => row.weight > 0 && row.reps > 0);
+  const estimatedCapacity = top.reps + Math.max(0, Number(top.rir) || 0);
+  const backoffSetsHeldRange = workingRows.length > 0 && workingRows.every((row) => row.reps >= range.low);
+  const increaseLoad = estimatedCapacity >= range.high && backoffSetsHeldRange;
   const nextRep = Math.min(range.high, top.reps + 1);
   const loadStep = top.weight >= 50 ? 5 : 2.5;
   const indicator = progressiveOverloadIndicator(exerciseName);
-  const target = top.reps < range.high
-    ? `${fmt(top.weight, 1)} lb x ${fmt(nextRep)}-${fmt(range.high)}`
-    : `${fmt(top.weight + loadStep, 1)} lb x ${fmt(range.low)}-${fmt(Math.max(range.low, top.reps - 2))}`;
+  const target = increaseLoad
+    ? `${fmt(top.weight + loadStep, 1)} lb x ${fmt(range.low)}-${fmt(Math.max(range.low, Math.min(range.high, top.reps - 2)))}`
+    : `${fmt(top.weight, 1)} lb x ${fmt(nextRep)}-${fmt(range.high)}`;
   return {
     exercise: exerciseName,
     latest,
     top,
     indicator,
+    increaseLoad,
     target,
-    body: `Last ${exerciseName}: ${fmt(top.weight, 1)} lb x ${fmt(top.reps)}. Next target: ${target}, while keeping ${HYPERTROPHY.idealRirMin}-${HYPERTROPHY.idealRirMax} RIR.`
+    body: `Last time you hit ${fmt(top.weight, 1)} lb x ${fmt(top.reps)} on ${exerciseName}. I'm setting ${target} as the next target - keep ${HYPERTROPHY.idealRirMin}-${HYPERTROPHY.idealRirMax} clean reps in reserve.`
   };
 }
 
@@ -1811,11 +2374,58 @@ function exerciseUnderperformed(current, previous, options = {}) {
   const previousE1rm = e1rm(previous);
   const e1rmDrop = previousE1rm > 0 && currentE1rm < previousE1rm * (1 - COACH_PERFORMANCE_DROP_THRESHOLD);
   const repDrops = comparableRepDrop(current, previous);
+  const range = parseRepRange(options.repRange || "8-15");
+  const missedRange = setRowsFromWorkout(current).some((row) => row.reps > 0 && row.reps < range.low);
+  const broadRepRegression = repDrops >= 3;
   const failureRir = (averageRir(current) ?? HYPERTROPHY.idealRirMin) <= 0;
   if (options.progressEvidence?.progressed) {
-    return failureRir && repDrops >= 3 && e1rmDrop;
+    return failureRir && broadRepRegression && e1rmDrop;
   }
-  return e1rmDrop || repDrops >= 2 || (failureRir && (e1rmDrop || repDrops > 0 || currentE1rm <= previousE1rm));
+  return e1rmDrop || missedRange || broadRepRegression || (failureRir && (e1rmDrop || missedRange || broadRepRegression));
+}
+
+function coachPerformanceMessage(exercise, status, detail = "") {
+  if (status === "progressing") {
+    const evidence = detail ? ` (${detail})` : "";
+    return coachPhrase("performance-progressing", exercise.id || exercise.name, [
+      `Nice work - ${exercise.name} moved forward last session${evidence}. Let's use the next small overload target without getting greedy.`,
+      `${exercise.name} earned a green light last time${evidence}. Take the next small overload and make it clean.`,
+      `That ${exercise.name} performance had some teeth${evidence}. I'm nudging the target up, not launching it into orbit.`
+    ]);
+  }
+  if (status === "repeated-failure") {
+    return coachPhrase("performance-repeated", exercise.id || exercise.name, [
+      `We've seen ${exercise.name} slide in back-to-back sessions. Let's rotate it or pull the volume back before we pile on more.`,
+      `${exercise.name} has waved the white flag twice in a row. We rotate it or trim the workload before asking for more.`,
+      `Two straight dips on ${exercise.name} are a pattern, not bad luck. Let's rotate or deload it and rebuild.`
+    ]);
+  }
+  if (status === "isolated-failure") {
+    return coachPhrase("performance-failure", exercise.id || exercise.name, [
+      `${exercise.name} took a real step back last session. Let's trim the load slightly and rebuild it with 1-2 RIR.`,
+      `${exercise.name} had a rough outing. Take a small bite off the load and rebuild with 1-2 clean reps in reserve.`,
+      `Last ${exercise.name} session got away from us. Dial the load back slightly and own the next one.`
+    ]);
+  }
+  if (status === "minor-dip") {
+    return coachPhrase("performance-dip", exercise.id || exercise.name, [
+      `${exercise.name} had a small one-session dip. Keep the load where it is and give me 1-2 clean reps in reserve before we change it.`,
+      `${exercise.name} was a touch off, nothing dramatic. Hold the load and clean up the next performance.`,
+      `Small wobble on ${exercise.name}. No panic move - keep the load and leave 1-2 crisp reps in reserve.`
+    ]);
+  }
+  if (status === "reached-failure") {
+    return coachPhrase("performance-failure-reached", exercise.id || exercise.name, [
+      `You took ${exercise.name} to failure while staying in range. Hold the load, but leave me 1-2 good reps in the tank next time.`,
+      `${exercise.name} reached the wall without missing the rep range. Same load next time, just stop 1-2 reps before the wall.`,
+      `You emptied the tank on ${exercise.name}. Productive, but next time leave me 1-2 reps so the rest of the session stays sharp.`
+    ]);
+  }
+  return coachPhrase("performance-steady", exercise.id || exercise.name, [
+    `${exercise.name} is holding steady. Let's chase one clean rep or a small load increase next.`,
+    `${exercise.name} is steady as a rock. The next win is one cleaner rep or the smallest sensible load jump.`,
+    `No drama on ${exercise.name}; it's holding course. Let's earn the next rep before we get ambitious.`
+  ]);
 }
 
 function coachExercisePerformanceSignal(exercise, workouts = coachWorkoutEntries()) {
@@ -1841,12 +2451,13 @@ function coachExercisePerformanceSignal(exercise, workouts = coachWorkoutEntries
       latest,
       previous,
       progressEvidence: latestProgress,
-      message: `${exercise.name} progressed last session (${latestProgress.reasons.join(", ")}); keep recovery-managed volume and use the next small overload target.`
+      message: coachPerformanceMessage(exercise, "progressing", latestProgress.reasons.join(", "))
     };
   }
-  const latestUnder = exerciseUnderperformed(latest, previous, { progressEvidence: latestProgress });
+  const performanceOptions = { progressEvidence: latestProgress, repRange: exercise.reps };
+  const latestUnder = exerciseUnderperformed(latest, previous, performanceOptions);
   const previousProgress = history.length >= 3 ? exerciseProgressEvidence(previous, history.slice(2)) : null;
-  const previousUnder = history.length >= 3 && exerciseUnderperformed(previous, history[2], { progressEvidence: previousProgress });
+  const previousUnder = history.length >= 3 && exerciseUnderperformed(previous, history[2], { progressEvidence: previousProgress, repRange: exercise.reps });
   if (latestUnder && previousUnder) {
     return {
       status: "repeated-failure",
@@ -1855,7 +2466,7 @@ function coachExercisePerformanceSignal(exercise, workouts = coachWorkoutEntries
       latest,
       previous,
       progressEvidence: latestProgress,
-      message: `${exercise.name} has stalled across recent sessions; rotate or deload before adding more volume.`
+      message: coachPerformanceMessage(exercise, "repeated-failure")
     };
   }
   if (latestUnder) {
@@ -1866,7 +2477,7 @@ function coachExercisePerformanceSignal(exercise, workouts = coachWorkoutEntries
       latest,
       previous,
       progressEvidence: latestProgress,
-      message: `${exercise.name} dipped last session; use a small load reduction and keep 1-2 RIR.`
+      message: coachPerformanceMessage(exercise, "isolated-failure")
     };
   }
   const latestE1rm = e1rm(latest);
@@ -1879,7 +2490,30 @@ function coachExercisePerformanceSignal(exercise, workouts = coachWorkoutEntries
       latest,
       previous,
       progressEvidence: latestProgress,
-      message: `${exercise.name} is progressing; use the next small overload target.`
+      message: coachPerformanceMessage(exercise, "progressing")
+    };
+  }
+  const repDrops = comparableRepDrop(latest, previous);
+  if (repDrops > 0 || (previousE1rm > 0 && latestE1rm < previousE1rm)) {
+    return {
+      status: "minor-dip",
+      tone: "",
+      history,
+      latest,
+      previous,
+      progressEvidence: latestProgress,
+      message: coachPerformanceMessage(exercise, "minor-dip")
+    };
+  }
+  if ((averageRir(latest) ?? HYPERTROPHY.idealRirMin) <= 0) {
+    return {
+      status: "reached-failure",
+      tone: "",
+      history,
+      latest,
+      previous,
+      progressEvidence: latestProgress,
+      message: coachPerformanceMessage(exercise, "reached-failure")
     };
   }
   return {
@@ -1889,7 +2523,7 @@ function coachExercisePerformanceSignal(exercise, workouts = coachWorkoutEntries
     latest,
     previous,
     progressEvidence: latestProgress,
-    message: `${exercise.name} is steady; progress with a small rep or load target.`
+    message: coachPerformanceMessage(exercise, "steady")
   };
 }
 
@@ -1944,7 +2578,7 @@ function coachPlanTargetForExercise(exercise, signal = coachExercisePerformanceS
       detail: `${HYPERTROPHY.idealRirMin}-${HYPERTROPHY.idealRirMax} RIR`,
       tone: progression.indicator.tone,
       loadMultiplier: 1,
-      repOffset: top.reps < range.high ? 1 : 0,
+      repOffset: progression.increaseLoad ? 0 : 1,
       message: signal.message
     };
   }
@@ -2000,16 +2634,78 @@ function isMuscleAvailableForPlanning(target) {
   return target.primaryDaysSince === null || target.primaryDaysSince >= COACH_MUSCLE_RECOVERY_DAYS;
 }
 
-function muscleDateGapReason(target) {
+function coachPhrase(category, key, choices) {
+  if (!choices?.length) return "";
+  const source = `${todayISO()}|${category}|${key || "default"}`;
+  let hash = 0;
+  for (let index = 0; index < source.length; index += 1) hash = ((hash << 5) - hash + source.charCodeAt(index)) | 0;
+  return choices[Math.abs(hash) % choices.length];
+}
+
+function coachList(labels = []) {
+  const clean = labels.filter(Boolean);
+  if (clean.length <= 1) return clean[0] || "";
+  if (clean.length === 2) return `${clean[0]} and ${clean[1]}`;
+  return `${clean.slice(0, -1).join(", ")}, and ${clean[clean.length - 1]}`;
+}
+
+function coachRecoveryMessage(target, options = {}) {
   const when = target.primaryDaysSince === 0 ? "today" : "yesterday";
-  return `${target.label} was directly trained ${when}; Coach uses a 2-day gap by date before direct work returns.`;
+  if (options.directInteraction) {
+    return coachPhrase("recovery-warning", target.id, [
+      `Easy there, champ - you trained ${target.label} directly ${when}. Give me the full 2-day gap before we hit it directly again.`,
+      `Not so fast, boss. ${target.label} worked directly ${when}, so I'm blocking it until the 2-day recovery gap clears.`,
+      `I like the enthusiasm, but ${target.label} trained directly ${when}. Let it earn the full 2-day recovery gap.`
+    ]);
+  }
+  return coachPhrase("recovery-detail", target.id, [
+    `${target.label} was trained directly ${when}. I'm keeping it on recovery duty until the 2-day gap clears.`,
+    `We hit ${target.label} directly ${when}, so it stays out of direct work until its 2-day recovery window is clear.`,
+    `${target.label} already worked directly ${when}. It gets the bench today while the 2-day recovery gap does its job.`
+  ]);
+}
+
+function coachRecoverySummary(items = []) {
+  if (!items.length) return "";
+  const labels = items.map((item) => item.muscle?.label).filter(Boolean);
+  const displayedLabels = labels.length > 4 ? [...labels.slice(0, 3), `${labels.length - 3} others`] : labels;
+  const subject = coachList(displayedLabels);
+  const plural = labels.length > 1;
+  const todayCount = items.filter((item) => item.muscle?.primaryDaysSince === 0).length;
+  const timing = todayCount === items.length ? "today" : todayCount ? "today or yesterday" : "yesterday";
+  return coachPhrase("recovery-summary", labels.join("|"), [
+    `${subject} worked directly ${timing}, so ${plural ? "they're" : "it's"} on recovery duty until the 2-day gap clears. I'm spending today's work where it can actually pay off.`,
+    `Recovery call: ${subject} ${plural ? "were" : "was"} trained directly ${timing}. ${plural ? "They sit" : "It sits"} this one out until the 2-day window clears, and we attack fresher gaps instead.`,
+    `I'm putting the brakes on direct work for ${subject}. ${plural ? "They trained" : "It was trained"} ${timing}, and the 2-day recovery gap gets the final say today.`
+  ]);
+}
+
+function muscleDateGapReason(target) {
+  return coachRecoveryMessage(target);
+}
+
+function coachIntensityMessage(mode) {
+  return `We're running the ${coachGrowthModeLabel(mode)} plan intensity today.`;
+}
+
+function coachTargetsMessage(targetMuscles, growthModes, globalGrowthMode) {
+  const targets = muscleGroups
+    .filter((muscle) => targetMuscles.includes(muscle.id))
+    .map((muscle) => `${muscle.label} (${coachGrowthModeLabel(growthModes[muscle.id] || globalGrowthMode)})`);
+  if (!targets.length) return "";
+  const targetList = coachList(targets);
+  const plural = targets.length > 1;
+  return coachPhrase("targets", targetList, [
+    `You called your shot on ${targetList}. I'll protect the weekly floors first, then pour the remaining recoverable work into ${plural ? "those targets" : "that target"}.`,
+    `${targetList} ${plural ? "are your priorities" : "is your priority"}, loud and clear. We cover the floor, protect recovery, then press the advantage there.`,
+    `You want extra attention on ${targetList}. I'll handle the weekly floor first and make the remaining useful work count for ${plural ? "those targets" : "that target"}.`
+  ]);
 }
 
 function coachTargetSelectionWarning(muscleId, context = coachPlanningContext()) {
   const target = context.rankedStats.find((stat) => stat.id === muscleId);
   if (!target || isMuscleAvailableForPlanning(target)) return "";
-  const when = target.primaryDaysSince === 0 ? "today" : "yesterday";
-  return `${target.label} was directly trained ${when}. Coach will protect recovery and skip direct ${target.label} work today.`;
+  return coachRecoveryMessage(target, { directInteraction: true });
 }
 
 function scoreExerciseForMuscle(exercise, muscleId, options = {}) {
@@ -2256,33 +2952,25 @@ function plannedSetGap(item, allowHighVolume = false, growthMode = item.growthMo
 
 function planPriorityReason(item) {
   if (item.phase === "target-extra") {
-    const modeLabel = item.growthMode ? `${coachGrowthModeLabel(item.growthMode)} target: ` : "";
+    const modeLabel = item.growthMode ? `${coachGrowthModeLabel(item.growthMode)} target` : "selected target";
     const touchLabel = item.muscle.sessions >= 2
-      ? "Touches satisfied; adding selected target volume because recovery is clear"
-      : `${item.muscle.sessions}/2 touches`;
-    const parts = [
-      `${modeLabel}${item.muscle.label} is ${fmt(item.muscle.sets, 1)}/${HYPERTROPHY.growthHigh}+; adding selected extra volume`,
-      touchLabel
-    ];
-    if (item.muscle.daysSince !== null) parts.push(`last hit ${item.muscle.daysSince}d ago`);
-    return parts.join(" - ");
+      ? "Touches satisfied, and recovery is clear"
+      : `You have ${item.muscle.sessions}/2 weekly touches so far`;
+    const recency = item.muscle.daysSince !== null ? ` You last hit it ${item.muscle.daysSince}d ago.` : "";
+    return `You picked ${item.muscle.label} as a ${modeLabel}. It's at ${fmt(item.muscle.sets, 1)}/${HYPERTROPHY.growthHigh}+ hard sets, so I'm adding focused work. ${touchLabel}.${recency}`;
   }
   const highVolume = item.phase === "high-volume";
   const targetSets = planSetCeilingForTarget(item.muscle, highVolume, item.growthMode);
-  const modeLabel = item.growthMode ? `${coachGrowthModeLabel(item.growthMode)} mode: ` : "";
+  const modeLabel = item.growthMode ? coachGrowthModeLabel(item.growthMode) : "planned";
   const targetLabel = item.muscle.sets < HYPERTROPHY.minimumSets ? "weekly floor" : "upper growth target";
-  const prefix = highVolume && isCoachTargetMuscle(item.muscle.id)
-    ? "Target selected; above default growth zone: "
-    : highVolume ? "High-volume filler: " : modeLabel;
   const touchLabel = isCoachTargetMuscle(item.muscle.id) && item.muscle.sessions >= 2
-    ? "Touches satisfied; adding selected target volume because recovery is clear"
-    : `${item.muscle.sessions}/2 touches`;
-  const parts = [
-    `${prefix}${item.muscle.label} is ${fmt(item.muscle.sets, 1)}/${targetSets} ${targetLabel}`,
-    touchLabel
-  ];
-  if (item.muscle.daysSince !== null) parts.push(`last hit ${item.muscle.daysSince}d ago`);
-  return parts.join(" - ");
+    ? "Touches satisfied, but you selected it and recovery is clear"
+    : `${item.muscle.sessions}/2 weekly touches`;
+  const volumeNote = highVolume
+    ? " This is above the default growth zone, so keep an eye on performance and recovery."
+    : "";
+  const recency = item.muscle.daysSince !== null ? ` You last hit it ${item.muscle.daysSince}d ago.` : "";
+  return `${item.muscle.label} is at ${fmt(item.muscle.sets, 1)}/${targetSets} for its ${targetLabel}. I'm putting it in today's ${modeLabel} plan because it has ${touchLabel}.${recency}${volumeNote}`;
 }
 
 function selectedCoachTimeframeMinutes() {
@@ -2466,6 +3154,21 @@ function targetModeContractSetFloors(limitMinutes = SESSION_LIMIT_MINUTES, optio
     : selectedCoachGlobalGrowthMode();
   const floors = {};
 
+  if (globalGrowthMode !== "soft") {
+    const softGlobalPlan = buildSessionPlan(limitMinutes, {
+      restart: options.restart || false,
+      targetMuscles,
+      globalGrowthMode: "soft",
+      growthModes,
+      context: options.context,
+      skipTargetModeContracts: true
+    });
+    for (const muscleId of targetMuscles) {
+      const baselineItem = softGlobalPlan.items.find((item) => item.muscle.id === muscleId);
+      if (baselineItem?.sets) floors[muscleId] = baselineItem.sets;
+    }
+  }
+
   for (const muscleId of targetMuscles) {
     let mode = lowerCoachGrowthMode(growthModes[muscleId] || globalGrowthMode);
     while (mode) {
@@ -2538,6 +3241,7 @@ function buildSessionPlan(limitMinutes = SESSION_LIMIT_MINUTES, options = {}) {
   const performanceNoteKeys = new Set();
   let totalMinutes = 0;
   const usedExercises = new Set();
+  const conservativeSoftPlan = globalGrowthMode === "soft" && !targetMuscles.length && stats.length > 0;
 
   const addPerformanceNote = (signal) => {
     if (!signal?.message || !["isolated-failure", "repeated-failure"].includes(signal.status)) return;
@@ -2573,7 +3277,7 @@ function buildSessionPlan(limitMinutes = SESSION_LIMIT_MINUTES, options = {}) {
     addPerformanceNote(performanceSignal);
     let sets = Number.isFinite(addOptions.setCount)
       ? Math.max(1, addOptions.setCount)
-      : initialSetsForPlanTarget(target, caps, allowHighVolume, growthMode);
+      : initialSetsForPlanTarget(target, caps, allowHighVolume, addOptions.initialGrowthMode || growthMode);
     if (Number.isFinite(addOptions.setCap)) sets = Math.min(sets, Math.max(1, addOptions.setCap));
     if (planTarget.kind === "deload") sets = Math.max(1, sets - 1);
     if (!sets) return false;
@@ -2593,7 +3297,11 @@ function buildSessionPlan(limitMinutes = SESSION_LIMIT_MINUTES, options = {}) {
 
   for (const target of freshTargets) {
     if (items.some((item) => item.muscle.id === target.id)) continue;
-    addTargetToPlan(target);
+    const growthMode = growthModeFor(target.id);
+    const initialGrowthMode = targetMuscles.length && !isCoachTargetMuscle(target.id, targetMuscles)
+      ? "soft"
+      : growthMode;
+    addTargetToPlan(target, { growthMode, initialGrowthMode });
     if (items.length >= caps.maxItems) break;
   }
 
@@ -2747,8 +3455,7 @@ function buildSessionPlan(limitMinutes = SESSION_LIMIT_MINUTES, options = {}) {
         .filter(({ item }) => (
           item.muscle.id !== protectedMuscleId
           && !isCoachTargetMuscle(item.muscle.id, targetMuscles)
-          && item.sets > 0
-          && item.muscle.sets + item.sets - 1 >= HYPERTROPHY.minimumSets
+          && item.sets > 1
         ))
         .sort((a, b) => (
           coachGrowthModeRank(a.item.growthMode) - coachGrowthModeRank(b.item.growthMode)
@@ -2803,12 +3510,46 @@ function buildSessionPlan(limitMinutes = SESSION_LIMIT_MINUTES, options = {}) {
     return changed;
   };
 
+  const rebalanceGlobalAggressiveSets = () => {
+    if (restart || targetMuscles.length || globalGrowthMode !== "aggressive" || items.length < 2) return false;
+    const receivers = items
+      .filter((item) => item.sets < maxSetsForPlanTarget(item.muscle, caps, true, true, item.growthMode, false))
+      .sort((a, b) => coachMusclePrioritySort(a.muscle, b.muscle));
+    const donors = [...items]
+      .reverse()
+      .filter((item) => item.sets > caps.minSets);
+
+    for (const receiver of receivers) {
+      for (const donor of donors) {
+        if (donor.muscle.id === receiver.muscle.id) continue;
+        const donorMinutes = donor.minutes;
+        const reducedDonorMinutes = plannedExerciseMinutes(donor, donor.sets - 1);
+        const freedMinutes = donorMinutes - reducedDonorMinutes;
+        const receiverMinutes = receiver.minutes;
+        const increasedReceiverMinutes = plannedExerciseMinutes(receiver, receiver.sets + 1);
+        const extraMinutes = increasedReceiverMinutes - receiverMinutes;
+        if (freedMinutes <= 0 || extraMinutes <= 0) continue;
+        if (totalMinutes - freedMinutes + extraMinutes > hardLimit) continue;
+        donor.sets -= 1;
+        donor.minutes = reducedDonorMinutes;
+        receiver.sets += 1;
+        receiver.minutes = increasedReceiverMinutes;
+        if (receiver.muscle.sets + receiver.sets > HYPERTROPHY.growthHigh) receiver.phase = "high-volume";
+        totalMinutes = totalMinutes - freedMinutes + extraMinutes;
+        return true;
+      }
+    }
+    return false;
+  };
+
   if (globalGrowthMode === "aggressive" || items.some((item) => item.growthMode === "aggressive")) {
     addSetsToExisting({ floorGrowthMode: "medium" });
   }
-  addSetsToExisting();
+  if (!conservativeSoftPlan) {
+    addSetsToExisting();
+  }
 
-  if (!restart && totalMinutes < targetFloor) {
+  if (!restart && totalMinutes < targetFloor && !conservativeSoftPlan) {
     if (globalGrowthMode === "aggressive") {
       addSetsToExisting({ allowHighVolume: true });
     }
@@ -2827,15 +3568,20 @@ function buildSessionPlan(limitMinutes = SESSION_LIMIT_MINUTES, options = {}) {
     }
   }
 
-  if (totalMinutes < targetFloor) {
+  if (totalMinutes < targetFloor && !conservativeSoftPlan) {
     addSetsToExisting({ allowHighVolume: !restart });
   }
+
+  rebalanceGlobalAggressiveSets();
 
   if (enforceTargetModeContracts()) {
     addSetsToExisting({ allowHighVolume: !restart });
   }
 
-  const shortfallReason = sessionShortfallReason({ totalMinutes, cappedLimit, targetFloor, allStats, items, missing });
+  let shortfallReason = sessionShortfallReason({ totalMinutes, cappedLimit, targetFloor, allStats, items, missing });
+  if (conservativeSoftPlan && totalMinutes < targetFloor) {
+    shortfallReason = `Estimated ${totalMinutes}/${cappedLimit} min because Soft keeps volume conservative while weekly floor gaps are spread across multiple muscles.`;
+  }
 
   const plannedIds = new Set(items.map((item) => item.muscle.id));
   const deprioritized = stats
@@ -2910,22 +3656,18 @@ function buildTodayPlan(limitMinutes = selectedCoachTimeframeMinutes()) {
   const skippedReasons = [];
   const missingReasons = [];
   const notes = [];
+  let recoverySummary = "";
 
   if (restart) {
     why.push(daysSinceWorkout === null
-      ? "No lifting baseline yet, so the plan starts with a small session."
-      : `${daysSinceWorkout} days since your last lift, so volume is capped for a restart.`);
+      ? "We don't have a lifting baseline yet, so I'm starting you with a small, useful session."
+      : `It's been ${daysSinceWorkout} days since your last lift. I'm capping the volume so we can build momentum without burying you.`);
   }
   if (sessionPlan.items.length) {
-    selectedReasons.push(`${coachGrowthModeLabel(globalGrowthMode)} plan intensity.`);
+    selectedReasons.push(coachIntensityMessage(globalGrowthMode));
     selectedReasons.push(...sessionPlan.items.map((item) => item.reason));
     if (targetMuscles.length) {
-      const targetLabels = muscleGroups
-        .filter((muscle) => targetMuscles.includes(muscle.id))
-        .map((muscle) => growthModes[muscle.id]
-          ? `${muscle.label} ${coachGrowthModeLabel(growthModes[muscle.id])}`
-          : `${muscle.label} ${coachGrowthModeLabel(globalGrowthMode)}`);
-      selectedReasons.unshift(`Targets selected: ${targetLabels.join(", ")}. Soft targets get conservative priority after weekly floors.`);
+      selectedReasons.unshift(coachTargetsMessage(targetMuscles, growthModes, globalGrowthMode));
     }
     why.push(...selectedReasons.slice(0, 3));
   }
@@ -2936,12 +3678,13 @@ function buildTodayPlan(limitMinutes = selectedCoachTimeframeMinutes()) {
     why.push(...targetLimitReasons.slice(0, 2));
   }
   if (sessionPlan.deprioritized.length) {
-    skippedReasons.push(...sessionPlan.deprioritized.map((item) => `${item.reason} Coach picked another gap first.`));
-    why.push(...skippedReasons.slice(0, 2));
+    skippedReasons.push(...sessionPlan.deprioritized.map((item) => coachRecoveryMessage(item.muscle)));
+    recoverySummary = coachRecoverySummary(sessionPlan.deprioritized);
+    why.push(recoverySummary);
   }
   if (sessionPlan.missing.length) {
-    missingReasons.push(...sessionPlan.missing.map((muscle) => `Add a primary exercise for ${muscle.label}.`));
-    why.push(`Add a primary exercise for ${sessionPlan.missing.map((muscle) => muscle.label).join(", ")} to unlock better plans.`);
+    missingReasons.push(...sessionPlan.missing.map((muscle) => `I need a primary ${muscle.label} exercise in your library before I can program it safely.`));
+    why.push(`Add primary exercises for ${sessionPlan.missing.map((muscle) => muscle.label).join(", ")}, and I can build you a better plan.`);
   }
   if (sessionPlan.shortfallReason) {
     notes.push(sessionPlan.shortfallReason);
@@ -2960,58 +3703,82 @@ function buildTodayPlan(limitMinutes = selectedCoachTimeframeMinutes()) {
     why.push(...sessionPlan.performanceNotes.slice(0, 2));
   }
   if (protein.bodyWeightLb && proteinAvg && proteinAvg < protein.floor) {
-    notes.push(`Protein is under target: ${fmt(proteinAvg)}g avg vs ${fmt(protein.floor)}g floor.`);
+    notes.push(`Your protein is running low: ${fmt(proteinAvg)}g average against a ${fmt(protein.floor)}g floor. Let's tighten that up so the training has something to build with.`);
   } else if (!protein.bodyWeightLb || !proteinAvg) {
-    notes.push("Log body weight and protein for nutrition-aware coaching.");
+    notes.push("Give me body-weight and protein logs, and I can coach the nutrition side with better context.");
   }
   if (highVolume.length) {
-    notes.push(`${highVolume.map((stat) => stat.label).join(", ")} are above the default growth zone; monitor performance and recovery.`);
+    notes.push(`${highVolume.map((stat) => stat.label).join(", ")} are above the default growth zone. That's allowed, but I want you watching performance and recovery closely.`);
   }
 
   if (sessionPlan.items.length) {
-    return {
+    return attachCoachBriefing({
       mode: restart ? "restart" : "session",
       title: restart ? "Restart session" : "Today's Plan",
       subtitle: sessionPlan.shortfallReason
-        ? `Estimated ${sessionPlan.totalMinutes}/${sessionPlan.limitMinutes} min; limited by library-safe coverage.`
+        ? `I've built ${sessionPlan.totalMinutes}/${sessionPlan.limitMinutes} minutes with the safe exercise coverage currently in your library.`
         : restart
-          ? `Small, useful work built for about ${coachTimeframeLabel(limitMinutes)}.`
+          ? `Let's get useful work done in about ${coachTimeframeLabel(limitMinutes)} without trying to win the whole week today.`
           : belowMinimum.length
-            ? `Best minimum gaps to train next, built for about ${coachTimeframeLabel(limitMinutes)}.`
-            : `Best gaps toward 20 hard sets, built for about ${coachTimeframeLabel(limitMinutes)}.`,
+            ? `I'm attacking the most useful weekly gaps in about ${coachTimeframeLabel(limitMinutes)}.`
+            : `We're building toward the upper growth zone in about ${coachTimeframeLabel(limitMinutes)}.`,
       sessionPlan,
       why,
-      explanation: { selected: selectedReasons, skipped: skippedReasons, missing: missingReasons, notes },
+      explanation: { selected: selectedReasons, skipped: skippedReasons, missing: missingReasons, notes, recoverySummary },
       notes,
       progression
-    };
+    });
   }
 
   if (belowOptimum.length && sessionPlan.missing.length && !sessionPlan.items.length) {
-    return {
+    return attachCoachBriefing({
       mode: "library-gap",
       title: "Add exercise coverage",
       subtitle: belowMinimum.length
-        ? "Coach needs more movement options before it can build a full plan."
-        : "Coach needs more movement options before it can build toward 20 hard sets.",
+        ? "I need more movement options in your library before I can build a complete session."
+        : "Give me more movement options, and I can keep building you toward the upper growth zone.",
       sessionPlan,
       why,
-      explanation: { selected: selectedReasons, skipped: skippedReasons, missing: missingReasons, notes },
+      explanation: { selected: selectedReasons, skipped: skippedReasons, missing: missingReasons, notes, recoverySummary },
       notes,
       progression
-    };
+    });
   }
 
-  return {
+  return attachCoachBriefing({
     mode: progression ? "progression" : "recovery",
     title: progression ? "Progression focus" : "Recovery or maintenance",
-    subtitle: progression ? progression.body : "20-set targets are covered. Progress slowly or recover if joints feel beat up.",
+    subtitle: progression ? progression.body : "You've covered the upper weekly targets. We can progress carefully or let recovery do its job if your joints feel beat up.",
     sessionPlan,
-    why: why.length ? why : ["Weekly 20-set targets are covered, so Coach is not forcing extra volume."],
-    explanation: { selected: selectedReasons, skipped: skippedReasons, missing: missingReasons, notes },
+    why: why.length ? why : ["You've covered the weekly targets, so I'm not forcing junk volume just to make the plan look busy."],
+    explanation: { selected: selectedReasons, skipped: skippedReasons, missing: missingReasons, notes, recoverySummary },
     notes,
     progression
-  };
+  });
+}
+
+function coachBriefingSummary(plan) {
+  const items = plan.sessionPlan?.items || [];
+  const briefing = [];
+  const recoveryMessage = plan.explanation?.recoverySummary || "";
+  if (items.length) {
+    const sets = items.reduce((sum, item) => sum + item.sets, 0);
+    const muscles = [...new Set(items.map((item) => item.muscle.label))];
+    briefing.push(`Here's the play: we're putting ${sets} sets into ${muscles.join(", ")} and landing around ${plan.sessionPlan.totalMinutes}/${plan.sessionPlan.limitMinutes} minutes.`);
+  } else {
+    if (recoveryMessage) briefing.push(recoveryMessage);
+    briefing.push(plan.subtitle);
+  }
+  const targetMessage = coachTargetsMessage(selectedCoachTargetMuscles(), selectedCoachGrowthModes(), selectedCoachGlobalGrowthMode());
+  if (targetMessage) briefing.push(targetMessage);
+  if (recoveryMessage && !briefing.includes(recoveryMessage)) briefing.push(recoveryMessage);
+  else if (plan.sessionPlan?.performanceNotes?.length) briefing.push(plan.sessionPlan.performanceNotes[0]);
+  else if (plan.explanation?.missing?.length) briefing.push(plan.explanation.missing[0]);
+  return briefing.filter(Boolean).slice(0, 3);
+}
+
+function attachCoachBriefing(plan) {
+  return { ...plan, briefing: coachBriefingSummary(plan) };
 }
 
 function actionFromSessionPlan(plan) {
@@ -3021,7 +3788,7 @@ function actionFromSessionPlan(plan) {
       mode: plan.mode,
       sessionPlan: plan.sessionPlan,
       title: plan.title,
-      body: plan.subtitle
+      body: plan.briefing?.[0] || plan.subtitle
     };
   }
   const sets = items.reduce((sum, item) => sum + item.sets, 0);
@@ -3030,7 +3797,7 @@ function actionFromSessionPlan(plan) {
     mode: plan.mode,
     sessionPlan: plan.sessionPlan,
     title: plan.mode === "restart" ? "Restart session is the priority" : "Today's Plan is the priority",
-    body: `${sets} sets across ${muscles}. Estimated ${plan.sessionPlan.totalMinutes}/${plan.sessionPlan.limitMinutes} min.`
+    body: plan.briefing?.[0] || `Here's the play: ${sets} sets across ${muscles}, landing around ${plan.sessionPlan.totalMinutes} minutes.`
   };
 }
 
@@ -3082,6 +3849,10 @@ function latestRollingAverage(points = [], windowSize = 7) {
   return series.length ? series[series.length - 1].value : 0;
 }
 
+function chartRollingAverage(points = [], windowSize = 7) {
+  return rollingAverageSeries(points, windowSize);
+}
+
 function aggregateByDate(entries, valueForEntry) {
   const byDate = new Map();
   for (const entry of entries) {
@@ -3114,20 +3885,67 @@ function chartReadout(point, unit) {
   return `${point.label}: ${fmt(point.value, 1)}${unit}`;
 }
 
+function compactAxisValue(value, unit = "") {
+  const abs = Math.abs(value);
+  if (abs >= 1000000) return `${fmt(value / 1000000, value % 1000000 ? 1 : 0)}m`;
+  if (abs >= 1000) return `${fmt(value / 1000, value % 1000 ? 1 : 0)}k`;
+  const decimals = unit.includes("sets") || abs < 10 && value % 1 ? 1 : 0;
+  return fmt(value, decimals);
+}
+
+function niceAxisTicks(min, max, unit = "") {
+  if (!Number.isFinite(min) || !Number.isFinite(max)) return [];
+  if (min === max) {
+    const pad = Math.max(Math.abs(max) * 0.1, unit.includes("sets") ? 1 : 5);
+    min -= pad;
+    max += pad;
+  }
+  const range = max - min || 1;
+  const rawStep = range / 2;
+  const magnitude = Math.pow(10, Math.floor(Math.log10(Math.max(rawStep, 0.001))));
+  const normalized = rawStep / magnitude;
+  const step = (normalized <= 1 ? 1 : normalized <= 2 ? 2 : normalized <= 5 ? 5 : 10) * magnitude;
+  const axisMin = Math.floor(min / step) * step;
+  const axisMax = Math.ceil(max / step) * step;
+  const mid = axisMin + (axisMax - axisMin) / 2;
+  return [axisMax, mid, axisMin].map((value, index) => ({
+    value,
+    y: [16, 50, 84][index],
+    label: compactAxisValue(value, unit)
+  }));
+}
+
+function chartXAxisTicks(points = []) {
+  const visible = points.filter((point) => !point.hidden);
+  if (!visible.length) return [];
+  if (visible.length === 1) return [{ label: visible[0].label, x: 50 }];
+  const indexes = [...new Set([0, Math.floor((visible.length - 1) / 2), visible.length - 1])];
+  return indexes.map((index) => ({
+    label: visible[index].label,
+    x: 8 + (index / Math.max(visible.length - 1, 1)) * 84
+  }));
+}
+
 function lineChart(points, color = "#35d58c", unit = "", options = {}) {
   if (!points.length) {
     return `<div class="empty">No data yet. Your chart will appear after the first few logs.</div>`;
   }
-  const comparisonPoints = Array.isArray(options.comparisonPoints) ? options.comparisonPoints : [];
+  const hasComparisonOverride = Array.isArray(options.comparisonPoints);
+  const shouldShowAverage = options.showAverage !== false && !hasComparisonOverride;
+  const averagePoints = shouldShowAverage ? chartRollingAverage(points, options.averageWindow || 7) : [];
+  const comparisonPoints = hasComparisonOverride ? options.comparisonPoints : averagePoints;
   const comparisonColor = options.comparisonColor || "rgba(255,255,255,0.68)";
 
   const chartPoints = points.length > 1 ? points : [
     { label: points[0].label, value: points[0].value - 1, hidden: true },
     points[0]
   ];
-  const rangePoints = [...chartPoints, ...comparisonPoints];
-  const min = Math.min(...rangePoints.map((point) => point.value));
-  const max = Math.max(...rangePoints.map((point) => point.value));
+  const rangePoints = [...chartPoints, ...comparisonPoints].filter((point) => Number.isFinite(point.value));
+  const dataMin = Math.min(...rangePoints.map((point) => point.value));
+  const dataMax = Math.max(...rangePoints.map((point) => point.value));
+  const axisTicks = niceAxisTicks(dataMin, dataMax, unit);
+  const min = axisTicks.length ? Math.min(...axisTicks.map((tick) => tick.value)) : dataMin;
+  const max = axisTicks.length ? Math.max(...axisTicks.map((tick) => tick.value)) : dataMax;
   const range = max - min || 1;
   const coords = chartPoints.map((point, index) => {
     const x = 8 + (index / Math.max(chartPoints.length - 1, 1)) * 84;
@@ -3145,6 +3963,7 @@ function lineChart(points, color = "#35d58c", unit = "", options = {}) {
   const visibleCoords = coords.filter((point) => !point.hidden);
   const last = visibleCoords[visibleCoords.length - 1];
   const first = visibleCoords[0];
+  const xTicks = chartXAxisTicks(visibleCoords);
   chartId += 1;
   const gradientId = `area-${color.slice(1)}-${chartId}`;
   const payload = escapeHtml(JSON.stringify(visibleCoords.map((point) => ({
@@ -3157,6 +3976,9 @@ function lineChart(points, color = "#35d58c", unit = "", options = {}) {
   return `
     <div class="chart interactive-chart" data-points="${payload}" data-unit="${escapeHtml(unit)}" tabindex="0" aria-label="Interactive chart. Tap or press to inspect the nearest point.">
       <div class="chart-stage">
+        <div class="chart-y-axis" aria-hidden="true">
+          ${axisTicks.map((tick) => `<span style="top:${tick.y}%">${escapeHtml(tick.label)}</span>`).join("")}
+        </div>
         <svg viewBox="0 0 100 100" preserveAspectRatio="none" role="img" aria-label="Interactive trend chart">
           <defs>
             <linearGradient id="${gradientId}" x1="0" x2="0" y1="0" y2="1">
@@ -3173,6 +3995,9 @@ function lineChart(points, color = "#35d58c", unit = "", options = {}) {
           ${visibleCoords.map((point) => `<circle cx="${point.x}" cy="${point.y}" r="1.7" fill="${color}"></circle>`).join("")}
         </svg>
         <div class="chart-marker" style="left:${last.x}%; top:${last.y}%"></div>
+        <div class="chart-x-axis" aria-hidden="true">
+          ${xTicks.map((tick) => `<span style="left:${tick.x}%">${escapeHtml(tick.label)}</span>`).join("")}
+        </div>
       </div>
       <p class="chart-readout" aria-live="polite">${escapeHtml(chartReadout(last, unit))}</p>
       <p class="muted small">${escapeHtml(first.label)} to ${escapeHtml(last.label)}</p>
@@ -3265,6 +4090,50 @@ function topUnderTargetMuscles(limit = 4) {
     .slice(0, limit);
 }
 
+function coachTodayMessage(kind, data = {}) {
+  if (kind === "baseline") return coachPhrase(kind, "today", [
+    "Give me 2-3 hard sets for a few muscles today. Once you log them, I'll start steering the weekly gaps with real data.",
+    "Right now I'm coaching in the dark. Put 2-3 honest sets on the board for a few muscles and I'll take it from there.",
+    "First mission: establish the baseline. Log a few hard sets and give me something real to coach from."
+  ]);
+  if (kind === "restart") return coachPhrase(kind, data.days, [
+    `It's been ${data.days} days since your last lift. Let's ease back in with 2-3 sets and keep 1-3 good reps in reserve.`,
+    `${data.days} days away means we knock the rust off, not declare war. Start with 2-3 controlled sets and leave 1-3 reps.`,
+    `Welcome back. After ${data.days} days, today's win is sharp work and momentum - not burying yourself.`
+  ]);
+  if (kind === "touches") return coachPhrase(kind, data.muscles, [
+    `${data.muscles} have work in the bank, but they still need a second weekly touch. Split a little work onto another day if recovery is clear.`,
+    `${data.muscles} got one visit this week; I want a second clean touch if recovery gives us the green light.`,
+    `One touch is on the board for ${data.muscles}. A second recovered exposure would round the week out nicely.`
+  ]);
+  if (kind === "high-rir") return coachPhrase(kind, data.count, [
+    `You had ${data.count} recent ${data.count === 1 ? "set" : "sets"} more than 3 reps from failure. Bring the effort closer next time so those sets do more for you.`,
+    `${data.count} recent ${data.count === 1 ? "set was" : "sets were"} cruising a little too comfortably. Tighten the effort so the work earns full credit.`,
+    `I found ${data.count} recent ${data.count === 1 ? "set" : "sets"} with too much left in the tank. Next time, bring them closer to meaningful effort.`
+  ]);
+  if (kind === "protein-low") return coachPhrase(kind, `${data.average}|${data.floor}`, [
+    `Your 7-day protein average is ${data.average}g. At your logged weight, I want at least ${data.floor}g per day so recovery has the materials it needs.`,
+    `${data.average}g average against a ${data.floor}g floor is leaving gains hungry. Let's feed the work you're doing.`,
+    `Training is writing checks that ${data.average}g of protein cannot fully cash. Bring the daily average toward ${data.floor}g.`
+  ]);
+  if (kind === "protein-covered") return coachPhrase(kind, data.average, [
+    `Nice - your 7-day protein average is ${data.average}g. Keep it inside roughly ${data.floor}-${data.upper}g per day.`,
+    `Protein is doing its job at ${data.average}g on average. Stay in the ${data.floor}-${data.upper}g lane.`,
+    `${data.average}g average puts protein where I want it. Keep stacking days inside ${data.floor}-${data.upper}g.`
+  ]);
+  if (kind === "protein-missing") return coachPhrase(kind, "today", [
+    "Log body weight and protein for me. I need both before I can give you a useful daily protein floor.",
+    "I can coach the iron, but nutrition needs receipts. Log body weight and protein so I can set the floor.",
+    "Give me body weight plus protein logs and I'll stop guessing on the recovery side."
+  ]);
+  if (kind === "high-volume") return coachPhrase(kind, data.muscles, [
+    `${data.muscles} are above the default growth zone. That's not automatically a problem, but don't add more unless performance and recovery stay solid.`,
+    `${data.muscles} are living above the usual growth zone. They can stay there only while performance and recovery pay the rent.`,
+    `Volume is running hot for ${data.muscles}. No automatic panic, but no extra sets without solid recovery either.`
+  ]);
+  return "";
+}
+
 function recommendations(todayPlan = null) {
   const recs = [];
   const stats = todayPlan ? coachMuscleSetStats() : muscleSetStats();
@@ -3298,13 +4167,13 @@ function recommendations(todayPlan = null) {
     recs.push({
       tone: "warn",
       title: "Start with a baseline hypertrophy session",
-      body: "Log 2-3 hard sets for a few muscles. The coach will start filling weekly set gaps as soon as it sees data."
+      body: coachTodayMessage("baseline")
     });
   } else if (daysSinceWorkout >= 4) {
     recs.push({
       tone: "warn",
       title: "Ease back into the week",
-      body: `It has been ${daysSinceWorkout} days since your last lift. Use 2-3 sets and keep 1-3 reps in reserve.`
+      body: coachTodayMessage("restart", { days: daysSinceWorkout })
     });
   }
 
@@ -3312,7 +4181,7 @@ function recommendations(todayPlan = null) {
     recs.push({
       tone: "warn",
       title: "Add a second weekly touch",
-      body: `${lowFrequency.map((stat) => stat.label).join(", ")} have work logged but fewer than 2 weekly touches. Split sets across another day if you can.`
+      body: coachTodayMessage("touches", { muscles: lowFrequency.map((stat) => stat.label).join(", ") })
     });
   }
 
@@ -3320,7 +4189,7 @@ function recommendations(todayPlan = null) {
     recs.push({
       tone: "warn",
       title: "Some sets were too far from failure",
-      body: `${highRir.length} recent log${highRir.length === 1 ? "" : "s"} had RIR above 3. Those sets count at half credit for hypertrophy until effort gets closer.`
+      body: coachTodayMessage("high-rir", { count: highRir.length })
     });
   }
 
@@ -3329,20 +4198,20 @@ function recommendations(todayPlan = null) {
       recs.push({
         tone: "hot",
         title: "Protein is below the hypertrophy floor",
-        body: `Your 7-day average is ${fmt(proteinAvg)}g. Based on ${fmt(protein.bodyWeightLb, 1)} lb, aim for at least ${fmt(protein.floor)}g/day.`
+        body: coachTodayMessage("protein-low", { average: fmt(proteinAvg), floor: fmt(protein.floor) })
       });
     } else {
       recs.push({
         tone: "good",
         title: "Protein floor is covered",
-        body: `Your 7-day average is ${fmt(proteinAvg)}g. Useful range for your logged weight is about ${fmt(protein.floor)}-${fmt(protein.upper)}g/day.`
+        body: coachTodayMessage("protein-covered", { average: fmt(proteinAvg), floor: fmt(protein.floor), upper: fmt(protein.upper) })
       });
     }
   } else {
     recs.push({
       tone: "warn",
       title: "Log body weight and protein",
-      body: "The hypertrophy nutrition target needs body weight plus protein logs to calculate your daily floor."
+      body: coachTodayMessage("protein-missing")
     });
   }
 
@@ -3356,7 +4225,7 @@ function recommendations(todayPlan = null) {
     recs.push({
       tone: "warn",
       title: "High volume muscles",
-      body: `${highVolume.map((stat) => stat.label).join(", ")} are above the default growth zone. Monitor performance and recovery before adding more.`
+      body: coachTodayMessage("high-volume", { muscles: highVolume.map((stat) => stat.label).join(", ") })
     });
   }
 
@@ -3733,6 +4602,7 @@ function copiedCoachPlanSnapshot(plan) {
     copiedAt: new Date().toISOString(),
     timeframeMinutes: selectedCoachTimeframeMinutes(),
     globalGrowthMode: selectedCoachGlobalGrowthMode(),
+    targetMuscles: selectedCoachTargetMuscles(),
     growthModes: selectedCoachGrowthModes()
   };
 }
@@ -3767,8 +4637,8 @@ function restoreCopiedCoachPlan() {
   state.copiedCoachPlan = copied;
 }
 
-function simulatedWorkoutFromPlanItem(item, index = 0) {
-  const rows = plannedSetRowsFromPreviousSession(item.exercise, item.sets, item.planTarget);
+function simulatedWorkoutFromPlanItem(item, index = 0, setCount = item.sets) {
+  const rows = plannedSetRowsFromPreviousSession(item.exercise, setCount, item.planTarget);
   return {
     id: `coach-sim-${item.exercise.id || item.exercise.name}-${index}`,
     date: todayISO(),
@@ -3789,25 +4659,63 @@ function simulatedWorkoutFromPlanItem(item, index = 0) {
   };
 }
 
+function copiedPlanCompletion(copiedPlan, workouts = state.workouts) {
+  const copiedDate = copiedPlan?.copiedDate || todayISO();
+  const items = copiedPlan?.sessionPlan?.items || [];
+  const progress = items.map((item) => {
+    const plannedSets = Math.max(0, Number(item.sets) || 0);
+    const completedSets = workouts
+      .filter((workout) => workout.date === copiedDate && sameExerciseIdentity(workout, item.exercise))
+      .reduce((sum, workout) => sum + setRowsFromWorkout(workout).length, 0);
+    return {
+      item,
+      plannedSets,
+      completedSets: Math.min(plannedSets, completedSets),
+      remainingSets: Math.max(0, plannedSets - completedSets)
+    };
+  });
+  const plannedSets = progress.reduce((sum, item) => sum + item.plannedSets, 0);
+  const completedSets = progress.reduce((sum, item) => sum + item.completedSets, 0);
+  const remainingSets = progress.reduce((sum, item) => sum + item.remainingSets, 0);
+  return {
+    copiedDate,
+    progress,
+    plannedSets,
+    completedSets,
+    remainingSets,
+    status: completedSets <= 0 ? "not-started" : remainingSets > 0 ? "partial" : "completed"
+  };
+}
+
 function buildNextCoachPlanPreview(copiedPlan = activeCopiedCoachPlan()) {
   const sourcePlan = copiedPlan || buildTodayPlan(selectedCoachTimeframeMinutes());
-  const simulated = (sourcePlan.sessionPlan?.items || []).map(simulatedWorkoutFromPlanItem);
+  const completion = copiedPlanCompletion(sourcePlan);
+  const simulated = completion.progress
+    .filter((entry) => entry.remainingSets > 0)
+    .map((entry, index) => simulatedWorkoutFromPlanItem(entry.item, index, entry.remainingSets));
   const context = coachPlanningContext([...state.workouts, ...simulated]);
   const restart = false;
-  const targetMuscles = selectedCoachTargetMuscles();
-  const globalGrowthMode = selectedCoachGlobalGrowthMode();
-  const growthModes = selectedCoachGrowthModes(targetMuscles);
-  const sessionPlan = buildSessionPlan(selectedCoachTimeframeMinutes(), { restart, targetMuscles, globalGrowthMode, growthModes, context });
+  const targetMuscles = Array.isArray(sourcePlan.targetMuscles) ? sourcePlan.targetMuscles : selectedCoachTargetMuscles();
+  const globalGrowthMode = sourcePlan.globalGrowthMode || selectedCoachGlobalGrowthMode();
+  const growthModes = sourcePlan.growthModes || selectedCoachGrowthModes(targetMuscles);
+  const timeframeMinutes = sourcePlan.timeframeMinutes || selectedCoachTimeframeMinutes();
+  const sessionPlan = buildSessionPlan(timeframeMinutes, { restart, targetMuscles, globalGrowthMode, growthModes, context });
+  const notice = completion.status === "completed"
+    ? "This preview uses the copied plan you actually completed today. Nothing was simulated twice."
+    : completion.status === "partial"
+      ? `You've completed ${completion.completedSets}/${completion.plannedSets} planned sets. I simulated only the ${completion.remainingSets} remaining sets.`
+      : "This is only the next plan if you complete the current copied plan.";
   return {
-    notice: "This is only the next plan if you complete the current copied plan.",
+    notice,
+    completion,
     plan: {
-      ...buildTodayPlan(selectedCoachTimeframeMinutes()),
+      ...buildTodayPlan(timeframeMinutes),
       mode: sessionPlan.items.length ? "session" : "recovery",
       title: "Next plan preview",
-      subtitle: "Projected from the copied plan being completed.",
+      subtitle: completion.status === "completed" ? "Built from today's submitted work." : "Projected from the remaining copied work being completed.",
       sessionPlan,
       why: sessionPlan.items.map((item) => item.reason),
-      explanation: { selected: sessionPlan.items.map((item) => item.reason), skipped: [], missing: [], notes: ["This preview does not save workouts."] },
+      explanation: { selected: sessionPlan.items.map((item) => item.reason), skipped: [], missing: [], notes: ["This preview does not save workouts."], recoverySummary: "" },
       notes: ["This preview does not save workouts."]
     }
   };
@@ -4005,6 +4913,7 @@ function renderSetRows(draft = draftExerciseFromState()) {
 function refreshDraftRecordTrophies(draftId) {
   const draft = state.workoutDraft.find((item) => item.draftId === draftId);
   if (!draft) return;
+  const before = recordTrophyVisibilityForDraft(draftId);
   const recordStats = exerciseRecordStats(draft.exercise, draft.editingWorkoutId);
   document.querySelectorAll(`[data-record-slot="set"]`).forEach((slot) => {
     if (slot.dataset.draftId !== draftId) return;
@@ -4016,6 +4925,31 @@ function refreshDraftRecordTrophies(draftId) {
     if (slot.dataset.draftId !== draftId) return;
     slot.innerHTML = volumeRecordTrophyMarkupForDraft(draft, recordStats);
   });
+  const cue = recordTrophyAudioTransition(before, recordTrophyVisibilityForDraft(draftId));
+  if (cue) playUiCue(cue);
+}
+
+function recordTrophyVisibilityForDraft(draftId) {
+  const visibility = new Map();
+  document.querySelectorAll(`[data-record-slot]`).forEach((slot) => {
+    if (slot.dataset.draftId !== draftId) return;
+    const key = slot.dataset.recordSlot === "set" ? `set:${slot.dataset.index}` : "volume";
+    const visible = Boolean(slot.querySelector?.(".record-trophy"));
+    visibility.set(key, Boolean(visibility.get(key)) || visible);
+  });
+  return visibility;
+}
+
+function recordTrophyAudioTransition(before = new Map(), after = new Map()) {
+  const keys = new Set([...before.keys(), ...after.keys()]);
+  let lost = false;
+  for (const key of keys) {
+    const wasVisible = Boolean(before.get(key));
+    const isVisible = Boolean(after.get(key));
+    if (!wasVisible && isVisible) return "trophy-earned";
+    if (wasVisible && !isVisible) lost = true;
+  }
+  return lost ? "trophy-lost" : "";
 }
 
 function exerciseInitial(name) {
@@ -4154,13 +5088,16 @@ async function saveDayTemplate() {
   const name = (document.getElementById("template-name")?.value || defaultName).trim();
   if (!name) return;
   const templates = getDayTemplates().filter((template) => template.name !== name);
-  templates.push({
+  const template = {
     id: uid(),
     name,
     createdAt: new Date().toISOString(),
     exercises
-  });
+  };
+  templates.push(template);
   await saveSetting("dayTemplates", templates);
+  await queueSyncChange("template", template.id, template);
+  scheduleRecordSync();
   await render();
   toast("Template saved.");
 }
@@ -4190,6 +5127,8 @@ async function deleteDayTemplate() {
   if (!template) throw new Error("Choose a template first.");
   if (!confirm(`Delete template "${template.name}"?`)) return;
   await saveSetting("dayTemplates", getDayTemplates().filter((item) => item.id !== template.id));
+  await queueSyncChange("template", template.id, null, { deleted: true });
+  scheduleRecordSync();
   state.templateQueue = [];
   await render();
   toast("Template deleted.");
@@ -4677,9 +5616,168 @@ function effectiveHistoryDate(recentDates = recentHistoryDates()) {
   return state.historyDate || recentDates[0] || "";
 }
 
+function recordCabinetItem(id, category, title, record, options = {}) {
+  if (!record) return null;
+  return {
+    id,
+    category,
+    title,
+    record,
+    suffix: options.suffix || "",
+    decimals: options.decimals ?? 1,
+    context: options.context || record.exercise || "",
+    formula: options.formula || "",
+    icon: options.icon || { kind: "load" }
+  };
+}
+
+function recordCabinetItems(records = allTimeRecords()) {
+  const items = [
+    recordCabinetItem("strength-heaviest", "strength", "Heaviest load", records.strength.heaviestWeight, { suffix: " lb", context: records.strength.heaviestWeight?.exercise, formula: "Highest valid load entered for one submitted set.", icon: { kind: "load" } }),
+    recordCabinetItem("strength-reps", "strength", "Most reps in one set", records.strength.mostSetReps, { suffix: " reps", decimals: 0, formula: "Highest rep count in one submitted set.", icon: { kind: "reps" } }),
+    recordCabinetItem("strength-set-volume", "strength", "Highest set volume", records.strength.highestSetVolume, { suffix: " lb", formula: "Weight x reps for one set.", icon: { kind: "volume" } }),
+    recordCabinetItem("strength-e1rm", "strength", "Best estimated 1RM", records.strength.bestEstimated1rm, { suffix: " lb", formula: "Weight x (1 + reps / 30).", icon: { kind: "e1rm" } }),
+    recordCabinetItem("strength-exercise-volume", "strength", "Highest exercise-session volume", records.strength.highestExerciseVolume, { suffix: " lb", formula: "Sum of weight x reps for one exercise entry.", icon: { kind: "sessionVolume" } }),
+    recordCabinetItem("strength-exercise-reps", "strength", "Most exercise-session reps", records.strength.mostExerciseReps, { suffix: " reps", decimals: 0, formula: "Total reps across one submitted exercise entry.", icon: { kind: "reps" } }),
+    recordCabinetItem("strength-day-volume", "strength", "Highest full-workout volume", records.strength.highestDayVolume, { suffix: " lb", formula: "All submitted exercise volume on one date.", icon: { kind: "volume" } }),
+    recordCabinetItem("strength-day-reps", "strength", "Most reps in one workout", records.strength.mostDayReps, { suffix: " reps", decimals: 0, formula: "All submitted reps on one date.", icon: { kind: "reps" } }),
+    recordCabinetItem("strength-day-sets", "strength", "Most sets in one workout", records.strength.mostDaySets, { suffix: " sets", decimals: 0, formula: "All submitted set rows on one date.", icon: { kind: "sets" } }),
+    recordCabinetItem("strength-day-exercises", "strength", "Most exercises in one workout", records.strength.mostDayExercises, { suffix: " lifts", decimals: 0, formula: "Submitted exercise entries on one date.", icon: { kind: "load" } }),
+    recordCabinetItem("weight-heaviest", "body-weight", "Heaviest body weight", records.bodyWeight.heaviest, { suffix: " lb", formula: "Highest submitted body-weight entry.", icon: { kind: "trendUp" } }),
+    recordCabinetItem("weight-lightest", "body-weight", "Lightest body weight", records.bodyWeight.lightest, { suffix: " lb", formula: "Lowest submitted body-weight entry.", icon: { kind: "trendDown" } }),
+    recordCabinetItem("weight-average-high", "body-weight", "Highest rolling weight average", records.bodyWeight.highestAverage, { suffix: " lb", formula: "Average of up to the latest seven valid body-weight logs.", icon: { kind: "average" } }),
+    recordCabinetItem("weight-average-low", "body-weight", "Lowest rolling weight average", records.bodyWeight.lowestAverage, { suffix: " lb", formula: "Average of up to the latest seven valid body-weight logs.", icon: { kind: "average" } }),
+    recordCabinetItem("weight-weekly-gain", "body-weight", "Greatest weekly weight gain", records.bodyWeight.greatestWeeklyGain, { suffix: " lb", formula: "Difference between adjacent Monday-start weekly averages with at least two logs in each week.", icon: { kind: "trendUp" } }),
+    recordCabinetItem("weight-weekly-loss", "body-weight", "Greatest weekly weight loss", records.bodyWeight.greatestWeeklyLoss, { suffix: " lb", formula: "Difference between adjacent Monday-start weekly averages with at least two logs in each week.", icon: { kind: "trendDown" } }),
+    recordCabinetItem("nutrition-calories-high", "nutrition", "Highest calorie day", records.nutrition.highestCalories, { suffix: " cal", decimals: 0, formula: "Highest submitted daily calorie total.", icon: { kind: "calories" } }),
+    recordCabinetItem("nutrition-calories-low", "nutrition", "Lowest logged calorie day", records.nutrition.lowestCalories, { suffix: " cal", decimals: 0, formula: "Lowest non-zero submitted daily calorie total.", icon: { kind: "calories" } }),
+    recordCabinetItem("nutrition-protein-high", "nutrition", "Highest protein day", records.nutrition.highestProtein, { suffix: " g", decimals: 0, formula: "Highest submitted daily protein total.", icon: { kind: "protein" } }),
+    recordCabinetItem("nutrition-protein-low", "nutrition", "Lowest logged protein day", records.nutrition.lowestProtein, { suffix: " g", decimals: 0, formula: "Lowest non-zero submitted daily protein total.", icon: { kind: "protein" } }),
+    recordCabinetItem("nutrition-streak", "nutrition", "Longest nutrition logging streak", records.nutrition.longestLoggingStreak, { suffix: " days", decimals: 0, formula: "Consecutive dates with body weight, calories, or protein submitted.", icon: { kind: "streak" } }),
+    recordCabinetItem("consistency-workout-streak", "consistency", "Longest workout streak", records.consistency.longestWorkoutStreak, { suffix: " days", decimals: 0, formula: "Consecutive dates with at least one submitted workout.", icon: { kind: "streak" } }),
+    recordCabinetItem("consistency-training-days", "consistency", "Most training days in one week", records.consistency.mostTrainingDaysWeek, { suffix: " days", decimals: 0, formula: "Distinct training dates in a local Monday-start week.", icon: { kind: "weekly" } }),
+    recordCabinetItem("consistency-workouts", "consistency", "Most exercise entries in one week", records.consistency.mostWorkoutsWeek, { suffix: " entries", decimals: 0, formula: "Submitted exercise entries in a local Monday-start week.", icon: { kind: "weekly" } }),
+    recordCabinetItem("consistency-sets", "consistency", "Most sets in one week", records.consistency.mostSetsWeek, { suffix: " sets", decimals: 0, formula: "Submitted set rows in a local Monday-start week.", icon: { kind: "sets" } }),
+    recordCabinetItem("consistency-volume", "consistency", "Highest weekly load volume", records.consistency.highestWeeklyVolume, { suffix: " lb", formula: "All submitted weight x reps in a local Monday-start week.", icon: { kind: "volume" } })
+  ];
+  for (const muscle of records.muscles) {
+    const key = normalizeName(muscle.muscle);
+    items.push(
+      recordCabinetItem(`muscle-${key}-sets`, "muscles", `${muscle.muscle}: most credited sets`, muscle.mostCreditedSets, { suffix: " sets", context: muscle.muscle, formula: "Primary hard sets count 1.0; secondary hard sets count 0.5.", icon: { kind: "muscle", muscleId: muscle.muscleId } }),
+      recordCabinetItem(`muscle-${key}-reps`, "muscles", `${muscle.muscle}: most credited reps`, muscle.mostReps, { suffix: " reps", context: muscle.muscle, formula: "Primary reps count 1.0; secondary reps count 0.5.", icon: { kind: "muscle", muscleId: muscle.muscleId } }),
+      recordCabinetItem(`muscle-${key}-volume`, "muscles", `${muscle.muscle}: highest credited volume`, muscle.highestVolume, { suffix: " lb", context: muscle.muscle, formula: "Primary load volume counts 1.0; secondary load volume counts 0.5.", icon: { kind: "muscle", muscleId: muscle.muscleId } })
+    );
+  }
+  for (const exercise of records.exercises) {
+    const key = exercise.exerciseId || normalizeName(exercise.exercise);
+    const primaryMuscle = exercise.primaryMuscles?.[0] || "";
+    const extraMuscles = Math.max(0, (exercise.primaryMuscles?.length || 0) - 1);
+    items.push(
+      recordCabinetItem(`exercise-${key}-weight`, "exercises", `${exercise.exercise}: heaviest load`, exercise.heaviestWeight, { suffix: " lb", context: exercise.exercise, formula: "Highest valid load for this exercise.", icon: { kind: "exercise", muscleId: primaryMuscle, extraMuscles, metricKind: "load" } }),
+      recordCabinetItem(`exercise-${key}-reps`, "exercises", `${exercise.exercise}: most reps`, exercise.mostReps, { suffix: " reps", decimals: 0, context: exercise.exercise, formula: "Highest reps in one set for this exercise.", icon: { kind: "exercise", muscleId: primaryMuscle, extraMuscles, metricKind: "reps" } }),
+      recordCabinetItem(`exercise-${key}-set-volume`, "exercises", `${exercise.exercise}: best set volume`, exercise.highestSetVolume, { suffix: " lb", context: exercise.exercise, formula: "Weight x reps for this exercise's best set.", icon: { kind: "exercise", muscleId: primaryMuscle, extraMuscles, metricKind: "volume" } }),
+      recordCabinetItem(`exercise-${key}-e1rm`, "exercises", `${exercise.exercise}: best estimated 1RM`, exercise.bestEstimated1rm, { suffix: " lb", context: exercise.exercise, formula: "Weight x (1 + reps / 30).", icon: { kind: "exercise", muscleId: primaryMuscle, extraMuscles, metricKind: "e1rm" } }),
+      recordCabinetItem(`exercise-${key}-session-volume`, "exercises", `${exercise.exercise}: best session volume`, exercise.highestSessionVolume, { suffix: " lb", context: exercise.exercise, formula: "Sum of weight x reps for this exercise on one submitted entry.", icon: { kind: "exercise", muscleId: primaryMuscle, extraMuscles, metricKind: "sessionVolume" } })
+    );
+  }
+  return items.filter(Boolean);
+}
+
+const RECORD_CABINET_CATEGORIES = [
+  { id: "strength", label: "Strength", hint: "Loads, reps, sets, and volume" },
+  { id: "body-weight", label: "Body weight", hint: "Logged and rolling-average extremes" },
+  { id: "nutrition", label: "Nutrition", hint: "Calories, protein, and logging" },
+  { id: "muscles", label: "Muscle records", hint: "Credited sets, reps, and volume" },
+  { id: "exercises", label: "Exercise records", hint: "Every historical exercise" },
+  { id: "consistency", label: "Consistency", hint: "Streaks and weekly highs" }
+];
+
+function recordCabinetValue(item) {
+  return `${fmt(item.record.value, item.decimals)}${item.suffix}`;
+}
+
+function recordIconMarkup(item, className = "") {
+  const icon = item?.icon || { kind: "load" };
+  const musclePath = recordMuscleIconPaths[icon.muscleId] || "";
+  const metricPath = recordMetricIconPaths[icon.metricKind || icon.kind] || recordMetricIconPaths.load;
+  const mainPath = ["muscle", "exercise"].includes(icon.kind) && musclePath ? musclePath : metricPath;
+  const metricBadge = icon.kind === "exercise" && musclePath ? `
+    <span class="record-icon-metric-badge"><img src="${escapeHtml(`${metricPath}?v=${APP_VERSION}`)}" alt=""></span>
+  ` : "";
+  const extraMuscles = icon.kind === "exercise" && icon.extraMuscles > 0
+    ? `<span class="record-icon-extra">+${escapeHtml(icon.extraMuscles)}</span>`
+    : "";
+  return `
+    <span class="record-icon-chip ${escapeHtml(className)}" aria-hidden="true">
+      <img class="record-icon-art" src="${escapeHtml(`${mainPath}?v=${APP_VERSION}`)}" alt="">
+      ${metricBadge}
+      ${extraMuscles}
+    </span>
+  `;
+}
+
+function recordCabinetCard(item, className = "") {
+  const previous = Number.isFinite(item.record.previousValue)
+    ? `Previous ${fmt(item.record.previousValue, item.decimals)}${item.suffix}`
+    : "First recorded mark";
+  return `
+    <button class="record-achievement-card ${escapeHtml(className)}" type="button" data-action="history-record-open" data-record-id="${escapeHtml(item.id)}">
+      ${recordIconMarkup(item)}
+      <span class="record-card-copy">
+        <small>${escapeHtml(item.title)}</small>
+        <strong>${escapeHtml(recordCabinetValue(item))}</strong>
+        <span>${escapeHtml([item.context, formatShortDate(item.record.date)].filter(Boolean).join(" - "))}</span>
+        <em>${escapeHtml(previous)}</em>
+      </span>
+    </button>
+  `;
+}
+
+function renderHistoryRecords(records = allTimeRecords()) {
+  const items = recordCabinetItems(records);
+  const recent = [...items].sort((a, b) => String(b.record.date || "").localeCompare(String(a.record.date || ""))).slice(0, 8);
+  const highlightIds = ["strength-heaviest", "strength-e1rm", "strength-day-volume", "weight-heaviest", "weight-lightest", "consistency-workout-streak"];
+  const highlights = highlightIds.map((id) => items.find((item) => item.id === id)).filter(Boolean);
+  return `
+    <section class="records-cabinet" aria-label="Personal records">
+      <div class="records-cabinet-hero">
+        <div>
+          <span class="eyebrow">PERSONAL RECORDS</span>
+          <h2>${items.length} all-time records</h2>
+          <p>Every record is calculated from locked workouts and submitted health logs.</p>
+        </div>
+        ${recordIconMarkup({ icon: { kind: "trendUp" } }, "records-cabinet-icon")}
+      </div>
+      <section class="record-shelf recent-record-shelf">
+        <div class="record-shelf-heading"><div><h3>Recently earned</h3><p>Newest current records</p></div></div>
+        ${recent.length ? `<div class="recent-record-track">${recent.map((item) => recordCabinetCard(item, "recent-record-card")).join("")}</div>` : `<div class="empty">Lock in workouts or health logs to start your cabinet.</div>`}
+      </section>
+      <section class="record-shelf">
+        <div class="record-shelf-heading"><div><h3>All-time highlights</h3><p>Your headline numbers</p></div></div>
+        <div class="record-highlight-grid">${highlights.length ? highlights.map((item) => recordCabinetCard(item, "record-highlight-card")).join("") : `<div class="empty">No all-time highlights yet.</div>`}</div>
+      </section>
+      <div class="record-category-shelves">
+        ${RECORD_CABINET_CATEGORIES.map((category) => {
+          const categoryItems = items.filter((item) => item.category === category.id);
+          return `
+            <section class="record-shelf record-category-shelf">
+              <div class="record-shelf-heading">
+                <div><h3>${escapeHtml(category.label)}</h3><p>${escapeHtml(category.hint)}</p></div>
+                <button class="ghost-mini" type="button" data-action="history-record-category" data-record-category="${escapeHtml(category.id)}">View all</button>
+              </div>
+              <div class="record-shelf-preview">${categoryItems.length ? categoryItems.slice(0, 3).map((item) => recordCabinetCard(item, "record-preview-card")).join("") : `<div class="empty compact-empty">No ${escapeHtml(category.label.toLowerCase())} yet.</div>`}</div>
+            </section>
+          `;
+        }).join("")}
+      </div>
+    </section>
+  `;
+}
+
 function renderHistoryModeSegment() {
   return `
     <div class="segment history-mode-segment" role="tablist" aria-label="History view">
+      <button class="${state.historyMode === "records" ? "is-active" : ""}" type="button" role="tab" aria-selected="${state.historyMode === "records"}" data-action="history-set-mode" data-history-mode="records">Records</button>
       <button class="${state.historyMode === "exercises" ? "is-active" : ""}" type="button" role="tab" aria-selected="${state.historyMode === "exercises"}" data-action="history-set-mode" data-history-mode="exercises">Exercises</button>
       <button class="${state.historyMode === "dates" ? "is-active" : ""}" type="button" role="tab" aria-selected="${state.historyMode === "dates"}" data-action="history-set-mode" data-history-mode="dates">Dates</button>
     </div>
@@ -4761,6 +5859,115 @@ function renderHistoryDatesMode() {
   `;
 }
 
+function recordCabinetItemById(id, records = allTimeRecords()) {
+  return recordCabinetItems(records).find((item) => item.id === id) || null;
+}
+
+function renderRecordEvidence(item) {
+  const record = item.record;
+  const workout = record.workout;
+  const metric = record.metric;
+  const rows = workout ? setRowsFromWorkout(workout) : [];
+  const weeklyWeightChange = Number.isFinite(record.startAverage) && Number.isFinite(record.endAverage);
+  const aggregateWorkouts = Array.isArray(record.workouts)
+    ? record.workouts
+    : Array.isArray(record.sourceWorkouts) ? record.sourceWorkouts.map((source) => ({ workout: source, factor: 1 })) : [];
+  return `
+    <section class="section record-detail-evidence">
+      <div class="record-detail-section-heading"><h3>How this record was earned</h3><span>${escapeHtml(formatShortDate(record.date))}</span></div>
+      <div class="record-calculation"><span>Calculation</span><strong>${escapeHtml(item.formula || "Highest submitted value.")}</strong></div>
+      ${weeklyWeightChange ? `
+        <div class="record-weight-change-evidence">
+          <div><span>Starting weekly average</span><strong>${fmt(record.startAverage, 1)} lb</strong><small>${escapeHtml(formatShortDate(record.startWeek))} to ${escapeHtml(formatShortDate(record.startWeekEnd))} - ${record.startEntries?.length || 0} logs</small></div>
+          <div><span>Ending weekly average</span><strong>${fmt(record.endAverage, 1)} lb</strong><small>${escapeHtml(formatShortDate(record.endWeek))} to ${escapeHtml(formatShortDate(record.endWeekEnd))} - ${record.endEntries?.length || 0} logs</small></div>
+        </div>
+      ` : ""}
+      ${workout ? `
+        <div class="record-source-card">
+          <div><span>Exercise</span><strong>${escapeHtml(workout.exercise || item.context || "Workout")}</strong></div>
+          <div><span>Session volume</span><strong>${fmt(workoutVolume(workout))} lb</strong></div>
+          <div><span>Sets</span><strong>${rows.length}</strong></div>
+        </div>
+        <div class="record-evidence-sets">
+          ${rows.map((row, index) => `
+            <div class="record-evidence-set ${record.index === index ? "is-record-set" : ""}">
+              <span>Set ${index + 1}</span>
+              <strong>${fmt(row.weight, 1)} lb x ${fmt(row.reps)}</strong>
+              <small>${row.rir === null ? "--" : fmt(row.rir, 1)} RIR - ${formatRest(row.restSeconds)} rest</small>
+            </div>
+          `).join("")}
+        </div>
+        <button class="ghost-button full-button" type="button" data-action="history-select-exercise" data-exercise="${escapeHtml(workout.exercise || item.context || "")}">Open exercise history</button>
+      ` : ""}
+      ${metric ? `
+        <div class="record-source-card record-metric-source">
+          <div><span>Body weight</span><strong>${metric.bodyWeight > 0 ? `${fmt(metric.bodyWeight, 1)} lb` : "--"}</strong></div>
+          <div><span>Calories</span><strong>${metric.calories > 0 ? `${fmt(metric.calories)} cal` : "--"}</strong></div>
+          <div><span>Protein</span><strong>${metric.protein > 0 ? `${fmt(metric.protein)} g` : "--"}</strong></div>
+        </div>
+      ` : ""}
+      ${aggregateWorkouts.length ? `
+        <div class="record-contribution-list">
+          ${aggregateWorkouts.map(({ workout: source, factor }) => `
+            <div class="record-contribution-row">
+              <div><strong>${escapeHtml(source.exercise)}</strong><span>${factor === 1 ? "Primary" : "Secondary"} stimulus - ${fmt(factor, 1)}x credit</span></div>
+              <span>${setRowsFromWorkout(source).length} sets - ${fmt(workoutVolume(source) * factor)} lb credited</span>
+            </div>
+          `).join("")}
+        </div>
+      ` : ""}
+      ${Array.isArray(record.exercises) && record.exercises.length ? `
+        <div class="record-source-list">
+          ${record.exercises.map((exercise) => `<span>${escapeHtml(typeof exercise === "string" ? exercise : exercise.exercise)}</span>`).join("")}
+        </div>
+      ` : ""}
+      ${record.startDate ? `<p class="record-date-range">${escapeHtml(formatShortDate(record.startDate))} to ${escapeHtml(formatShortDate(record.endDate || record.date))}</p>` : ""}
+    </section>
+  `;
+}
+
+function renderHistoryRecordDetail(recordId) {
+  const item = recordCabinetItemById(recordId);
+  if (!item) return `<section class="section"><button class="ghost-button" type="button" data-action="history-record-back">Back</button><div class="empty">This record is no longer available.</div></section>`;
+  const previous = Number.isFinite(item.record.previousValue)
+    ? `${fmt(item.record.previousValue, item.decimals)}${item.suffix} on ${formatShortDate(item.record.previousDate)}`
+    : "No earlier record was available.";
+  const difference = Number.isFinite(item.record.previousValue) ? Math.abs(item.record.value - item.record.previousValue) : null;
+  return `
+    <section class="record-detail-screen">
+      <div class="section record-detail-nav"><button class="ghost-button" type="button" data-action="history-record-back">Back to records</button></div>
+      <div class="record-detail-hero">
+        ${recordIconMarkup(item, "record-detail-icon")}
+        <span class="eyebrow">ALL-TIME RECORD</span>
+        <h2>${escapeHtml(item.title)}</h2>
+        <strong>${escapeHtml(recordCabinetValue(item))}</strong>
+        <p>${escapeHtml([item.context, formatShortDate(item.record.date)].filter(Boolean).join(" - "))}</p>
+      </div>
+      <section class="section record-comparison-card">
+        <div><span>Previous record</span><strong>${escapeHtml(previous)}</strong></div>
+        <div><span>Difference</span><strong>${difference === null ? "First mark" : `${fmt(difference, item.decimals)}${escapeHtml(item.suffix)}`}</strong></div>
+      </section>
+      ${renderRecordEvidence(item)}
+    </section>
+  `;
+}
+
+function renderHistoryRecordCategory(categoryId) {
+  const category = RECORD_CABINET_CATEGORIES.find((item) => item.id === categoryId);
+  const items = recordCabinetItems().filter((item) => item.category === categoryId);
+  return `
+    <section class="record-category-screen">
+      <div class="section record-detail-nav"><button class="ghost-button" type="button" data-action="history-record-category-back">Back to cabinet</button></div>
+      <section class="hero record-category-hero">
+        <div><span class="eyebrow">RECORD SHELF</span><h2 class="hero-title">${escapeHtml(category?.label || "Records")}</h2><p class="hero-copy">${escapeHtml(category?.hint || "All-time submitted records")}</p></div>
+      </section>
+      <div class="record-category-full-list">
+        ${items.length ? items.map((item) => recordCabinetCard(item, "record-full-card")).join("") : `<div class="empty">No records in this shelf yet.</div>`}
+      </div>
+    </section>
+  `;
+}
+
 function renderHistoryList() {
   const search = state.historySearch.trim().toLowerCase();
   const exercises = historyExerciseNames().filter((name) => name.toLowerCase().includes(search));
@@ -4776,7 +5983,7 @@ function renderHistoryList() {
       ${renderHistoryModeSegment()}
     </section>
 
-    ${state.historyMode === "dates" ? renderHistoryDatesMode() : renderHistoryExercisesMode(exercises)}
+    ${state.historyMode === "records" ? renderHistoryRecords() : state.historyMode === "dates" ? renderHistoryDatesMode() : renderHistoryExercisesMode(exercises)}
   `;
 }
 
@@ -4853,6 +6060,8 @@ function renderHistoryDetail(exerciseName) {
 }
 
 function renderHistory() {
+  if (state.historyRecordDetail) return renderHistoryRecordDetail(state.historyRecordDetail);
+  if (state.historyRecordCategory) return renderHistoryRecordCategory(state.historyRecordCategory);
   if (state.historyExercise) return renderHistoryDetail(state.historyExercise);
   return renderHistoryList();
 }
@@ -4871,6 +6080,8 @@ function renderTrends() {
   const bodyWeightSeries = seriesFromMetrics("bodyWeight");
   const bodyWeightAverageSeries = rollingAverageSeries(bodyWeightSeries, 7);
   const bodyWeightAverage = latestRollingAverage(bodyWeightSeries, 7);
+  const proteinSeries = seriesFromMetrics("protein");
+  const calorieSeries = seriesFromMetrics("calories");
 
   return `
     <details class="section trend-section collapsible-panel muscle-trends-panel" open>
@@ -4887,12 +6098,12 @@ function renderTrends() {
       </div>
       <div class="grid two">
         <div class="chart-panel">
-          <div class="chart-header"><h3>${escapeHtml(selectedMuscleLabel)} hard sets</h3><span class="muted small">daily credit</span></div>
-          ${lineChart(muscleSetSeries, "#f2d06b", " sets")}
+          <div class="chart-header"><h3>${escapeHtml(selectedMuscleLabel)} hard sets</h3><span class="muted small">daily credit - 7-entry avg</span></div>
+          ${lineChart(muscleSetSeries, "#f2d06b", " sets", { showAverage: true })}
         </div>
         <div class="chart-panel">
-          <div class="chart-header"><h3>${escapeHtml(selectedMuscleLabel)} load volume</h3><span class="muted small">credited tonnage</span></div>
-          ${lineChart(muscleVolumeSeries, "#35d58c", " lb")}
+          <div class="chart-header"><h3>${escapeHtml(selectedMuscleLabel)} load volume</h3><span class="muted small">credited tonnage - 7-entry avg</span></div>
+          ${lineChart(muscleVolumeSeries, "#35d58c", " lb", { showAverage: true })}
         </div>
       </div>
     </details>
@@ -4911,12 +6122,12 @@ function renderTrends() {
       </div>
       <div class="grid two">
         <div class="chart-panel">
-          <div class="chart-header"><h3>${escapeHtml(selectedExercise)} load volume</h3><span class="muted small">sets x reps x load</span></div>
-          ${lineChart(volumeSeries, "#9b8cff", " lb")}
+          <div class="chart-header"><h3>${escapeHtml(selectedExercise)} load volume</h3><span class="muted small">sets x reps x load - 7-entry avg</span></div>
+          ${lineChart(volumeSeries, "#9b8cff", " lb", { showAverage: true })}
         </div>
         <div class="chart-panel">
-          <div class="chart-header"><h3>Estimated 1RM</h3><span class="muted small">best set estimate</span></div>
-          ${lineChart(e1rmSeries, "#ff6b5f", " lb")}
+          <div class="chart-header"><h3>Estimated 1RM</h3><span class="muted small">best set estimate - 7-entry avg</span></div>
+          ${lineChart(e1rmSeries, "#ff6b5f", " lb", { showAverage: true })}
         </div>
       </div>
     </details>
@@ -4936,12 +6147,12 @@ function renderTrends() {
           ${lineChart(bodyWeightSeries, "#f2d06b", " lb", { comparisonPoints: bodyWeightAverageSeries, comparisonColor: "rgba(255,255,255,0.62)" })}
         </div>
         <div class="chart-panel">
-          <div class="chart-header"><h3>Protein</h3><span class="muted small">daily grams</span></div>
-          ${lineChart(seriesFromMetrics("protein"), "#ff6b5f", "g")}
+          <div class="chart-header"><h3>Protein</h3><span class="muted small">daily grams - 7d avg</span></div>
+          ${lineChart(proteinSeries, "#ff6b5f", "g", { showAverage: true })}
         </div>
         <div class="chart-panel">
-          <div class="chart-header"><h3>Calories</h3><span class="muted small">daily intake</span></div>
-          ${lineChart(seriesFromMetrics("calories"), "#35d58c", "")}
+          <div class="chart-header"><h3>Calories</h3><span class="muted small">daily intake - 7d avg</span></div>
+          ${lineChart(calorieSeries, "#35d58c", "", { showAverage: true })}
         </div>
       </div>
     </details>
@@ -5085,6 +6296,7 @@ function renderCoachTargetSelector() {
 
 function renderCoachWhy(plan) {
   const explanation = plan.explanation || {};
+  const briefing = plan.briefing || [];
   const sections = [
     { title: "Selected", items: explanation.selected || plan.why || [] },
     { title: "Waiting", items: explanation.skipped || [] },
@@ -5094,6 +6306,14 @@ function renderCoachWhy(plan) {
   return `
     <details class="section card coach-why-card collapsible-panel" open>
       <summary><span>Why this?</span><small>readiness + gaps</small></summary>
+      ${briefing.length ? `
+        <div class="coach-why-list coach-briefing">
+          <div class="coach-why-section">
+            <h4>Coach's read</h4>
+            ${briefing.map((item) => `<span>${escapeHtml(item)}</span>`).join("")}
+          </div>
+        </div>
+      ` : ""}
       ${sections.length ? `
         <div class="coach-why-list">
           ${sections.map((section) => `
@@ -5122,16 +6342,20 @@ function renderCopiedCoachPlan() {
     `;
   }
   const itemCount = copied.sessionPlan?.items?.length || 0;
+  const completion = copiedPlanCompletion(copied);
   const preview = state.previewNextCoachPlan ? buildNextCoachPlanPreview(copied) : null;
+  const completionLabel = completion.status === "completed"
+    ? "completed"
+    : completion.status === "partial" ? `${completion.completedSets}/${completion.plannedSets} sets done` : "not started";
   return `
     <section class="section card coach-copied-plan-card">
       <div class="chart-header">
         <h3>Copied plan</h3>
-        <span class="muted small">${itemCount} lift${itemCount === 1 ? "" : "s"}</span>
+        <span class="muted small">${itemCount} lift${itemCount === 1 ? "" : "s"} - ${escapeHtml(completionLabel)}</span>
       </div>
       <p class="muted small">${escapeHtml(copied.title || "Coach plan")} copied to Log. Return here to keep context while logging.</p>
       <div class="grid two">
-        <button class="ghost-button" type="button" data-action="preview-next-coach-plan">Preview next plan</button>
+        <button class="ghost-button" type="button" data-action="preview-next-coach-plan">${state.previewNextCoachPlan ? "Hide next plan" : "Preview next plan"}</button>
         <button class="ghost-button" type="button" data-action="clear-copied-coach-plan">Clear copied plan</button>
       </div>
       ${preview ? `
@@ -5281,11 +6505,14 @@ function renderAppChrome() {
 }
 
 function dataSafetySummaryMarkup() {
+  const pending = state.syncQueue.filter((entry) => entry.status === "pending").length;
+  const conflicts = syncConflictCount();
   return `
     <div class="data-safety-grid">
       <span><strong>${escapeHtml(formatDateTime(state.settings.lastBackupAt))}</strong><small>last local backup</small></span>
-      <span><strong>${escapeHtml(formatDateTime(state.settings.lastCloudPushAt))}</strong><small>last cloud push</small></span>
-      <span><strong>${escapeHtml(formatDateTime(state.settings.lastCloudPullAt))}</strong><small>last cloud pull</small></span>
+      <span><strong>${escapeHtml(formatDateTime(state.settings.lastRecordSyncAt))}</strong><small>last cloud sync</small></span>
+      <span><strong>${fmt(pending)}</strong><small>changes queued</small></span>
+      <span><strong>${fmt(conflicts)}</strong><small>sync conflicts</small></span>
       <span><strong>v${escapeHtml(APP_VERSION)}</strong><small>installed shell</small></span>
     </div>
   `;
@@ -5311,6 +6538,26 @@ function supabaseStatus() {
   if (session?.access_token) return `Signed in as ${state.settings.supabaseEmail || "Supabase user"}`;
   if (state.settings.supabaseUrl && state.settings.supabaseAnonKey) return "Configured, not signed in";
   return "Not configured";
+}
+
+function renderRecordSyncConflicts() {
+  const conflicts = state.syncQueue.filter((entry) => entry.status === "conflict");
+  if (!conflicts.length) return "";
+  return `
+    <div class="notice-card sync-conflict-list" role="status">
+      <strong>Sync review needed</strong>
+      <p class="muted micro">The same saved record changed on two devices. Both versions are preserved.</p>
+      ${conflicts.map((entry) => `
+        <div class="sync-conflict-item">
+          <span><strong>${escapeHtml(entry.recordType)}</strong><small>${escapeHtml(entry.recordId)}</small></span>
+          <div class="button-row compact-actions">
+            <button class="ghost-mini" type="button" data-action="resolve-sync-conflict" data-sync-id="${escapeHtml(entry.id)}" data-choice="local">Keep this device</button>
+            <button class="ghost-mini" type="button" data-action="resolve-sync-conflict" data-sync-id="${escapeHtml(entry.id)}" data-choice="cloud">Use cloud</button>
+          </div>
+        </div>
+      `).join("")}
+    </div>
+  `;
 }
 
 function hypertrophySettings() {
@@ -5427,6 +6674,19 @@ async function renderSettings() {
       ${renderDashboardWidgetSelector()}
     `, { id: "today-widgets" })}
 
+    ${renderSettingsPanel("Sound effects", soundEffectsEnabled() ? "On" : "Off", `
+      <label class="checkbox-row sound-enabled-row" for="sound-effects-enabled">
+        <input id="sound-effects-enabled" type="checkbox" data-sound-effects-enabled ${soundEffectsEnabled() ? "checked" : ""}>
+        <span>Play interface sounds</span>
+      </label>
+      <div class="field sound-volume-control">
+        <label for="sound-effects-volume">Volume <strong data-sound-volume-label>${soundEffectsVolumePercent()}%</strong></label>
+        <input id="sound-effects-volume" type="range" min="0" max="100" step="5" value="${soundEffectsVolumePercent()}" data-sound-effects-volume>
+      </div>
+      <button class="ghost-button full-button" type="button" data-action="preview-sound">Preview sound</button>
+      <p class="muted micro">Stored on this device only. Rapid logging controls stay quiet.</p>
+    `, { id: "sound-effects" })}
+
     ${renderSettingsPanel("Data safety", "backup status", `
       <p class="muted small">A quick confidence check before imports, cloud sync, or app updates.</p>
       ${dataSafetySummaryMarkup()}
@@ -5464,6 +6724,9 @@ async function renderSettings() {
 
     ${renderSettingsPanel("Supabase sync", supabaseStatus(), `
       <p class="muted small">Status: ${escapeHtml(supabaseStatus())}</p>
+      <p class="muted small">Record sync: <strong data-record-sync-status>${escapeHtml(syncStatusText())}</strong></p>
+      <p class="muted micro">Completed logs sync automatically. Unsaved strength and nutrition drafts stay on this device.</p>
+      ${renderRecordSyncConflicts()}
       <div class="field">
         <label for="supabaseUrl">Project URL</label>
         <input id="supabaseUrl" value="${escapeHtml(state.settings.supabaseUrl || "")}" placeholder="https://your-project.supabase.co">
@@ -5489,9 +6752,14 @@ async function renderSettings() {
         <button class="ghost-button" type="button" data-action="save-supabase">Save settings</button>
         <button class="ghost-button" type="button" data-action="signup-supabase">Create account</button>
         <button class="primary-button" type="button" data-action="signin-supabase">Sign in</button>
-        <button class="ghost-button" type="button" data-action="push-supabase">Push backup</button>
-        <button class="ghost-button" type="button" data-action="pull-supabase">Pull latest</button>
+        <button class="ghost-button" type="button" data-action="push-supabase-sync">Push to cloud</button>
+        <button class="ghost-button" type="button" data-action="pull-supabase-sync">Pull from cloud</button>
       </div>
+      <details class="inline-disclosure">
+        <summary>Legacy cloud recovery</summary>
+        <p class="muted micro">Review and restore snapshots created by older TrainWise versions.</p>
+        <button class="ghost-button" type="button" data-action="pull-supabase">Review latest legacy backup</button>
+      </details>
     `, { id: "supabase-sync" })}
 
     ${renderSettingsPanel("Danger zone", "destructive", `
@@ -5506,6 +6774,136 @@ function applyStaggerAnimations() {
   animated.forEach((element, index) => {
     element.style.setProperty("--i", String(Math.min(index, 12)));
   });
+}
+
+function prefersReducedMotion() {
+  return Boolean(window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches);
+}
+
+function directCollapseSummary(panel) {
+  return Array.from(panel?.children || []).find((child) => child.tagName?.toLowerCase?.() === "summary") || null;
+}
+
+function ensureCollapseContent(panel) {
+  const summary = directCollapseSummary(panel);
+  if (!summary) return null;
+  let content = Array.from(panel.children).find((child) => child.classList?.contains("collapse-content"));
+  if (!content) {
+    content = document.createElement("div");
+    content.className = "collapse-content";
+    let node = summary.nextSibling;
+    while (node) {
+      const next = node.nextSibling;
+      content.appendChild(node);
+      node = next;
+    }
+    panel.appendChild(content);
+  }
+  let feedbackRing = Array.from(panel.children).find((child) => child.classList?.contains("collapse-feedback-ring"));
+  if (!feedbackRing) {
+    feedbackRing = document.createElement("span");
+    feedbackRing.className = "collapse-feedback-ring";
+    feedbackRing.setAttribute("aria-hidden", "true");
+    panel.appendChild(feedbackRing);
+  }
+  panel.classList.add("collapse-enhanced");
+  return { summary, content, feedbackRing };
+}
+
+function flashCollapseBorder(panel, opening) {
+  if (prefersReducedMotion()) return;
+  const feedbackRing = Array.from(panel.children).find((child) => child.classList?.contains("collapse-feedback-ring"));
+  if (!feedbackRing) return;
+  clearTimeout(feedbackRing._collapseFlashTimer);
+  feedbackRing.classList.remove("collapse-flash-open", "collapse-flash-close");
+  void feedbackRing.offsetWidth;
+  feedbackRing.classList.add(opening ? "collapse-flash-open" : "collapse-flash-close");
+  feedbackRing._collapseFlashTimer = setTimeout(() => {
+    feedbackRing.classList.remove("collapse-flash-open", "collapse-flash-close");
+  }, 420);
+}
+
+function triggerCollapseDataReveal(panel) {
+  if (prefersReducedMotion()) return;
+  const lines = panel.querySelectorAll("svg polyline");
+  const progressBars = panel.querySelectorAll(".progress-bar span");
+  const muscleRows = panel.querySelectorAll(".muscle-card");
+  if (!lines.length && !progressBars.length && !muscleRows.length) return;
+
+  lines.forEach((line) => {
+    try {
+      line.style.setProperty("--collapse-line-length", String(Math.max(1, line.getTotalLength())));
+    } catch {
+      line.style.setProperty("--collapse-line-length", "100");
+    }
+  });
+  muscleRows.forEach((row, index) => row.style.setProperty("--reveal-i", String(Math.min(index, 10))));
+  clearTimeout(panel._collapseRevealTimer);
+  panel.classList.remove("is-data-revealing");
+  void panel.offsetWidth;
+  panel.classList.add("is-data-revealing");
+  panel._collapseRevealTimer = setTimeout(() => panel.classList.remove("is-data-revealing"), COLLAPSE_REVEAL_MS);
+}
+
+function finishCollapseAnimation(panel, content, opening) {
+  if (!opening) panel.open = false;
+  content.style.removeProperty("height");
+  content.style.removeProperty("opacity");
+  content.style.removeProperty("transform");
+  panel.classList.remove("is-collapse-animating");
+  delete panel.dataset.collapseTarget;
+  delete panel._collapseAnimationTimer;
+  if (opening) triggerCollapseDataReveal(panel);
+}
+
+function animateCollapsiblePanel(panel, opening) {
+  const parts = ensureCollapseContent(panel);
+  if (!parts) return;
+  const { content } = parts;
+  clearTimeout(panel._collapseAnimationTimer);
+  panel.dataset.collapseTarget = String(opening);
+  flashCollapseBorder(panel, opening);
+
+  if (prefersReducedMotion()) {
+    panel.open = opening;
+    finishCollapseAnimation(panel, content, opening);
+    return;
+  }
+
+  const currentHeight = panel.open ? content.getBoundingClientRect().height : 0;
+  if (opening && !panel.open) panel.open = true;
+  content.style.height = `${currentHeight}px`;
+  content.style.opacity = currentHeight > 0 ? "1" : "0";
+  content.style.transform = currentHeight > 0 ? "translateY(0)" : "translateY(-8px)";
+  panel.classList.add("is-collapse-animating");
+
+  requestAnimationFrame(() => {
+    content.style.height = opening ? `${content.scrollHeight}px` : "0px";
+    content.style.opacity = opening ? "1" : "0";
+    content.style.transform = opening ? "translateY(0)" : "translateY(-8px)";
+  });
+
+  panel._collapseAnimationTimer = setTimeout(
+    () => finishCollapseAnimation(panel, content, opening),
+    COLLAPSE_ANIMATION_MS
+  );
+}
+
+function initializeCollapsiblePanels(root = els.app) {
+  root.querySelectorAll(COLLAPSIBLE_SELECTOR).forEach((panel) => ensureCollapseContent(panel));
+}
+
+function handleCollapsibleSummaryClick(event) {
+  const summary = event.target.closest?.("summary");
+  if (!summary) return;
+  const panel = summary.parentElement;
+  if (!panel?.matches?.(COLLAPSIBLE_SELECTOR) || summary.parentElement !== panel) return;
+  if (event.button !== undefined && event.button !== 0) return;
+  event.preventDefault();
+  const pendingTarget = panel.dataset.collapseTarget;
+  const opening = pendingTarget ? pendingTarget !== "true" : !panel.open;
+  playUiCue(opening ? "expand" : "collapse");
+  animateCollapsiblePanel(panel, opening);
 }
 
 async function flashSelection(target) {
@@ -5549,9 +6947,82 @@ async function render({ animate = false } = {}) {
   if (token !== renderToken) return;
   els.app.classList.remove("content-exit", "content-enter");
   if (animate) els.app.classList.add("content-enter");
+  initializeCollapsiblePanels();
   applyStaggerAnimations();
   if (typeof requestAnimationFrame === "function") requestAnimationFrame(updateScrollTopButton);
   else updateScrollTopButton();
+}
+
+function validScrollY(value) {
+  const next = Number(value);
+  return Number.isFinite(next) && next >= 0 ? next : 0;
+}
+
+function currentScrollY() {
+  return validScrollY(window.scrollY ?? document.documentElement?.scrollTop ?? document.body?.scrollTop ?? 0);
+}
+
+function pushReturnContext(kind, extra = {}) {
+  const context = {
+    kind,
+    activeTab: state.activeTab,
+    scrollY: currentScrollY(),
+    historyMode: state.historyMode,
+    historyExercise: state.historyExercise,
+    historyRecordCategory: state.historyRecordCategory,
+    historyRecordDetail: state.historyRecordDetail,
+    historyDate: state.historyDate,
+    logHistoryExercise: state.logHistoryExercise,
+    weeklyMuscleDetail: state.weeklyMuscleDetail ? { ...state.weeklyMuscleDetail } : null,
+    selectedExercise: state.selectedExercise,
+    selectedMuscle: state.selectedMuscle,
+    ...extra
+  };
+  const stack = Array.isArray(state.returnStack) ? state.returnStack : [];
+  state.returnStack = [...stack, context].slice(-8);
+  return context;
+}
+
+function popReturnContext(kind) {
+  const stack = Array.isArray(state.returnStack) ? [...state.returnStack] : [];
+  for (let index = stack.length - 1; index >= 0; index -= 1) {
+    if (!kind || stack[index].kind === kind) {
+      const [context] = stack.splice(index, 1);
+      state.returnStack = stack;
+      return context;
+    }
+  }
+  return null;
+}
+
+function clearReturnContexts() {
+  state.returnStack = [];
+}
+
+function restoreReturnViewContext(context) {
+  if (!context) return;
+  if (context.activeTab) state.activeTab = context.activeTab;
+  state.historyMode = context.historyMode || "records";
+  state.historyExercise = context.historyExercise || "";
+  state.historyRecordCategory = context.historyRecordCategory || "";
+  state.historyRecordDetail = context.historyRecordDetail || "";
+  state.historyDate = context.historyDate || "";
+  state.logHistoryExercise = context.logHistoryExercise || "";
+  state.weeklyMuscleDetail = context.weeklyMuscleDetail || null;
+  if (typeof context.selectedExercise === "string") state.selectedExercise = context.selectedExercise;
+  if (typeof context.selectedMuscle === "string") state.selectedMuscle = context.selectedMuscle;
+}
+
+function restoreScrollAfterRender(y) {
+  const top = validScrollY(y);
+  const restore = () => window.scrollTo?.({ top, left: 0, behavior: "auto" });
+  if (typeof requestAnimationFrame === "function") requestAnimationFrame(restore);
+  else setTimeout(restore, 0);
+}
+
+async function renderWithReturnScroll(context, options = { animate: true }) {
+  await render(options);
+  restoreScrollAfterRender(context?.scrollY);
 }
 
 async function saveExercise(form) {
@@ -5578,13 +7049,15 @@ async function saveExercise(form) {
     : [...customExercises, exercise];
 
   await saveSetting("customExercises", nextExercises);
+  await queueSyncChange("exercise", exercise.id, exercise);
+  scheduleRecordSync();
   state.editingExerciseId = null;
   state.exerciseFormDraft = null;
   state.exerciseFormErrors = {};
   state.selectedExercise = exercise.name;
   state.draftTargetMuscle = exercise.primaryMuscles[0] || "chest";
   clearDraftRecoveryScope("exercise");
-  announce(existing ? "Exercise updated." : "Exercise saved.", { tone: "good" });
+  announce(existing ? "Exercise updated." : "Exercise saved.", { tone: "good", sound: "success" });
   await render();
 }
 
@@ -5626,6 +7099,9 @@ async function saveWorkout(form) {
   setUndoAction(hadExisting ? "Undo workout update" : "Undo workout lock-in", undoPayload);
   await dbPutBatch("workouts", entries);
   await Promise.all(staleWorkoutIds.map((id) => dbDelete("workouts", id)));
+  for (const entry of entries) await queueSyncChange("workout", entry.id, entry);
+  for (const id of staleWorkoutIds) await queueSyncChange("workout", id, null, { deleted: true });
+  scheduleRecordSync();
   const first = entries[0];
   state.selectedExercise = first.exercise;
   state.draftDate = first.date;
@@ -5647,6 +7123,7 @@ async function saveWorkout(form) {
   clearDraftRecoveryScope("strength");
   announce(hadExisting ? "Workout updated." : "Workout locked in.", {
     tone: "good",
+    sound: "success",
     detail: "Charts updated. Undo is available if this was accidental.",
     action: "undo-last-action",
     actionLabel: "Undo"
@@ -5662,6 +7139,8 @@ async function saveMetric(form) {
   const duplicateIds = metricDuplicateIdsForDate(date, entry.id);
   await dbPut("metrics", entry);
   await Promise.all(duplicateIds.map((id) => dbDelete("metrics", id)));
+  await queueSyncChange("metric", date, entry);
+  scheduleRecordSync();
   await loadState();
   state.metricDate = date;
   state.metricFormDraft = null;
@@ -6050,6 +7529,40 @@ function recentDebugMetrics(days = 30) {
     .sort((a, b) => b.date.localeCompare(a.date));
 }
 
+function recordsDebugSummary(records = allTimeRecords()) {
+  const compact = (record) => record ? {
+    value: record.value,
+    date: record.date || "",
+    previousValue: record.previousValue ?? null,
+    previousDate: record.previousDate || "",
+    exercise: record.exercise || "",
+    setIndex: Number.isFinite(record.index) ? record.index : null
+  } : null;
+  return {
+    strength: Object.fromEntries(Object.entries(records.strength).map(([key, record]) => [key, compact(record)])),
+    bodyWeight: Object.fromEntries(Object.entries(records.bodyWeight).map(([key, record]) => [key, compact(record)])),
+    nutrition: Object.fromEntries(Object.entries(records.nutrition).map(([key, record]) => [key, compact(record)])),
+    consistency: Object.fromEntries(Object.entries(records.consistency).map(([key, record]) => [key, compact(record)])),
+    muscles: records.muscles.map((item) => ({
+      muscleId: item.muscleId,
+      muscle: item.muscle,
+      mostCreditedSets: compact(item.mostCreditedSets),
+      mostReps: compact(item.mostReps),
+      highestVolume: compact(item.highestVolume)
+    })),
+    exercises: records.exercises.map((item) => ({
+      exercise: item.exercise,
+      exerciseId: item.exerciseId,
+      sessionCount: item.sessionCount,
+      heaviestWeight: compact(item.heaviestWeight),
+      mostReps: compact(item.mostReps),
+      highestSetVolume: compact(item.highestSetVolume),
+      bestEstimated1rm: compact(item.bestEstimated1rm),
+      highestSessionVolume: compact(item.highestSessionVolume)
+    }))
+  };
+}
+
 function buildCoachDebugReport() {
   const planningContext = coachPlanningContext();
   const todayPlan = buildTodayPlan(selectedCoachTimeframeMinutes());
@@ -6095,6 +7608,7 @@ function buildCoachDebugReport() {
       muscleAudit: coachDebugMuscleAudit(planningContext),
       libraryCoverage: coachDebugLibraryCoverage()
     },
+    records: recordsDebugSummary(),
     submitted: {
       workoutCount: state.workouts.filter((entry) => !isSampleEntry(entry)).length,
       recentWorkouts: recentDebugWorkouts()
@@ -6253,6 +7767,9 @@ async function importPayload(payload) {
   await saveSetting("lastBackupAt", normalized.settings.lastBackupAt);
   await saveSetting("lastCloudPushAt", normalized.settings.lastCloudPushAt);
   await saveSetting("lastCloudPullAt", normalized.settings.lastCloudPullAt);
+  await saveSetting("syncRecordMeta", {});
+  await saveSetting("syncCursor", "");
+  await saveSetting("syncBootstrapVersion", 0);
   await loadState();
   await render();
 }
@@ -6283,6 +7800,7 @@ async function confirmPendingImport() {
   await importPayload({ normalized: pending.summary.normalized });
   if (pending.sourceType === "cloud") await saveSetting("lastCloudPullAt", new Date().toISOString());
   state.pendingImport = null;
+  scheduleRecordSync();
   announce("Backup restored.", {
     tone: "good",
     detail: "Previous local data can be restored with Undo.",
@@ -6298,15 +7816,20 @@ async function undoLastAction() {
   const { payload } = undo;
   if (payload.type === "delete-workout" && payload.entry) {
     await dbPut("workouts", payload.entry);
+    await queueSyncChange("workout", payload.entry.id, payload.entry);
   } else if (payload.type === "save-workout") {
     const restoredEntries = [...(payload.previousEntries || []), ...(payload.staleEntries || [])];
     await Promise.all((payload.savedEntryIds || []).map((id) => dbDelete("workouts", id)));
     await dbPutBatch("workouts", restoredEntries);
+    for (const id of payload.savedEntryIds || []) await queueSyncChange("workout", id, null, { deleted: true });
+    for (const entry of restoredEntries) await queueSyncChange("workout", entry.id, entry);
     clearWorkoutDraft(payload.date || todayISO());
   } else if (payload.type === "delete-metrics" && Array.isArray(payload.entries)) {
     for (const entry of payload.entries) await dbPut("metrics", entry);
+    for (const entry of payload.entries) await queueSyncChange("metric", entry.date, entry);
   } else if (payload.type === "custom-exercises" && Array.isArray(payload.previous)) {
     await saveSetting("customExercises", payload.previous);
+    await queueAllLocalSyncRecords();
   } else if (payload.type === "clear-all") {
     await Promise.all(["workouts", "metrics"].map((store) => dbClear(store)));
     for (const entry of payload.workouts || []) await dbPut("workouts", entry);
@@ -6320,6 +7843,7 @@ async function undoLastAction() {
   }
   clearUndoAction();
   await loadState();
+  scheduleRecordSync();
   showBanner("Undo complete.", { tone: "good" });
   await render();
 }
@@ -6407,6 +7931,357 @@ async function supabaseAuth(mode) {
   });
   announce("Signed in to Supabase.", { tone: "good" });
   await render();
+  scheduleRecordSync({ immediate: true });
+}
+
+function recordSyncConfigured() {
+  return Boolean(state.settings.supabaseUrl && state.settings.supabaseAnonKey && state.settings.supabaseSession?.access_token);
+}
+
+function syncRecordMetaMap() {
+  return state.settings.syncRecordMeta && typeof state.settings.syncRecordMeta === "object"
+    ? state.settings.syncRecordMeta
+    : {};
+}
+
+function syncRecordMeta(recordType, recordId) {
+  return syncRecordMetaMap()[syncRecordKey(recordType, recordId)] || {};
+}
+
+function canonicalSyncValue(value) {
+  if (Array.isArray(value)) return value.map(canonicalSyncValue);
+  if (!value || typeof value !== "object") return value;
+  return Object.keys(value).sort().reduce((result, key) => {
+    result[key] = canonicalSyncValue(value[key]);
+    return result;
+  }, {});
+}
+
+function syncPayloadFingerprint(payload, deleted = false) {
+  return deleted ? "deleted" : JSON.stringify(canonicalSyncValue(payload ?? null));
+}
+
+async function saveSyncRecordMeta(recordType, recordId, revision, payload, deleted = false) {
+  const key = syncRecordKey(recordType, recordId);
+  const next = {
+    ...syncRecordMetaMap(),
+    [key]: {
+      revision: Math.max(0, Number(revision) || 0),
+      fingerprint: syncPayloadFingerprint(payload, deleted)
+    }
+  };
+  state.settings.syncRecordMeta = next;
+  await dbPut("settings", { key: "syncRecordMeta", value: next });
+}
+
+async function ensureSyncDeviceId() {
+  if (state.settings.syncDeviceId) return state.settings.syncDeviceId;
+  const deviceId = uid();
+  state.settings.syncDeviceId = deviceId;
+  await dbPut("settings", { key: "syncDeviceId", value: deviceId });
+  return deviceId;
+}
+
+function normalizeRemoteSyncRecord(record = {}) {
+  return {
+    recordType: record.record_type ?? record.recordType,
+    recordId: String(record.record_id ?? record.recordId ?? ""),
+    payload: clonePlain(record.payload),
+    revision: Math.max(0, Number(record.revision) || 0),
+    updatedAt: record.updated_at ?? record.updatedAt ?? "",
+    deletedAt: record.deleted_at ?? record.deletedAt ?? null,
+    sourceDeviceId: record.source_device_id ?? record.sourceDeviceId ?? ""
+  };
+}
+
+async function persistSyncQueueEntry(entry) {
+  const normalized = { ...entry, id: syncRecordKey(entry.recordType, entry.recordId) };
+  await dbPut("syncQueue", normalized);
+  state.syncQueue = [...state.syncQueue.filter((item) => item.id !== normalized.id), normalized];
+  return normalized;
+}
+
+async function removeSyncQueueEntry(id) {
+  await dbDelete("syncQueue", id);
+  state.syncQueue = state.syncQueue.filter((entry) => entry.id !== id);
+}
+
+function shouldQueueRecordSync() {
+  return Boolean(state.settings.supabaseUrl || Number(state.settings.syncBootstrapVersion) >= SYNC_BOOTSTRAP_VERSION);
+}
+
+async function queueSyncChange(recordType, recordId, payload, { deleted = false, force = false } = {}) {
+  if (!recordId || (!force && !shouldQueueRecordSync())) return null;
+  const id = syncRecordKey(recordType, recordId);
+  const existing = state.syncQueue.find((entry) => entry.id === id);
+  const meta = syncRecordMeta(recordType, recordId);
+  return persistSyncQueueEntry({
+    id,
+    recordType,
+    recordId: String(recordId),
+    payload: deleted ? null : clonePlain(payload),
+    deleted,
+    baseRevision: existing?.baseRevision ?? Math.max(0, Number(meta.revision) || 0),
+    status: existing?.status === "conflict" ? "conflict" : "pending",
+    remoteRecord: existing?.remoteRecord || null,
+    createdAt: existing?.createdAt || new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  });
+}
+
+async function queueAllLocalSyncRecords({ force = false } = {}) {
+  for (const record of buildLocalSyncRecords()) {
+    const meta = syncRecordMeta(record.recordType, record.recordId);
+    if (force || meta.fingerprint !== syncPayloadFingerprint(record.payload)) {
+      await queueSyncChange(record.recordType, record.recordId, record.payload, { force: true });
+    }
+  }
+}
+
+async function applyRemoteSyncRecord(remoteInput) {
+  const remote = normalizeRemoteSyncRecord(remoteInput);
+  if (!remote.recordType || !remote.recordId) return;
+  const deleted = Boolean(remote.deletedAt);
+
+  if (remote.recordType === "workout") {
+    if (deleted) await dbDelete("workouts", remote.recordId);
+    else await dbPut("workouts", { ...remote.payload, id: remote.recordId });
+  } else if (remote.recordType === "metric") {
+    const duplicateIds = state.metrics.filter((entry) => entry.date === remote.recordId).map((entry) => entry.id).filter(Boolean);
+    await Promise.all(duplicateIds.map((id) => dbDelete("metrics", id)));
+    if (!deleted) {
+      const entry = { ...remote.payload, date: remote.recordId, id: remote.payload?.id || `metric-${remote.recordId}` };
+      await dbPut("metrics", entry);
+    }
+  } else if (remote.recordType === "exercise") {
+    const current = getCustomExercises({ includeArchived: true });
+    const next = deleted
+      ? current.filter((entry) => entry.id !== remote.recordId)
+      : [...current.filter((entry) => entry.id !== remote.recordId), { ...remote.payload, id: remote.recordId }];
+    await saveSetting("customExercises", next);
+  } else if (remote.recordType === "template") {
+    const current = getDayTemplates();
+    const next = deleted
+      ? current.filter((entry) => entry.id !== remote.recordId)
+      : [...current.filter((entry) => entry.id !== remote.recordId), { ...remote.payload, id: remote.recordId }];
+    await saveSetting("dayTemplates", next);
+  } else if (remote.recordType === "preference" && SYNC_SAFE_PREFERENCES.includes(remote.recordId) && !deleted) {
+    await saveSetting(remote.recordId, clonePlain(remote.payload?.value));
+  }
+
+  await saveSyncRecordMeta(remote.recordType, remote.recordId, remote.revision, remote.payload, deleted);
+}
+
+async function fetchRemoteSyncRecords(config, { full = false } = {}) {
+  const select = "record_type,record_id,payload,revision,updated_at,deleted_at,source_device_id";
+  const cursor = full ? "" : String(state.settings.syncCursor || "");
+  const filter = cursor ? `&updated_at=gte.${encodeURIComponent(cursor)}` : "";
+  const response = await fetch(`${config.url}/rest/v1/fitness_sync_records?select=${select}${filter}&order=updated_at.asc`, {
+    headers: {
+      apikey: config.key,
+      Authorization: `Bearer ${config.session.access_token}`
+    }
+  });
+  const json = await response.json();
+  if (!response.ok) throw new Error(json.message || "Could not pull synchronized records.");
+  return Array.isArray(json) ? json.map(normalizeRemoteSyncRecord) : [];
+}
+
+async function updateSyncCursor(records = []) {
+  const newest = records.map((record) => record.updatedAt || "").filter(Boolean).sort().at(-1);
+  if (!newest || newest <= String(state.settings.syncCursor || "")) return;
+  state.settings.syncCursor = newest;
+  await dbPut("settings", { key: "syncCursor", value: newest });
+}
+
+async function pullRecordSync(config, { full = false } = {}) {
+  const remoteRecords = await fetchRemoteSyncRecords(config, { full });
+  for (const remote of remoteRecords) {
+    const id = syncRecordKey(remote.recordType, remote.recordId);
+    const pending = state.syncQueue.find((entry) => entry.id === id);
+    if (pending && remote.revision !== Number(pending.baseRevision || 0)) {
+      await persistSyncQueueEntry(syncConflictFromRemote(pending, remote));
+      continue;
+    }
+    if (!pending) await applyRemoteSyncRecord(remote);
+  }
+  await updateSyncCursor(remoteRecords);
+  return remoteRecords;
+}
+
+async function bootstrapRecordSync(config) {
+  if (Number(state.settings.syncBootstrapVersion) >= SYNC_BOOTSTRAP_VERSION) return;
+  const remoteRecords = await fetchRemoteSyncRecords(config, { full: true });
+  const remoteByKey = new Map(remoteRecords.map((record) => [syncRecordKey(record.recordType, record.recordId), record]));
+  const localRecords = buildLocalSyncRecords();
+  const localByKey = new Map(localRecords.map((record) => [syncRecordKey(record.recordType, record.recordId), record]));
+
+  for (const remote of remoteRecords) {
+    const id = syncRecordKey(remote.recordType, remote.recordId);
+    const local = localByKey.get(id);
+    if (!local) {
+      await applyRemoteSyncRecord(remote);
+    } else if (syncPayloadFingerprint(local.payload) === syncPayloadFingerprint(remote.payload, Boolean(remote.deletedAt))) {
+      await saveSyncRecordMeta(remote.recordType, remote.recordId, remote.revision, remote.payload, Boolean(remote.deletedAt));
+    } else {
+      const pending = await queueSyncChange(local.recordType, local.recordId, local.payload, { force: true });
+      await persistSyncQueueEntry(syncConflictFromRemote(pending, remote));
+    }
+  }
+
+  for (const local of localRecords) {
+    if (!remoteByKey.has(syncRecordKey(local.recordType, local.recordId))) {
+      await queueSyncChange(local.recordType, local.recordId, local.payload, { force: true });
+    }
+  }
+
+  state.settings.syncBootstrapVersion = SYNC_BOOTSTRAP_VERSION;
+  await dbPut("settings", { key: "syncBootstrapVersion", value: SYNC_BOOTSTRAP_VERSION });
+  await updateSyncCursor(remoteRecords);
+}
+
+async function applyQueuedSyncChange(config, entry, deviceId) {
+  const response = await fetch(`${config.url}/rest/v1/rpc/apply_fitness_sync_change`, {
+    method: "POST",
+    headers: {
+      apikey: config.key,
+      Authorization: `Bearer ${config.session.access_token}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      p_record_type: entry.recordType,
+      p_record_id: entry.recordId,
+      p_payload: entry.deleted ? null : entry.payload,
+      p_deleted: Boolean(entry.deleted),
+      p_base_revision: Math.max(0, Number(entry.baseRevision) || 0),
+      p_source_device_id: deviceId
+    })
+  });
+  const json = await response.json();
+  if (!response.ok) throw new Error(json.message || "Could not push synchronized record.");
+  return json;
+}
+
+async function flushRecordSyncQueue(config) {
+  const deviceId = await ensureSyncDeviceId();
+  const pending = state.syncQueue.filter((entry) => entry.status === "pending");
+  for (const entry of pending) {
+    const result = await applyQueuedSyncChange(config, entry, deviceId);
+    const remote = result?.record ? normalizeRemoteSyncRecord(result.record) : null;
+    if (result?.status === "conflict") {
+      await persistSyncQueueEntry(syncConflictFromRemote(entry, remote));
+      continue;
+    }
+    if (!remote) throw new Error("Cloud sync returned no saved record.");
+    await saveSyncRecordMeta(entry.recordType, entry.recordId, remote.revision, entry.payload, entry.deleted);
+    await updateSyncCursor([remote]);
+    await removeSyncQueueEntry(entry.id);
+  }
+}
+
+function syncConflictCount() {
+  return state.syncQueue.filter((entry) => entry.status === "conflict").length;
+}
+
+function syncStatusText() {
+  if (!recordSyncConfigured()) return "Sign in to sync";
+  if (state.syncStatus === "syncing") return "Syncing";
+  if (syncConflictCount()) return `${syncConflictCount()} conflict${syncConflictCount() === 1 ? "" : "s"} need review`;
+  if (state.syncStatus === "offline") return "Offline - changes queued";
+  if (state.syncStatus === "error") return state.syncMessage || "Sync failed";
+  if (state.syncQueue.some((entry) => entry.status === "pending")) return `${state.syncQueue.filter((entry) => entry.status === "pending").length} change${state.syncQueue.filter((entry) => entry.status === "pending").length === 1 ? "" : "s"} queued`;
+  return "Synced";
+}
+
+function syncSyncStatusDom() {
+  const status = document.querySelector?.("[data-record-sync-status]");
+  if (status) status.textContent = syncStatusText();
+}
+
+async function performRecordSync({ pull = true, push = true, reconcile = false, notify = false } = {}) {
+  if (recordSyncPromise) return recordSyncPromise;
+  recordSyncPromise = (async () => {
+    if (!recordSyncConfigured()) {
+      state.syncStatus = "idle";
+      if (notify) throw new Error("Sign in to Supabase first.");
+      return false;
+    }
+    if (typeof navigator !== "undefined" && navigator.onLine === false) {
+      state.syncStatus = "offline";
+      syncSyncStatusDom();
+      return false;
+    }
+    state.syncStatus = "syncing";
+    state.syncMessage = "";
+    syncSyncStatusDom();
+    try {
+      const config = await supabaseConfigWithFreshSession();
+      await ensureSyncDeviceId();
+      await bootstrapRecordSync(config);
+      if (pull) await pullRecordSync(config);
+      if (reconcile) await queueAllLocalSyncRecords();
+      if (push) await flushRecordSyncQueue(config);
+      await loadState();
+      state.syncStatus = syncConflictCount() ? "conflict" : "synced";
+      const syncedAt = new Date().toISOString();
+      state.settings.lastRecordSyncAt = syncedAt;
+      await dbPut("settings", { key: "lastRecordSyncAt", value: syncedAt });
+      if (!notify && state.activeTab !== "log") await render();
+      if (notify) announce(syncConflictCount() ? "Sync needs review." : "Cloud sync complete.", { tone: syncConflictCount() ? "warn" : "good" });
+      return true;
+    } catch (error) {
+      state.syncStatus = "error";
+      state.syncMessage = error.message || "Sync failed";
+      if (notify) throw error;
+      return false;
+    } finally {
+      recordSyncPromise = null;
+      syncSyncStatusDom();
+    }
+  })();
+  return recordSyncPromise;
+}
+
+function scheduleRecordSync({ immediate = false } = {}) {
+  if (recordSyncTimer) clearTimeout(recordSyncTimer);
+  recordSyncTimer = setTimeout(() => {
+    recordSyncTimer = null;
+    performRecordSync().catch(() => {});
+  }, immediate ? 0 : 250);
+}
+
+function startRecordSyncLifecycle() {
+  if (recordSyncLifecycleStarted) return;
+  recordSyncLifecycleStarted = true;
+  window.addEventListener?.("online", () => scheduleRecordSync({ immediate: true }));
+  document.addEventListener?.("visibilitychange", () => {
+    if (!document.hidden) scheduleRecordSync({ immediate: true });
+  });
+  window.setInterval?.(() => {
+    if (!document.hidden && recordSyncConfigured()) scheduleRecordSync({ immediate: true });
+  }, SYNC_POLL_MS);
+  if (recordSyncConfigured()) scheduleRecordSync({ immediate: true });
+}
+
+async function resolveRecordSyncConflict(id, choice) {
+  const entry = state.syncQueue.find((item) => item.id === id && item.status === "conflict");
+  if (!entry) throw new Error("Sync conflict is no longer available.");
+  const remote = entry.remoteRecord ? normalizeRemoteSyncRecord(entry.remoteRecord) : null;
+  if (choice === "cloud") {
+    if (remote) await applyRemoteSyncRecord(remote);
+    await removeSyncQueueEntry(entry.id);
+    await loadState();
+    return;
+  }
+  const next = {
+    ...entry,
+    baseRevision: remote?.revision || 0,
+    status: "pending",
+    remoteRecord: null,
+    updatedAt: new Date().toISOString()
+  };
+  await persistSyncQueueEntry(next);
+  await performRecordSync({ pull: false, push: true, notify: true });
 }
 
 async function pushSupabaseBackup() {
@@ -6705,6 +8580,10 @@ async function handleAction(action, target) {
       state.exerciseFormErrors = {};
       await render({ animate: true });
     },
+    async "preview-sound"() {
+      const played = playUiCue("success", { force: true });
+      toast(played ? "Sound preview played." : "Audio is unavailable in this browser.", { duration: 2000 });
+    },
     async "refresh-app-shell"() { await refreshAppShell(); },
     async "confirm-import"() { await confirmPendingImport(); },
     async "cancel-import"() {
@@ -6771,36 +8650,97 @@ async function handleAction(action, target) {
     },
     async "history-select-exercise"() {
       await flashSelection(target);
+      pushReturnContext("history-exercise-detail", { sourceAction: "history-select-exercise" });
       state.historyExercise = target.dataset.exercise || "";
+      state.historyRecordDetail = "";
+      state.historyRecordCategory = "";
       state.historyMode = "exercises";
       await render({ animate: true });
     },
     async "history-back"() {
+      const context = popReturnContext("history-exercise-detail");
+      if (context) {
+        restoreReturnViewContext(context);
+        await renderWithReturnScroll(context);
+        return;
+      }
       state.historyExercise = "";
-      state.historyMode = "exercises";
+      state.historyMode = "records";
       await render({ animate: true });
     },
     async "history-set-mode"() {
-      state.historyMode = target.dataset.historyMode === "dates" ? "dates" : "exercises";
+      state.historyMode = ["records", "dates"].includes(target.dataset.historyMode) ? target.dataset.historyMode : "exercises";
+      state.historyRecordCategory = "";
+      state.historyRecordDetail = "";
+      await render({ animate: true });
+    },
+    async "history-record-category"() {
+      const category = target.dataset.recordCategory || "";
+      if (!RECORD_CABINET_CATEGORIES.some((item) => item.id === category)) return;
+      pushReturnContext("history-record-category", { sourceAction: "history-record-category" });
+      state.historyRecordCategory = category;
+      state.historyRecordDetail = "";
+      await render({ animate: true });
+    },
+    async "history-record-category-back"() {
+      const context = popReturnContext("history-record-category");
+      if (context) {
+        restoreReturnViewContext(context);
+        await renderWithReturnScroll(context);
+        return;
+      }
+      state.historyRecordCategory = "";
+      state.historyRecordDetail = "";
+      await render({ animate: true });
+    },
+    async "history-record-open"() {
+      const recordId = target.dataset.recordId || "";
+      if (!recordCabinetItemById(recordId)) return;
+      pushReturnContext("history-record-detail", { sourceAction: "history-record-open", recordId });
+      state.historyRecordDetail = recordId;
+      await render({ animate: true });
+    },
+    async "history-record-back"() {
+      const context = popReturnContext("history-record-detail");
+      if (context) {
+        restoreReturnViewContext(context);
+        await renderWithReturnScroll(context);
+        return;
+      }
+      state.historyRecordDetail = "";
       await render({ animate: true });
     },
     async "open-weekly-muscle-detail"() {
       const muscleId = target.dataset.muscle || "";
       if (!muscleGroups.some((muscle) => muscle.id === muscleId)) return;
+      pushReturnContext("weekly-muscle-detail", { sourceAction: "open-weekly-muscle-detail", muscleId });
       state.weeklyMuscleDetail = { muscleId, returnTab: state.activeTab };
       await render({ animate: true });
     },
     async "close-weekly-muscle-detail"() {
+      const context = popReturnContext("weekly-muscle-detail");
+      if (context) {
+        restoreReturnViewContext(context);
+        await renderWithReturnScroll(context);
+        return;
+      }
       state.weeklyMuscleDetail = null;
       await render({ animate: true });
     },
     async "history-date-chip"() {
       await flashSelection(target);
+      pushReturnContext("history-date-filter", { sourceAction: "history-date-chip" });
       state.historyMode = "dates";
       state.historyDate = target.dataset.historyDateValue || "";
       await render({ animate: true });
     },
     async "clear-history-date"() {
+      const context = popReturnContext("history-date-filter");
+      if (context) {
+        restoreReturnViewContext(context);
+        await renderWithReturnScroll(context);
+        return;
+      }
       state.historyDate = "";
       await render({ animate: true });
     },
@@ -6850,12 +8790,12 @@ async function handleAction(action, target) {
     },
     async "copy-coach-plan"() {
       copyCoachPlanToLog(buildTodayPlan(selectedCoachTimeframeMinutes()));
-      announce("Coach plan copied to Log.", { tone: "good", detail: "Exercises and planned sets are ready as an unsaved draft." });
+      announce("Coach plan copied to Log.", { tone: "good", sound: "success", detail: "Exercises and planned sets are ready as an unsaved draft." });
       await render({ animate: true });
     },
     async "export-coach-debug"() { await downloadCoachDebugReport(); },
     async "preview-next-coach-plan"() {
-      state.previewNextCoachPlan = true;
+      state.previewNextCoachPlan = !state.previewNextCoachPlan;
       await render();
     },
     async "clear-copied-coach-plan"() {
@@ -6908,11 +8848,18 @@ async function handleAction(action, target) {
     async "open-exercise-history"() {
       readDraftFromForm();
       await flashSelection(target);
+      pushReturnContext("log-exercise-history", { sourceAction: "open-exercise-history" });
       state.logHistoryExercise = target.dataset.exercise;
       state.openExerciseMenu = null;
       await render({ animate: true });
     },
     async "close-log-history"() {
+      const context = popReturnContext("log-exercise-history");
+      if (context) {
+        restoreReturnViewContext(context);
+        await renderWithReturnScroll(context);
+        return;
+      }
       state.logHistoryExercise = "";
       await render({ animate: true });
     },
@@ -6970,14 +8917,17 @@ async function handleAction(action, target) {
         if (!confirm(`Delete "${exercise.name}" from your exercise database?`)) return;
         setUndoAction("Undo exercise change", { type: "custom-exercises", previous: exercises });
         await saveSetting("customExercises", exercises.filter((item) => item.id !== exercise.id));
-        announce("Exercise deleted.", { tone: "warn", action: "undo-last-action", actionLabel: "Undo" });
+        await queueSyncChange("exercise", exercise.id, null, { deleted: true });
+        announce("Exercise deleted.", { tone: "warn", sound: "warning", action: "undo-last-action", actionLabel: "Undo" });
       } else {
         if (!confirm(`Archive "${exercise.name}"? Existing logs stay intact.`)) return;
         setUndoAction("Undo exercise change", { type: "custom-exercises", previous: exercises });
         const archived = { ...exercise, archivedAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
         await saveSetting("customExercises", exercises.map((item) => item.id === exercise.id ? archived : item));
-        announce("Exercise archived.", { tone: "warn", action: "undo-last-action", actionLabel: "Undo" });
+        await queueSyncChange("exercise", archived.id, archived);
+        announce("Exercise archived.", { tone: "warn", sound: "warning", action: "undo-last-action", actionLabel: "Undo" });
       }
+      scheduleRecordSync();
       if (state.editingExerciseId === exercise.id) state.editingExerciseId = null;
       state.openExerciseActionMenu = null;
       await render();
@@ -6990,6 +8940,8 @@ async function handleAction(action, target) {
       const restored = { ...exercise, updatedAt: new Date().toISOString() };
       delete restored.archivedAt;
       await saveSetting("customExercises", exercises.map((item) => item.id === exercise.id ? restored : item));
+      await queueSyncChange("exercise", restored.id, restored);
+      scheduleRecordSync();
       state.openExerciseActionMenu = null;
       toast("Exercise restored.", { duration: 2000 });
       await render();
@@ -7002,9 +8954,11 @@ async function handleAction(action, target) {
       if (!confirm(`Permanently delete "${exercise.name}" from your exercise database?`)) return;
       setUndoAction("Undo exercise delete", { type: "custom-exercises", previous: exercises });
       await saveSetting("customExercises", exercises.filter((item) => item.id !== exercise.id));
+      await queueSyncChange("exercise", exercise.id, null, { deleted: true });
+      scheduleRecordSync();
       if (state.editingExerciseId === exercise.id) state.editingExerciseId = null;
       state.openExerciseActionMenu = null;
-      announce("Exercise deleted.", { tone: "warn", action: "undo-last-action", actionLabel: "Undo" });
+      announce("Exercise deleted.", { tone: "warn", sound: "warning", action: "undo-last-action", actionLabel: "Undo" });
       await render();
     },
     async "log-exercise"() {
@@ -7024,6 +8978,7 @@ async function handleAction(action, target) {
       if (!exercise) return;
       await flashSelection(target);
       preserveVisibleDraft("cross-tab");
+      pushReturnContext("exercise-trend", { sourceAction: "open-exercise-trend", exercise });
       state.selectedExercise = exercise;
       state.activeTab = "trends";
       await render({ animate: true });
@@ -7033,6 +8988,7 @@ async function handleAction(action, target) {
       if (!exercise) return;
       await flashSelection(target);
       preserveVisibleDraft("cross-tab");
+      pushReturnContext("history-exercise-detail", { sourceAction: "open-exercise-history-global", exercise });
       state.historyExercise = exercise;
       state.historyMode = "exercises";
       state.activeTab = "history";
@@ -7145,9 +9101,11 @@ async function handleAction(action, target) {
       const entry = state.workouts.find((workout) => workout.id === target.dataset.id);
       if (entry) setUndoAction("Restore lift", { type: "delete-workout", entry });
       await dbDelete("workouts", target.dataset.id);
+      await queueSyncChange("workout", target.dataset.id, null, { deleted: true });
+      scheduleRecordSync();
       if (state.editingWorkoutId === target.dataset.id) clearWorkoutDraft();
       await loadState();
-      announce("Lift deleted.", { tone: "warn", action: "undo-last-action", actionLabel: "Undo" });
+      announce("Lift deleted.", { tone: "warn", sound: "warning", action: "undo-last-action", actionLabel: "Undo" });
       await render();
     },
     async "delete-metric"() {
@@ -7156,10 +9114,13 @@ async function handleAction(action, target) {
         ? metricEntriesForDate(target.dataset.date).map((entry) => entry.id).filter(Boolean)
         : [target.dataset.id].filter(Boolean);
       const entries = state.metrics.filter((entry) => ids.includes(entry.id));
+      const metricDate = target.dataset.date || entries[0]?.date || "";
       if (entries.length) setUndoAction("Restore nutrition", { type: "delete-metrics", entries });
       await Promise.all(ids.map((id) => dbDelete("metrics", id)));
+      if (metricDate) await queueSyncChange("metric", metricDate, null, { deleted: true });
+      scheduleRecordSync();
       await loadState();
-      announce("Metric deleted.", { tone: "warn", action: "undo-last-action", actionLabel: "Undo" });
+      announce("Metric deleted.", { tone: "warn", sound: "warning", action: "undo-last-action", actionLabel: "Undo" });
       await render();
     },
     async "choose-exercise"() {
@@ -7180,6 +9141,21 @@ async function handleAction(action, target) {
       forceSettingsPanelOpen("supabase-sync");
       await supabaseAuth("signin");
     },
+    async "push-supabase-sync"() {
+      forceSettingsPanelOpen("supabase-sync");
+      await performRecordSync({ pull: true, push: true, reconcile: true, notify: true });
+      await render();
+    },
+    async "pull-supabase-sync"() {
+      forceSettingsPanelOpen("supabase-sync");
+      await performRecordSync({ pull: true, push: false, notify: true });
+      await render();
+    },
+    async "resolve-sync-conflict"() {
+      forceSettingsPanelOpen("supabase-sync");
+      await resolveRecordSyncConflict(target.dataset.syncId, target.dataset.choice);
+      await render();
+    },
     async "push-supabase"() {
       forceSettingsPanelOpen("supabase-sync");
       await pushSupabaseBackup();
@@ -7192,6 +9168,8 @@ async function handleAction(action, target) {
       const goal = target.dataset.nutritionGoal;
       if (!NUTRITION_GOAL_OPTIONS.some((option) => option.id === goal)) return;
       await saveSetting("nutritionGoal", goal);
+      await queueSyncChange("preference", "nutritionGoal", { value: goal });
+      scheduleRecordSync();
       announce(`Nutrition goal set to ${nutritionGoalLabel(goal)}.`, { tone: "good" });
       await render();
     },
@@ -7341,6 +9319,21 @@ function restoreCoachTargetScroll(scrollLeft) {
   else restore();
 }
 
+document.addEventListener("pointerdown", unlockUiAudio, { capture: true, passive: true });
+document.addEventListener("touchstart", unlockUiAudio, { capture: true, passive: true });
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) markUiAudioForResume();
+  else unlockUiAudio();
+});
+window.addEventListener?.("pageshow", () => {
+  markUiAudioForResume();
+  unlockUiAudio();
+});
+window.addEventListener?.("focus", () => {
+  if (uiAudioContext?.state !== "running") markUiAudioForResume();
+  unlockUiAudio();
+});
+
 document.addEventListener("toggle", (event) => {
   const panel = event.target?.closest?.("details[data-settings-panel]");
   if (panel && state.activeTab === "settings") {
@@ -7348,21 +9341,27 @@ document.addEventListener("toggle", (event) => {
   }
 }, true);
 
+document.addEventListener("click", handleCollapsibleSummaryClick, true);
+
 document.addEventListener("click", async (event) => {
   const tab = event.target.closest("[data-tab]");
   const logMode = event.target.closest("[data-log-mode]");
   const action = event.target.closest("[data-action]");
+  const button = event.target.closest("button, [role='button']");
 
   try {
     if (tab) {
+      if (tab.dataset.tab !== state.activeTab) playUiCue("navigate");
       if (tab.dataset.tab !== state.activeTab) preserveVisibleDraft("tab-change");
       state.activeTab = tab.dataset.tab;
       state.weeklyMuscleDetail = null;
+      clearReturnContexts();
       await render({ animate: true });
     }
     if (logMode) {
       const nextMode = logMode.dataset.logMode;
       if (nextMode !== state.logMode) {
+        playUiCue("navigate");
         preserveVisibleDraft("log-mode-change");
         applyLogModeSwitch(nextMode);
       }
@@ -7370,15 +9369,32 @@ document.addEventListener("click", async (event) => {
       await render();
     }
     if (action) {
+      if (action.dataset.action !== "preview-sound" && shouldPlayMeaningfulControlCue(action)) playUiCue("tap");
       await handleAction(action.dataset.action, action);
+    } else if (!tab && !logMode && shouldPlayMeaningfulControlCue(button)) {
+      playUiCue("tap");
     }
   } catch (error) {
+    playUiCue("error");
     toast(error.message || "Something went wrong.");
   }
 });
 
 document.addEventListener("change", async (event) => {
   try {
+    if (event.target.matches("[data-sound-effects-enabled]")) {
+      await saveSetting("soundEffectsEnabled", Boolean(event.target.checked));
+      forceSettingsPanelOpen("sound-effects");
+      if (event.target.checked) playUiCue("success");
+      await render();
+      return;
+    }
+    if (event.target.matches("[data-sound-effects-volume]")) {
+      const volume = Math.max(0, Math.min(100, Number(event.target.value) || 0));
+      await saveSetting("soundEffectsVolume", volume);
+      playUiCue("tap");
+      return;
+    }
     if (event.target.matches("[data-draft-field='exercise']")) {
       readDraftFromForm();
       const draft = state.workoutDraft.find((item) => item.draftId === event.target.dataset.draftId);
@@ -7416,12 +9432,20 @@ document.addEventListener("change", async (event) => {
       event.target.value = "";
     }
   } catch (error) {
+    playUiCue("error");
     toast(error.message || "Import failed.");
   }
 });
 
 document.addEventListener("input", async (event) => {
   try {
+    if (event.target.matches("[data-sound-effects-volume]")) {
+      const volume = Math.max(0, Math.min(100, Number(event.target.value) || 0));
+      state.settings.soundEffectsVolume = volume;
+      const label = document.querySelector("[data-sound-volume-label]");
+      if (label) label.textContent = `${volume}%`;
+      return;
+    }
     if (event.target.matches("[data-meal-field], [data-quick-field]")) {
       refreshNutritionFormTotals(event.target.closest("#metric-form"));
     }
@@ -7471,6 +9495,7 @@ document.addEventListener("input", async (event) => {
       saveDraftRecovery("exercise-input");
     }
   } catch (error) {
+    playUiCue("error");
     toast(error.message || "Something went wrong.");
   }
 });
@@ -7590,6 +9615,7 @@ document.addEventListener("submit", async (event) => {
     if (event.target.matches("#strength-form")) await saveWorkout(event.target);
     if (event.target.matches("#metric-form")) await saveMetric(event.target);
   } catch (error) {
+    playUiCue("error");
     toast(error.message || "Could not save.");
   }
 });
@@ -7654,6 +9680,7 @@ async function init() {
   }
 
   await render();
+  startRecordSyncLifecycle();
   registerServiceWorker().catch(() => {});
 }
 

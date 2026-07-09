@@ -102,7 +102,9 @@ https://YOUR-GITHUB-USERNAME.github.io/trainwise-pwa/
 6. In TrainWise, open Settings.
 7. Paste the URL and anon key.
 8. Create an account or sign in.
-9. Use Push backup and Pull latest.
+9. Use Push to cloud and Pull from cloud. Completed workouts, nutrition, exercises, templates, and safe preferences sync automatically while signed in.
+
+Existing Supabase users should run the current `supabase-schema.sql` again. It adds the record-level sync table and policies without deleting existing `fitness_snapshots` backups. Older snapshots remain available from Legacy cloud recovery in Settings.
 
 The Supabase free tier is enough for personal workout logs. Free projects can pause after inactivity, so if sync stops after a long break, wake the project from the Supabase dashboard.
 
@@ -124,4 +126,4 @@ You can confirm the loaded version in Settings under App update.
 
 Local data lives in browser storage. Use export/import or Supabase backup so clearing Safari website data does not wipe your only copy.
 
-Backups include workouts, nutrition metrics, custom exercises, day templates, and non-secret hypertrophy settings. Supabase credentials and sessions are not included in exported backup files.
+Synchronization includes submitted workouts, saved nutrition metrics, custom exercises, day templates, and non-secret preferences. Drafts, Supabase credentials, and sessions remain device-local. Exported JSON backups still provide a separate full recovery file.
