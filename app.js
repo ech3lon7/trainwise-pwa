@@ -3,7 +3,7 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 3;
 const STORES = ["workouts", "metrics", "settings", "syncQueue"];
-const APP_VERSION = "1.5.57";
+const APP_VERSION = "1.5.63";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 const DRAFT_RECOVERY_KEY = "trainwise-draft-recovery-v1";
 const COPIED_COACH_PLAN_KEY = "trainwise-copied-coach-plan-v1";
@@ -6262,7 +6262,6 @@ function renderTrends() {
   const bodyWeightAverage = latestRollingAverage(bodyWeightSeries, 7);
   const proteinSeries = seriesFromMetrics("protein");
   const calorieSeries = seriesFromMetrics("calories");
-  const calorieAverageSeries = rollingAverageSeries(calorieSeries, 7);
   const maintenanceSeries = maintenanceSeriesFor(calorieSeries, health.maintenance);
 
   return `
@@ -6337,13 +6336,9 @@ function renderTrends() {
           ${lineChart(calorieSeries, "#35d58c", "", { showAverage: true })}
         </div>
         <div class="chart-panel">
-          <div class="chart-header"><h3>Calories vs maintenance</h3><span class="muted small">${health.maintenance?.complete ? `${fmt(health.maintenance.maintenanceCalories)} cal estimated maintenance` : "complete profile to estimate"}</span></div>
+          <div class="chart-header"><h3>Estimated maintenance</h3><span class="muted small">${health.maintenance?.complete ? `${fmt(health.maintenance.maintenanceCalories)} cal/day` : "complete profile to estimate"}</span></div>
           ${health.maintenance?.complete
-            ? lineChart(calorieSeries, "#35d58c", "", {
-              comparisonPoints: calorieAverageSeries,
-              comparisonColor: "rgba(255,255,255,0.62)",
-              extraComparisonSeries: [{ points: maintenanceSeries, color: "rgba(242,208,107,0.82)", dash: "1 2" }]
-            })
+            ? lineChart(maintenanceSeries, "#4cc9f0", "")
             : `<div class="empty maintenance-empty">Complete Maintenance profile in Settings to compare calories with estimated maintenance.</div>`}
         </div>
       </div>

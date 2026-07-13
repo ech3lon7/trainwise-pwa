@@ -177,6 +177,7 @@ assert(appCode.includes("unlockUiAudio"), "Expected touch/pointer gestures to un
 assert(appCode.includes("playUiCueFallback"), "Expected generated WAV playback when Web Audio is unavailable or rejected.");
 assert(appCode.includes("buildUiCueWavDataUri"), "Expected the audio fallback to remain self-contained without external sound assets.");
 assert(appCode.includes("shouldPlayMeaningfulControlCue"), "Expected meaningful-control audio classification.");
+assert(/function playUiCue[\s\S]*queueUiCue\(type\);[\s\S]*ensureUiAudioReady\(\)\.then\(\(context\) => \{[\s\S]*if \(context\) flushUiCueQueue\(context\);[\s\S]*else flushUiCueFallback\(\);[\s\S]*\}\);/.test(appCode), "Expected playUiCue to keep the committed queue/resume/fallback audio flow.");
 assert(appCode.includes("data-sound-effects-enabled"), "Expected Settings to expose an audio enable control.");
 assert(appCode.includes("data-sound-effects-volume"), "Expected Settings to expose an audio volume control.");
 assert(appCode.includes('"preview-sound"'), "Expected Settings to provide a sound preview action.");
@@ -195,9 +196,9 @@ assert(!appCode.includes('selectedExercise: "Push-up"'), "Expected Log startup n
 assert(!appCode.includes('showBanner("Unsaved draft restored."'), "Expected startup draft recovery not to show a top banner.");
 assert(appCode.includes("notifyMetricSaved"), "Expected metrics saves to use a dedicated bottom-only notification helper.");
 assert(!stylesCode.includes(".mobile-quick-toggle"), "Expected floating quick action button styling to be removed.");
-assert(indexCode.includes("v=1.5.57"), "Expected index shell references to use bumped app version.");
+assert(indexCode.includes("v=1.5.63"), "Expected index shell references to use bumped app version.");
 assert(!indexCode.includes('id="app" class="app-content" aria-live'), "Expected broad app aria-live to be removed in favor of targeted live regions.");
-assert(serviceWorkerCode.includes("trainwise-cache-v79"), "Expected service worker cache version bump.");
+assert(serviceWorkerCode.includes("trainwise-cache-v85"), "Expected service worker cache version bump.");
 assert(appCode.includes("data-settings-panel"), "Expected Settings panels to preserve open state with stable panel ids.");
 assert(appCode.includes('forceSettingsPanelOpen("supabase-sync")'), "Expected Supabase actions to keep the Supabase panel open after rendering.");
 
@@ -1958,8 +1959,10 @@ const maintenanceSettingsAndTrends = runScenario(`
   ({
     formHasFields: form.includes("maintenance-sex") && form.includes("maintenance-birth-year") && form.includes("maintenance-activity"),
     formHasPreview: form.includes("Estimated maintenance") && form.includes("7d avg body weight"),
-    trendsHasChart: trends.includes("Calories vs maintenance") && trends.includes("maintenance-polyline"),
-    trendsHasEstimateLabel: trends.includes("cal estimated maintenance"),
+    trendsHasChart: trends.includes("Estimated maintenance") && trends.includes("#4cc9f0"),
+    trendsHasDistinctMaintenanceColor: trends.includes("#4cc9f0"),
+    trendsHasEstimateLabel: trends.includes("cal/day"),
+    trendsHasOnlyMaintenanceLine: !trends.includes("maintenance-polyline") && !trends.includes("Calories vs maintenance"),
     promptHasSetup: prompt.includes("Complete Maintenance profile in Settings"),
     safeActivity: safe.maintenanceProfile.activityLevel,
     normalizedActivity: normalized.settings.maintenanceProfile.activityLevel
@@ -1968,7 +1971,10 @@ const maintenanceSettingsAndTrends = runScenario(`
 
 assert.strictEqual(maintenanceSettingsAndTrends.formHasFields, true, "Expected Settings to render maintenance profile fields.");
 assert.strictEqual(maintenanceSettingsAndTrends.formHasPreview, true, "Expected Settings to render maintenance profile preview.");
-assert.strictEqual(maintenanceSettingsAndTrends.trendsHasChart, true, "Expected Health trends to render Calories vs maintenance with maintenance line.");
+assert.strictEqual(maintenanceSettingsAndTrends.trendsHasChart, true, "Expected Health trends to render Estimated maintenance with maintenance line.");
+assert.strictEqual(maintenanceSettingsAndTrends.trendsHasDistinctMaintenanceColor, true, "Expected Estimated maintenance to use a distinct maintenance line color.");
+assert.strictEqual(maintenanceSettingsAndTrends.trendsHasOnlyMaintenanceLine, true, "Expected Estimated maintenance chart to render only the maintenance line.");
+assert(!appCode.includes("comparisonPoints: calorieAverageSeries"), "Expected Estimated maintenance to show one maintenance reference line instead of duplicating the calorie average overlay.");
 assert.strictEqual(maintenanceSettingsAndTrends.trendsHasEstimateLabel, true, "Expected maintenance chart header to show estimated maintenance.");
 assert.strictEqual(maintenanceSettingsAndTrends.promptHasSetup, true, "Expected incomplete profile to show maintenance setup prompt.");
 assert.strictEqual(maintenanceSettingsAndTrends.safeActivity, "moderate", "Expected safe settings export to include maintenance profile.");
