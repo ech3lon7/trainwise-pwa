@@ -507,7 +507,7 @@ function queueUiCue(type) {
 }
 
 function flushUiCueQueue(context) {
-  if (!context || context.state !== "running") return false;
+  if (!context || context.state === "closed") return false;
   const queued = pendingUiCues.splice(0, pendingUiCues.length);
   queued.forEach((type) => emitUiCue(context, type));
   return queued.length > 0;
@@ -549,7 +549,14 @@ function ensureUiAudioReady() {
           uiAudioNeedsResume = uiAudioContext.state !== "running";
           return uiAudioContext.state === "running" ? uiAudioContext : null;
         })
-        .catch(() => null)
+        .catch(() => {
+          if (uiAudioContext?.state === "suspended") {
+            try { uiAudioContext.close(); } catch {}
+            uiAudioContext = null;
+          }
+          uiAudioNeedsResume = true;
+          return null;
+        })
         .finally(() => { uiAudioResumePromise = null; });
     }
     return uiAudioResumePromise;
@@ -577,9 +584,11 @@ function playUiCue(type = "tap", options = {}) {
   if (["tap", "navigate"].includes(type) && now - lastUiCueAt < 45) return false;
   lastUiCueAt = now;
   queueUiCue(type);
-  ensureUiAudioReady().then((context) => {
-    if (context) flushUiCueQueue(context);
-    else flushUiCueFallback();
+  if (uiAudioContext && uiAudioContext.state !== "closed") {
+    flushUiCueQueue(uiAudioContext);
+  }
+  ensureUiAudioReady().then((ctx) => {
+    if (ctx) flushUiCueQueue(ctx);
   });
   return true;
 }
@@ -9583,17 +9592,15 @@ function restoreCoachTargetScroll(scrollLeft) {
 
 document.addEventListener("pointerdown", unlockUiAudio, { capture: true, passive: true });
 document.addEventListener("touchstart", unlockUiAudio, { capture: true, passive: true });
+document.addEventListener("touchend", unlockUiAudio, { capture: true, passive: true });
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) markUiAudioForResume();
-  else unlockUiAudio();
 });
 window.addEventListener?.("pageshow", () => {
   markUiAudioForResume();
-  unlockUiAudio();
 });
 window.addEventListener?.("focus", () => {
   if (uiAudioContext?.state !== "running") markUiAudioForResume();
-  unlockUiAudio();
 });
 
 document.addEventListener("toggle", (event) => {
