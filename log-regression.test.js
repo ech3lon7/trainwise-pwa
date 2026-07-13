@@ -177,7 +177,6 @@ assert(appCode.includes("unlockUiAudio"), "Expected touch/pointer gestures to un
 assert(appCode.includes("playUiCueFallback"), "Expected generated WAV playback when Web Audio is unavailable or rejected.");
 assert(appCode.includes("buildUiCueWavDataUri"), "Expected the audio fallback to remain self-contained without external sound assets.");
 assert(appCode.includes("shouldPlayMeaningfulControlCue"), "Expected meaningful-control audio classification.");
-assert(/function playUiCue[\s\S]*queueUiCue\(type\);[\s\S]*ensureUiAudioReady\(\)\.then\(\(context\) => \{[\s\S]*if \(context\) flushUiCueQueue\(context\);[\s\S]*else flushUiCueFallback\(\);[\s\S]*\}\);/.test(appCode), "Expected playUiCue to keep the committed queue/resume/fallback audio flow.");
 assert(appCode.includes("data-sound-effects-enabled"), "Expected Settings to expose an audio enable control.");
 assert(appCode.includes("data-sound-effects-volume"), "Expected Settings to expose an audio volume control.");
 assert(appCode.includes('"preview-sound"'), "Expected Settings to provide a sound preview action.");
@@ -196,9 +195,9 @@ assert(!appCode.includes('selectedExercise: "Push-up"'), "Expected Log startup n
 assert(!appCode.includes('showBanner("Unsaved draft restored."'), "Expected startup draft recovery not to show a top banner.");
 assert(appCode.includes("notifyMetricSaved"), "Expected metrics saves to use a dedicated bottom-only notification helper.");
 assert(!stylesCode.includes(".mobile-quick-toggle"), "Expected floating quick action button styling to be removed.");
-assert(indexCode.includes("v=1.5.63"), "Expected index shell references to use bumped app version.");
+assert(indexCode.includes("v=1.5.64"), "Expected index shell references to use bumped app version.");
 assert(!indexCode.includes('id="app" class="app-content" aria-live'), "Expected broad app aria-live to be removed in favor of targeted live regions.");
-assert(serviceWorkerCode.includes("trainwise-cache-v85"), "Expected service worker cache version bump.");
+assert(serviceWorkerCode.includes("trainwise-cache-v86"), "Expected service worker cache version bump.");
 assert(appCode.includes("data-settings-panel"), "Expected Settings panels to preserve open state with stable panel ids.");
 assert(appCode.includes('forceSettingsPanelOpen("supabase-sync")'), "Expected Supabase actions to keep the Supabase panel open after rendering.");
 
@@ -991,8 +990,9 @@ assert(/ensureUiAudioReady\(\)\.then\(\(context\) => \{\s*if \(context\) flushUi
 assert(appCode.includes('context.addEventListener?.("statechange", handleStateChange)'), "Expected browser-driven audio context interruptions to be observed.");
 assert(appCode.includes('if (context.state === "running") flushUiCueQueue(context)'), "Expected queued cues to flush when the audio context resumes.");
 assert(appCode.includes("activeUiFallbackAudio.add(audio)"), "Expected fallback audio players to stay retained until playback ends.");
-assert(/visibilitychange[\s\S]{0,180}else unlockUiAudio\(\)/.test(appCode), "Expected audio to retry when the app becomes visible again.");
-assert(/addEventListener\?\.\("focus"[\s\S]{0,180}unlockUiAudio\(\)/.test(appCode), "Expected audio to retry when the app regains focus.");
+assert(/visibilitychange[\s\S]{0,180}if \(document\.hidden\) markUiAudioForResume\(\)/.test(appCode), "Expected visibility changes to mark audio for gesture-time resume.");
+assert(!/visibilitychange[\s\S]{0,180}else unlockUiAudio\(\)/.test(appCode), "Expected visibility changes not to create or resume audio outside a user gesture.");
+assert(!/addEventListener\?\.\("focus"[\s\S]{0,180}unlockUiAudio\(\)/.test(appCode), "Expected focus events not to create or resume audio outside a user gesture.");
 
 const logLoadDirectionIndicator = runScenario(`
   ${reset}
@@ -1952,6 +1952,7 @@ const maintenanceSettingsAndTrends = runScenario(`
   ];
   var form = renderMaintenanceProfileForm();
   var trends = renderTrends();
+  var singlePointMaintenanceChart = lineChart([{ label: "07-13", value: 2372 }], "#4cc9f0", "", { axisMinRange: 300, showAverage: false });
   var safe = exportSafeSettings();
   var normalized = normalizeBackupPayload({ workouts: [], metrics: [], settings: { maintenanceProfile: safe.maintenanceProfile } });
   state.settings.maintenanceProfile = {};
@@ -1963,6 +1964,7 @@ const maintenanceSettingsAndTrends = runScenario(`
     trendsHasDistinctMaintenanceColor: trends.includes("#4cc9f0"),
     trendsHasEstimateLabel: trends.includes("cal/day"),
     trendsHasOnlyMaintenanceLine: !trends.includes("maintenance-polyline") && !trends.includes("Calories vs maintenance"),
+    singlePointAxisLabels: (singlePointMaintenanceChart.match(/chart-y-axis[\\s\\S]*?<\\/div>/) || [""])[0],
     promptHasSetup: prompt.includes("Complete Maintenance profile in Settings"),
     safeActivity: safe.maintenanceProfile.activityLevel,
     normalizedActivity: normalized.settings.maintenanceProfile.activityLevel
@@ -1974,6 +1976,7 @@ assert.strictEqual(maintenanceSettingsAndTrends.formHasPreview, true, "Expected 
 assert.strictEqual(maintenanceSettingsAndTrends.trendsHasChart, true, "Expected Health trends to render Estimated maintenance with maintenance line.");
 assert.strictEqual(maintenanceSettingsAndTrends.trendsHasDistinctMaintenanceColor, true, "Expected Estimated maintenance to use a distinct maintenance line color.");
 assert.strictEqual(maintenanceSettingsAndTrends.trendsHasOnlyMaintenanceLine, true, "Expected Estimated maintenance chart to render only the maintenance line.");
+assert(maintenanceSettingsAndTrends.singlePointAxisLabels.includes(">2.6k<") && maintenanceSettingsAndTrends.singlePointAxisLabels.includes(">2.4k<") && maintenanceSettingsAndTrends.singlePointAxisLabels.includes(">2.2k<"), `Expected single-point maintenance chart to show distinct padded Y-axis labels, got ${maintenanceSettingsAndTrends.singlePointAxisLabels}`);
 assert(!appCode.includes("comparisonPoints: calorieAverageSeries"), "Expected Estimated maintenance to show one maintenance reference line instead of duplicating the calorie average overlay.");
 assert.strictEqual(maintenanceSettingsAndTrends.trendsHasEstimateLabel, true, "Expected maintenance chart header to show estimated maintenance.");
 assert.strictEqual(maintenanceSettingsAndTrends.promptHasSetup, true, "Expected incomplete profile to show maintenance setup prompt.");

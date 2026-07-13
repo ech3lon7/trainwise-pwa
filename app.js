@@ -3,7 +3,7 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 3;
 const STORES = ["workouts", "metrics", "settings", "syncQueue"];
-const APP_VERSION = "1.5.63";
+const APP_VERSION = "1.5.64";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 const DRAFT_RECOVERY_KEY = "trainwise-draft-recovery-v1";
 const COPIED_COACH_PLAN_KEY = "trainwise-copied-coach-plan-v1";
@@ -4114,8 +4114,14 @@ function lineChart(points, color = "#35d58c", unit = "", options = {}) {
     ...comparisonPoints,
     ...extraComparisonSeries.flatMap((series) => Array.isArray(series.points) ? series.points : [])
   ].filter((point) => Number.isFinite(point.value));
-  const dataMin = Math.min(...rangePoints.map((point) => point.value));
-  const dataMax = Math.max(...rangePoints.map((point) => point.value));
+  let dataMin = Math.min(...rangePoints.map((point) => point.value));
+  let dataMax = Math.max(...rangePoints.map((point) => point.value));
+  const axisMinRange = Number(options.axisMinRange || 0);
+  if (axisMinRange > 0 && dataMax - dataMin < axisMinRange) {
+    const center = (dataMin + dataMax) / 2;
+    dataMin = center - axisMinRange / 2;
+    dataMax = center + axisMinRange / 2;
+  }
   const axisTicks = niceAxisTicks(dataMin, dataMax, unit);
   const min = axisTicks.length ? Math.min(...axisTicks.map((tick) => tick.value)) : dataMin;
   const max = axisTicks.length ? Math.max(...axisTicks.map((tick) => tick.value)) : dataMax;
@@ -6347,7 +6353,7 @@ function renderTrends() {
         <div class="chart-panel">
           <div class="chart-header"><h3>Estimated maintenance</h3><span class="muted small">${health.maintenance?.complete ? `${fmt(health.maintenance.maintenanceCalories)} cal/day` : "complete profile to estimate"}</span></div>
           ${health.maintenance?.complete
-            ? lineChart(maintenanceSeries, "#4cc9f0", "")
+            ? lineChart(maintenanceSeries, "#4cc9f0", "", { axisMinRange: 300, showAverage: false })
             : `<div class="empty maintenance-empty">Complete Maintenance profile in Settings to compare calories with estimated maintenance.</div>`}
         </div>
       </div>
