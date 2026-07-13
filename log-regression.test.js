@@ -195,9 +195,9 @@ assert(!appCode.includes('selectedExercise: "Push-up"'), "Expected Log startup n
 assert(!appCode.includes('showBanner("Unsaved draft restored."'), "Expected startup draft recovery not to show a top banner.");
 assert(appCode.includes("notifyMetricSaved"), "Expected metrics saves to use a dedicated bottom-only notification helper.");
 assert(!stylesCode.includes(".mobile-quick-toggle"), "Expected floating quick action button styling to be removed.");
-assert(indexCode.includes("v=1.5.56"), "Expected index shell references to use bumped app version.");
+assert(indexCode.includes("v=1.5.57"), "Expected index shell references to use bumped app version.");
 assert(!indexCode.includes('id="app" class="app-content" aria-live'), "Expected broad app aria-live to be removed in favor of targeted live regions.");
-assert(serviceWorkerCode.includes("trainwise-cache-v78"), "Expected service worker cache version bump.");
+assert(serviceWorkerCode.includes("trainwise-cache-v79"), "Expected service worker cache version bump.");
 assert(appCode.includes("data-settings-panel"), "Expected Settings panels to preserve open state with stable panel ids.");
 assert(appCode.includes('forceSettingsPanelOpen("supabase-sync")'), "Expected Supabase actions to keep the Supabase panel open after rendering.");
 
@@ -1929,6 +1929,50 @@ assert.strictEqual(chartAxesAndAverages.emptyHasNoAxis, true, "Expected empty ch
 assert(chartAxesAndAverages.trendsOverlayCount >= 7, `Expected every Trends chart to render an average overlay, got ${chartAxesAndAverages.trendsOverlayCount}.`);
 assert.strictEqual(chartAxesAndAverages.trendsUsesEntryWording, true, "Expected workout-derived Trends charts to use 7-entry average wording.");
 assert.strictEqual(chartAxesAndAverages.trendsUsesDayWordingForHealth, true, "Expected health Trends charts to use 7d average wording.");
+
+const maintenanceSettingsAndTrends = runScenario(`
+  ${reset}
+  state.settings.maintenanceProfile = {
+    sex: "male",
+    birthYear: 1990,
+    heightFeet: 5,
+    heightInches: 10,
+    activityLevel: "moderate",
+    lastReviewedAt: "2026-06-17T12:00:00.000Z"
+  };
+  state.metrics = [
+    { id: "m1", date: "2026-06-11", bodyWeight: 178, calories: 2500, protein: 170 },
+    { id: "m2", date: "2026-06-12", bodyWeight: 179, calories: 2600, protein: 170 },
+    { id: "m3", date: "2026-06-13", bodyWeight: 180, calories: 2700, protein: 170 },
+    { id: "m4", date: "2026-06-14", bodyWeight: 181, calories: 2800, protein: 170 },
+    { id: "m5", date: "2026-06-15", bodyWeight: 182, calories: 2900, protein: 170 },
+    { id: "m6", date: "2026-06-16", bodyWeight: 183, calories: 3000, protein: 170 },
+    { id: "m7", date: "2026-06-17", bodyWeight: 184, calories: 3100, protein: 170 }
+  ];
+  var form = renderMaintenanceProfileForm();
+  var trends = renderTrends();
+  var safe = exportSafeSettings();
+  var normalized = normalizeBackupPayload({ workouts: [], metrics: [], settings: { maintenanceProfile: safe.maintenanceProfile } });
+  state.settings.maintenanceProfile = {};
+  var prompt = renderTrends();
+  ({
+    formHasFields: form.includes("maintenance-sex") && form.includes("maintenance-birth-year") && form.includes("maintenance-activity"),
+    formHasPreview: form.includes("Estimated maintenance") && form.includes("7d avg body weight"),
+    trendsHasChart: trends.includes("Calories vs maintenance") && trends.includes("maintenance-polyline"),
+    trendsHasEstimateLabel: trends.includes("cal estimated maintenance"),
+    promptHasSetup: prompt.includes("Complete Maintenance profile in Settings"),
+    safeActivity: safe.maintenanceProfile.activityLevel,
+    normalizedActivity: normalized.settings.maintenanceProfile.activityLevel
+  });
+`);
+
+assert.strictEqual(maintenanceSettingsAndTrends.formHasFields, true, "Expected Settings to render maintenance profile fields.");
+assert.strictEqual(maintenanceSettingsAndTrends.formHasPreview, true, "Expected Settings to render maintenance profile preview.");
+assert.strictEqual(maintenanceSettingsAndTrends.trendsHasChart, true, "Expected Health trends to render Calories vs maintenance with maintenance line.");
+assert.strictEqual(maintenanceSettingsAndTrends.trendsHasEstimateLabel, true, "Expected maintenance chart header to show estimated maintenance.");
+assert.strictEqual(maintenanceSettingsAndTrends.promptHasSetup, true, "Expected incomplete profile to show maintenance setup prompt.");
+assert.strictEqual(maintenanceSettingsAndTrends.safeActivity, "moderate", "Expected safe settings export to include maintenance profile.");
+assert.strictEqual(maintenanceSettingsAndTrends.normalizedActivity, "moderate", "Expected backup normalization to preserve maintenance profile.");
 
 const mobileQolMarkup = runScenario(`
   ${reset}

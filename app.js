@@ -3,13 +3,13 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 3;
 const STORES = ["workouts", "metrics", "settings", "syncQueue"];
-const APP_VERSION = "1.5.56";
+const APP_VERSION = "1.5.57";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 const DRAFT_RECOVERY_KEY = "trainwise-draft-recovery-v1";
 const COPIED_COACH_PLAN_KEY = "trainwise-copied-coach-plan-v1";
 const SYNC_BOOTSTRAP_VERSION = 1;
 const SYNC_POLL_MS = 60000;
-const SYNC_SAFE_PREFERENCES = ["hypertrophyProfile", "nutritionGoal", "dashboardWidgets", "dashboardWidgetOrder"];
+const SYNC_SAFE_PREFERENCES = ["hypertrophyProfile", "nutritionGoal", "maintenanceProfile", "dashboardWidgets", "dashboardWidgetOrder"];
 const COLLAPSE_ANIMATION_MS = 360;
 const COLLAPSE_REVEAL_MS = 1600;
 const COLLAPSIBLE_SELECTOR = "details.collapsible-panel, details.coverage-row, details.inline-disclosure";
@@ -43,6 +43,16 @@ const NUTRITION_GOAL_OPTIONS = [
   { id: "bulk", label: "Bulk", hint: "Lean gain" },
   { id: "maintain", label: "Maintain", hint: "Hold steady" },
   { id: "cut", label: "Cut", hint: "Slow loss" }
+];
+const MAINTENANCE_SEX_OPTIONS = [
+  { id: "male", label: "Male" },
+  { id: "female", label: "Female" }
+];
+const MAINTENANCE_ACTIVITY_OPTIONS = [
+  { id: "sedentary", label: "Mostly seated", multiplier: 1.2, hint: "Little cardio or daily movement" },
+  { id: "light", label: "Light active", multiplier: 1.375, hint: "Lift 3-5x/week, low daily movement" },
+  { id: "moderate", label: "Moderate", multiplier: 1.55, hint: "Lift 4-6x/week or regular cardio" },
+  { id: "very", label: "Very active", multiplier: 1.725, hint: "Active job or hard cardio most days" }
 ];
 const NUTRITION_MEALS = [
   { id: "breakfast", label: "Breakfast" },
@@ -872,6 +882,7 @@ function localSyncRecord(recordType, recordId, payload) {
 function safePreferenceValue(key) {
   if (key === "hypertrophyProfile") return hypertrophySettings();
   if (key === "nutritionGoal") return selectedNutritionGoal();
+  if (key === "maintenanceProfile") return selectedMaintenanceProfile();
   if (key === "dashboardWidgets") return selectedDashboardWidgets();
   if (key === "dashboardWidgetOrder") return dashboardWidgetOrder();
   return undefined;
@@ -1927,6 +1938,115 @@ function nutritionGoalLabel(goal = selectedNutritionGoal()) {
   return NUTRITION_GOAL_OPTIONS.find((option) => option.id === goal)?.label || "Bulk";
 }
 
+function normalizeMaintenanceProfile(profile = {}) {
+  const sex = MAINTENANCE_SEX_OPTIONS.some((option) => option.id === profile.sex) ? profile.sex : "";
+  const birthYear = Number(profile.birthYear);
+  const heightFeet = Number(profile.heightFeet);
+  const heightInches = Number(profile.heightInches);
+  const activityLevel = MAINTENANCE_ACTIVITY_OPTIONS.some((option) => option.id === profile.activityLevel) ? profile.activityLevel : "";
+  return {
+    sex,
+    birthYear: Number.isFinite(birthYear) && birthYear >= 1900 && birthYear <= new Date().getFullYear() ? Math.round(birthYear) : "",
+    heightFeet: Number.isFinite(heightFeet) && heightFeet >= 0 && heightFeet <= 9 ? Math.round(heightFeet) : "",
+    heightInches: Number.isFinite(heightInches) && heightInches >= 0 && heightInches <= 11 ? Math.round(heightInches) : "",
+    activityLevel,
+    lastReviewedAt: String(profile.lastReviewedAt || "")
+  };
+}
+
+function selectedMaintenanceProfile() {
+  return normalizeMaintenanceProfile(state.settings.maintenanceProfile || {});
+}
+
+function maintenanceActivityOption(activityLevel) {
+  return MAINTENANCE_ACTIVITY_OPTIONS.find((option) => option.id === activityLevel) || null;
+}
+
+function maintenanceProfileAge(profile = selectedMaintenanceProfile(), date = new Date()) {
+  if (!profile.birthYear) return 0;
+  return Math.max(0, date.getFullYear() - Number(profile.birthYear));
+}
+
+function maintenanceProfileHeightCm(profile = selectedMaintenanceProfile()) {
+  if (profile.heightFeet === "" || profile.heightInches === "") return 0;
+  const totalInches = Number(profile.heightFeet) * 12 + Number(profile.heightInches);
+  return totalInches > 0 ? totalInches * 2.54 : 0;
+}
+
+function maintenanceWeightPoint() {
+  const bodyWeightSeries = seriesFromMetrics("bodyWeight");
+  const average = latestRollingAverage(bodyWeightSeries, 7);
+  const latest = lastMetric("bodyWeight")?.bodyWeight || 0;
+  const value = average || latest;
+  return {
+    value,
+    source: average ? "7d avg body weight" : latest ? "latest body weight" : "missing body weight"
+  };
+}
+
+function maintenanceProfileMissingFields(profile = selectedMaintenanceProfile(), weight = maintenanceWeightPoint()) {
+  const missing = [];
+  if (!profile.sex) missing.push("sex");
+  if (!profile.birthYear) missing.push("birth year");
+  if (!maintenanceProfileHeightCm(profile)) missing.push("height");
+  if (!profile.activityLevel) missing.push("activity level");
+  if (!weight.value) missing.push("body weight");
+  return missing;
+}
+
+function maintenanceEstimate(profile = selectedMaintenanceProfile()) {
+  const normalized = normalizeMaintenanceProfile(profile);
+  const weight = maintenanceWeightPoint();
+  const missing = maintenanceProfileMissingFields(normalized, weight);
+  const age = maintenanceProfileAge(normalized);
+  const heightCm = maintenanceProfileHeightCm(normalized);
+  const activity = maintenanceActivityOption(normalized.activityLevel);
+  const weightKg = weight.value / 2.20462;
+  const complete = !missing.length;
+  const bmr = complete
+    ? (10 * weightKg) + (6.25 * heightCm) - (5 * age) + (normalized.sex === "male" ? 5 : -161)
+    : 0;
+  const maintenanceCalories = complete ? bmr * activity.multiplier : 0;
+  const calorieLogs = metricEntriesForField("calories", 7).length;
+  const weightLogs = metricEntriesForField("bodyWeight", 7).length;
+  const confidence = !complete
+    ? "Low"
+    : calorieLogs >= 7 && weightLogs >= 7
+      ? "High"
+      : calorieLogs >= 3 && weightLogs >= 3
+        ? "Medium"
+        : "Low";
+  const staleReview = normalized.lastReviewedAt
+    ? daysBetween(normalized.lastReviewedAt.slice(0, 10), todayISO()) > 60
+    : complete;
+  return {
+    profile: normalized,
+    complete,
+    missing,
+    age,
+    heightCm,
+    weightLb: weight.value,
+    weightSource: weight.source,
+    activity,
+    bmr,
+    maintenanceCalories,
+    confidence,
+    staleReview
+  };
+}
+
+function maintenanceProfileSummary(estimate = maintenanceEstimate()) {
+  const profile = estimate.profile;
+  if (!estimate.complete) return `Missing ${estimate.missing.join(", ") || "profile"}`;
+  const sex = MAINTENANCE_SEX_OPTIONS.find((option) => option.id === profile.sex)?.label || "Profile";
+  return `${sex}, ${estimate.age}, ${profile.heightFeet}'${profile.heightInches}", ${estimate.activity?.label || "activity"}`;
+}
+
+function maintenanceSeriesFor(points = [], estimate = maintenanceEstimate()) {
+  if (!estimate.complete || !estimate.maintenanceCalories || !points.length) return [];
+  return points.map((point) => ({ label: point.label, value: estimate.maintenanceCalories }));
+}
+
 function metricEntriesForField(field, days) {
   const start = recentDays(days);
   return canonicalMetricEntries()
@@ -1937,6 +2057,7 @@ function metricEntriesForField(field, days) {
 function healthCoachSummary() {
   const goal = selectedNutritionGoal();
   const protein = proteinTargets();
+  const maintenance = maintenanceEstimate();
   const calorieAverage = getAverage("calories", 7);
   const proteinAverage = getAverage("protein", 7);
   const latestWeight = lastMetric("bodyWeight")?.bodyWeight || 0;
@@ -1956,6 +2077,7 @@ function healthCoachSummary() {
     latestWeight,
     weightTrendLb,
     weeklyWeightRate,
+    maintenance,
     proteinFloor: protein.floor,
     proteinUpper: protein.upper,
     tone: "warn",
@@ -1977,6 +2099,41 @@ function healthCoachSummary() {
   }
   if (!protein.bodyWeightLb || !proteinAverage) {
     summary.recommendation = "Log body weight and protein so Coach can verify the hypertrophy protein floor.";
+    return summary;
+  }
+
+  if (maintenance.complete && maintenance.maintenanceCalories) {
+    const delta = calorieAverage - maintenance.maintenanceCalories;
+    const estimateLabel = fmt(maintenance.maintenanceCalories);
+    const averageLabel = fmt(calorieAverage);
+    const contradiction = Math.abs(delta) >= 250 && Math.abs(weeklyWeightRate) <= 0.25
+      ? " Formula may be off for you; your recent weight trend looks steadier than the estimate implies."
+      : "";
+    if (goal === "bulk") {
+      if (calorieAverage <= maintenance.maintenanceCalories || weeklyWeightRate <= 0) {
+        summary.recommendation = `You're averaging ${averageLabel} cal against an estimated maintenance of ${estimateLabel}. For a bulk, add about +150-250 cal/day and watch the next 2 weeks.${contradiction}`;
+      } else {
+        summary.tone = "good";
+        summary.recommendation = `You're averaging ${averageLabel} cal above an estimated maintenance of ${estimateLabel}. That lines up with a bulk unless weight jumps faster than intended.${contradiction}`;
+      }
+    } else if (goal === "cut") {
+      if (calorieAverage >= maintenance.maintenanceCalories || weeklyWeightRate >= 0) {
+        summary.recommendation = `You're averaging ${averageLabel} cal against an estimated maintenance of ${estimateLabel}. For a cut, reduce about -150-250 cal/day and watch the next 2 weeks.${contradiction}`;
+      } else {
+        summary.tone = "good";
+        summary.recommendation = `You're averaging ${averageLabel} cal below an estimated maintenance of ${estimateLabel}. That lines up with a cut; keep protein high.${contradiction}`;
+      }
+    } else if (Math.abs(delta) <= 150 && Math.abs(weeklyWeightRate) <= 0.25) {
+      summary.tone = "good";
+      summary.recommendation = `You're averaging ${averageLabel} cal near estimated maintenance of ${estimateLabel}. Stay the course.${contradiction}`;
+    } else if (delta > 150 || weeklyWeightRate > 0.25) {
+      summary.recommendation = `You're averaging ${averageLabel} cal above estimated maintenance of ${estimateLabel}. Trim about -150-250 cal/day if you want weight steadier.${contradiction}`;
+    } else {
+      summary.recommendation = `You're averaging ${averageLabel} cal below estimated maintenance of ${estimateLabel}. Add about +150-250 cal/day if you want weight steadier.${contradiction}`;
+    }
+    if (maintenance.confidence === "Low") {
+      summary.recommendation += " Confidence is low, so review the maintenance profile before making a big change.";
+    }
     return summary;
   }
 
@@ -2008,10 +2165,12 @@ function healthCoachSummary() {
 function healthCoachStatMarkup(summary) {
   const trend = summary.weightTrendLb === null ? "--" : `${summary.weightTrendLb >= 0 ? "+" : ""}${fmt(summary.weightTrendLb, 1)} lb`;
   const weekly = summary.weeklyWeightRate === null ? "--" : `${summary.weeklyWeightRate >= 0 ? "+" : ""}${fmt(summary.weeklyWeightRate, 2)} lb/wk`;
+  const maintenance = summary.maintenance || maintenanceEstimate();
   return `
     <div class="grid four health-summary-grid">
       <div class="stat"><span class="label">Goal</span><span class="value">${escapeHtml(summary.goalLabel)}</span><span class="hint">nutrition phase</span></div>
       <div class="stat"><span class="label">Calories</span><span class="value">${summary.calorieAverage ? fmt(summary.calorieAverage) : "--"}</span><span class="hint">7-day avg</span></div>
+      <div class="stat"><span class="label">Maintenance</span><span class="value">${maintenance.complete ? fmt(maintenance.maintenanceCalories) : "--"}</span><span class="hint">${maintenance.complete ? `${escapeHtml(maintenance.confidence)} confidence` : "set profile"}</span></div>
       <div class="stat"><span class="label">Protein</span><span class="value">${summary.proteinAverage ? `${fmt(summary.proteinAverage)}g` : "--"}</span><span class="hint">${summary.proteinFloor ? `${fmt(summary.proteinFloor)}g floor` : "needs weight"}</span></div>
       <div class="stat"><span class="label">Weight</span><span class="value">${trend}</span><span class="hint">${weekly}</span></div>
     </div>
@@ -3935,12 +4094,17 @@ function lineChart(points, color = "#35d58c", unit = "", options = {}) {
   const averagePoints = shouldShowAverage ? chartRollingAverage(points, options.averageWindow || 7) : [];
   const comparisonPoints = hasComparisonOverride ? options.comparisonPoints : averagePoints;
   const comparisonColor = options.comparisonColor || "rgba(255,255,255,0.68)";
+  const extraComparisonSeries = Array.isArray(options.extraComparisonSeries) ? options.extraComparisonSeries : [];
 
   const chartPoints = points.length > 1 ? points : [
     { label: points[0].label, value: points[0].value - 1, hidden: true },
     points[0]
   ];
-  const rangePoints = [...chartPoints, ...comparisonPoints].filter((point) => Number.isFinite(point.value));
+  const rangePoints = [
+    ...chartPoints,
+    ...comparisonPoints,
+    ...extraComparisonSeries.flatMap((series) => Array.isArray(series.points) ? series.points : [])
+  ].filter((point) => Number.isFinite(point.value));
   const dataMin = Math.min(...rangePoints.map((point) => point.value));
   const dataMax = Math.max(...rangePoints.map((point) => point.value));
   const axisTicks = niceAxisTicks(dataMin, dataMax, unit);
@@ -3957,6 +4121,21 @@ function lineChart(points, color = "#35d58c", unit = "", options = {}) {
     const y = 84 - ((point.value - min) / range) * 68;
     return { x, y, ...point };
   });
+  const extraComparisonPolylines = extraComparisonSeries
+    .map((series) => {
+      const pointsForSeries = Array.isArray(series.points) ? series.points : [];
+      const coordsForSeries = pointsForSeries.map((point, index) => {
+        const x = 8 + (index / Math.max(pointsForSeries.length - 1, 1)) * 84;
+        const y = 84 - ((point.value - min) / range) * 68;
+        return { x, y, ...point };
+      });
+      return {
+        color: series.color || "rgba(242, 208, 107, 0.78)",
+        dash: series.dash || "1 2",
+        points: coordsForSeries.map((point) => `${point.x},${point.y}`).join(" ")
+      };
+    })
+    .filter((series) => series.points);
   const polyline = coords.map((point) => `${point.x},${point.y}`).join(" ");
   const comparisonPolyline = comparisonCoords.map((point) => `${point.x},${point.y}`).join(" ");
   const area = `8,92 ${polyline} 92,92`;
@@ -3992,6 +4171,7 @@ function lineChart(points, color = "#35d58c", unit = "", options = {}) {
           <polygon points="${area}" fill="url(#${gradientId})"></polygon>
           <polyline points="${polyline}" fill="none" stroke="${color}" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"></polyline>
           ${comparisonPolyline ? `<polyline class="comparison-polyline" points="${comparisonPolyline}" fill="none" stroke="${escapeHtml(comparisonColor)}" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="3 2"></polyline>` : ""}
+          ${extraComparisonPolylines.map((series) => `<polyline class="comparison-polyline maintenance-polyline" points="${series.points}" fill="none" stroke="${escapeHtml(series.color)}" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="${escapeHtml(series.dash)}"></polyline>`).join("")}
           ${visibleCoords.map((point) => `<circle cx="${point.x}" cy="${point.y}" r="1.7" fill="${color}"></circle>`).join("")}
         </svg>
         <div class="chart-marker" style="left:${last.x}%; top:${last.y}%"></div>
@@ -6082,6 +6262,8 @@ function renderTrends() {
   const bodyWeightAverage = latestRollingAverage(bodyWeightSeries, 7);
   const proteinSeries = seriesFromMetrics("protein");
   const calorieSeries = seriesFromMetrics("calories");
+  const calorieAverageSeries = rollingAverageSeries(calorieSeries, 7);
+  const maintenanceSeries = maintenanceSeriesFor(calorieSeries, health.maintenance);
 
   return `
     <details class="section trend-section collapsible-panel muscle-trends-panel" open>
@@ -6153,6 +6335,16 @@ function renderTrends() {
         <div class="chart-panel">
           <div class="chart-header"><h3>Calories</h3><span class="muted small">daily intake - 7d avg</span></div>
           ${lineChart(calorieSeries, "#35d58c", "", { showAverage: true })}
+        </div>
+        <div class="chart-panel">
+          <div class="chart-header"><h3>Calories vs maintenance</h3><span class="muted small">${health.maintenance?.complete ? `${fmt(health.maintenance.maintenanceCalories)} cal estimated maintenance` : "complete profile to estimate"}</span></div>
+          ${health.maintenance?.complete
+            ? lineChart(calorieSeries, "#35d58c", "", {
+              comparisonPoints: calorieAverageSeries,
+              comparisonColor: "rgba(255,255,255,0.62)",
+              extraComparisonSeries: [{ points: maintenanceSeries, color: "rgba(242,208,107,0.82)", dash: "1 2" }]
+            })
+            : `<div class="empty maintenance-empty">Complete Maintenance profile in Settings to compare calories with estimated maintenance.</div>`}
         </div>
       </div>
     </details>
@@ -6588,6 +6780,54 @@ function renderNutritionGoalSelector() {
   `;
 }
 
+function renderMaintenanceProfileForm() {
+  const profile = selectedMaintenanceProfile();
+  const estimate = maintenanceEstimate(profile);
+  const reviewed = profile.lastReviewedAt ? `Reviewed ${formatShortDate(profile.lastReviewedAt)}` : "Not reviewed";
+  return `
+    <div class="maintenance-profile-form">
+      <div class="field-row compact-metric-row">
+        <div class="field">
+          <label for="maintenance-sex">Sex</label>
+          <select id="maintenance-sex">
+            <option value="">Select</option>
+            ${MAINTENANCE_SEX_OPTIONS.map((option) => `<option value="${option.id}" ${profile.sex === option.id ? "selected" : ""}>${escapeHtml(option.label)}</option>`).join("")}
+          </select>
+        </div>
+        <div class="field">
+          <label for="maintenance-birth-year">Birth year</label>
+          <input id="maintenance-birth-year" type="number" inputmode="numeric" min="1900" max="${new Date().getFullYear()}" step="1" value="${escapeHtml(profile.birthYear || "")}" placeholder="1990">
+        </div>
+      </div>
+      <div class="field-row compact-metric-row">
+        <div class="field">
+          <label for="maintenance-height-feet">Height ft</label>
+          <input id="maintenance-height-feet" type="number" inputmode="numeric" min="0" max="9" step="1" value="${escapeHtml(profile.heightFeet === "" ? "" : profile.heightFeet)}" placeholder="5">
+        </div>
+        <div class="field">
+          <label for="maintenance-height-inches">Height in</label>
+          <input id="maintenance-height-inches" type="number" inputmode="numeric" min="0" max="11" step="1" value="${escapeHtml(profile.heightInches === "" ? "" : profile.heightInches)}" placeholder="10">
+        </div>
+      </div>
+      <div class="field">
+        <label for="maintenance-activity">Activity level</label>
+        <select id="maintenance-activity">
+          <option value="">Select activity</option>
+          ${MAINTENANCE_ACTIVITY_OPTIONS.map((option) => `<option value="${option.id}" ${profile.activityLevel === option.id ? "selected" : ""}>${escapeHtml(option.label)} - ${escapeHtml(option.hint)}</option>`).join("")}
+        </select>
+      </div>
+      <div class="grid two maintenance-preview">
+        <div class="stat"><span class="label">BMR</span><span class="value">${estimate.complete ? fmt(estimate.bmr) : "--"}</span><span class="hint">Mifflin-St Jeor</span></div>
+        <div class="stat"><span class="label">Estimated maintenance</span><span class="value">${estimate.complete ? fmt(estimate.maintenanceCalories) : "--"}</span><span class="hint">${estimate.complete ? "cal/day estimate" : "needs profile"}</span></div>
+        <div class="stat"><span class="label">Weight used</span><span class="value">${estimate.weightLb ? `${fmt(estimate.weightLb, 1)} lb` : "--"}</span><span class="hint">${escapeHtml(estimate.weightSource)}</span></div>
+        <div class="stat"><span class="label">Confidence</span><span class="value">${escapeHtml(estimate.confidence)}</span><span class="hint">${escapeHtml(reviewed)}</span></div>
+      </div>
+      <p class="muted small">${escapeHtml(maintenanceProfileSummary(estimate))}${estimate.staleReview ? " - Review activity if your day-to-day movement changed." : ""}</p>
+      <button class="primary-button full-button" type="button" data-action="save-maintenance-profile">Save maintenance profile</button>
+    </div>
+  `;
+}
+
 function renderDashboardWidgetSelector() {
   const enabled = selectedDashboardWidgets();
   const order = dashboardWidgetOrder();
@@ -6668,6 +6908,11 @@ async function renderSettings() {
       <p class="muted small">Coach uses this to interpret calories and body-weight trend.</p>
       ${renderNutritionGoalSelector()}
     `, { id: "nutrition-goal" })}
+
+    ${renderSettingsPanel("Maintenance profile", maintenanceEstimate().complete ? `${fmt(maintenanceEstimate().maintenanceCalories)} cal/day` : "setup needed", `
+      <p class="muted small">Used for estimated maintenance calories with Mifflin-St Jeor. This is an estimate, not true maintenance.</p>
+      ${renderMaintenanceProfileForm()}
+    `, { id: "maintenance-profile" })}
 
     ${renderSettingsPanel("Today widgets", `${selectedDashboardWidgets().length} shown`, `
       <p class="muted small">Choose what appears below the Today summary and put the most useful cards first.</p>
@@ -7289,6 +7534,7 @@ function exportSafeSettings() {
   return {
     hypertrophyProfile: hypertrophySettings(),
     nutritionGoal: selectedNutritionGoal(),
+    maintenanceProfile: selectedMaintenanceProfile(),
     dayTemplates: getDayTemplates(),
     customExercises: getCustomExercises({ includeArchived: true }),
     dashboardWidgets: selectedDashboardWidgets(),
@@ -7731,6 +7977,7 @@ function normalizeBackupSettings(settings = {}) {
     nutritionGoal: NUTRITION_GOAL_OPTIONS.some((option) => option.id === settings.nutritionGoal)
       ? settings.nutritionGoal
       : "bulk",
+    maintenanceProfile: normalizeMaintenanceProfile(settings.maintenanceProfile || {}),
     dayTemplates: Array.isArray(settings.dayTemplates) ? settings.dayTemplates : [],
     customExercises,
     dashboardWidgets: Array.isArray(settings.dashboardWidgets) ? settings.dashboardWidgets : [...DEFAULT_TODAY_WIDGETS],
@@ -7760,6 +8007,7 @@ async function importPayload(payload) {
   for (const entry of normalized.metrics) await dbPut("metrics", entry);
   await saveSetting("hypertrophyProfile", normalized.settings.hypertrophyProfile);
   await saveSetting("nutritionGoal", normalized.settings.nutritionGoal);
+  await saveSetting("maintenanceProfile", normalized.settings.maintenanceProfile);
   await saveSetting("dayTemplates", normalized.settings.dayTemplates);
   await saveSetting("customExercises", normalized.settings.customExercises);
   await saveSetting("dashboardWidgets", normalized.settings.dashboardWidgets);
@@ -8066,7 +8314,10 @@ async function applyRemoteSyncRecord(remoteInput) {
       : [...current.filter((entry) => entry.id !== remote.recordId), { ...remote.payload, id: remote.recordId }];
     await saveSetting("dayTemplates", next);
   } else if (remote.recordType === "preference" && SYNC_SAFE_PREFERENCES.includes(remote.recordId) && !deleted) {
-    await saveSetting(remote.recordId, clonePlain(remote.payload?.value));
+    const value = remote.recordId === "maintenanceProfile"
+      ? normalizeMaintenanceProfile(remote.payload?.value || {})
+      : clonePlain(remote.payload?.value);
+    await saveSetting(remote.recordId, value);
   }
 
   await saveSyncRecordMeta(remote.recordType, remote.recordId, remote.revision, remote.payload, deleted);
@@ -9171,6 +9422,22 @@ async function handleAction(action, target) {
       await queueSyncChange("preference", "nutritionGoal", { value: goal });
       scheduleRecordSync();
       announce(`Nutrition goal set to ${nutritionGoalLabel(goal)}.`, { tone: "good" });
+      await render();
+    },
+    async "save-maintenance-profile"() {
+      forceSettingsPanelOpen("maintenance-profile");
+      const profile = normalizeMaintenanceProfile({
+        sex: document.getElementById("maintenance-sex")?.value || "",
+        birthYear: document.getElementById("maintenance-birth-year")?.value || "",
+        heightFeet: document.getElementById("maintenance-height-feet")?.value || "",
+        heightInches: document.getElementById("maintenance-height-inches")?.value || "",
+        activityLevel: document.getElementById("maintenance-activity")?.value || "",
+        lastReviewedAt: new Date().toISOString()
+      });
+      await saveSetting("maintenanceProfile", profile);
+      await queueSyncChange("preference", "maintenanceProfile", { value: profile });
+      scheduleRecordSync();
+      announce("Maintenance profile saved.", { tone: "good" });
       await render();
     },
     async "load-sample-data"() { await loadSampleData(); },
