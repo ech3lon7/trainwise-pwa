@@ -475,6 +475,47 @@ const planIncludesProgressionTarget = runScenario(`
 assert(planIncludesProgressionTarget.label.includes("Target"), `Expected plan item to expose an actionable progression target, got ${planIncludesProgressionTarget.label}`);
 assert(planIncludesProgressionTarget.detail.includes("RIR"), `Expected progression detail to include RIR, got ${planIncludesProgressionTarget.detail}`);
 
+const progressionModeConstraints = runScenario(`
+  ${resetAndHelpers}
+  state.settings.customExercises = [
+    { id: "curl", name: "Bicep Curl", primaryMuscles: ["biceps"], secondaryMuscles: [], equipment: "dumbbells", reps: "8-15", rest: "60-120 sec", cue: "Curl.", userCreated: true, progressionMode: "normal" }
+  ];
+  state.workouts = [
+    {
+      id: "curl-good",
+      date: todayISO(),
+      exercise: "Bicep Curl",
+      exerciseId: "curl",
+      primaryMuscles: ["biceps"],
+      secondaryMuscles: [],
+      setRows: [
+        { weight: 25, reps: 15, rir: 2, restSeconds: 90 },
+        { weight: 25, reps: 13, rir: 2, restSeconds: 90 }
+      ]
+    }
+  ];
+  var normal = progressionTargetForExercise("Bicep Curl");
+  state.settings.customExercises[0].progressionMode = "rep-first";
+  var repFirst = progressionTargetForExercise("Bicep Curl");
+  state.settings.customExercises[0].progressionMode = "small-jumps";
+  var smallJumps = progressionTargetForExercise("Bicep Curl");
+  ({
+    normalIncrease: normal.increaseLoad,
+    normalTarget: normal.target,
+    repFirstIncrease: repFirst.increaseLoad,
+    repFirstTarget: repFirst.target,
+    repFirstBody: repFirst.body,
+    smallJumpBody: smallJumps.body
+  });
+`);
+
+assert.strictEqual(progressionModeConstraints.normalIncrease, true, "Expected normal progression to allow load increases when reps and RIR support it.");
+assert(progressionModeConstraints.normalTarget.includes("27.5 lb") || progressionModeConstraints.normalTarget.includes("30 lb"), `Expected normal target to increase load, got ${progressionModeConstraints.normalTarget}`);
+assert.strictEqual(progressionModeConstraints.repFirstIncrease, false, "Expected rep-first progression to suppress automatic load increases.");
+assert(progressionModeConstraints.repFirstTarget.startsWith("25"), `Expected rep-first target to keep current load, got ${progressionModeConstraints.repFirstTarget}`);
+assert(progressionModeConstraints.repFirstBody.includes("load-limited"), `Expected rep-first Coach wording to explain load limits, got ${progressionModeConstraints.repFirstBody}`);
+assert(progressionModeConstraints.smallJumpBody.includes("smallest practical load jump"), `Expected small-jump Coach wording, got ${progressionModeConstraints.smallJumpBody}`);
+
 const nutritionGoalDefault = runScenario(`
   ${resetAndHelpers}
   ({

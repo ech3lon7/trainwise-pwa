@@ -195,9 +195,9 @@ assert(!appCode.includes('selectedExercise: "Push-up"'), "Expected Log startup n
 assert(!appCode.includes('showBanner("Unsaved draft restored."'), "Expected startup draft recovery not to show a top banner.");
 assert(appCode.includes("notifyMetricSaved"), "Expected metrics saves to use a dedicated bottom-only notification helper.");
 assert(!stylesCode.includes(".mobile-quick-toggle"), "Expected floating quick action button styling to be removed.");
-assert(indexCode.includes("v=1.5.64"), "Expected index shell references to use bumped app version.");
+assert(indexCode.includes("v=1.5.65"), "Expected index shell references to use bumped app version.");
 assert(!indexCode.includes('id="app" class="app-content" aria-live'), "Expected broad app aria-live to be removed in favor of targeted live regions.");
-assert(serviceWorkerCode.includes("trainwise-cache-v86"), "Expected service worker cache version bump.");
+assert(serviceWorkerCode.includes("trainwise-cache-v87"), "Expected service worker cache version bump.");
 assert(appCode.includes("data-settings-panel"), "Expected Settings panels to preserve open state with stable panel ids.");
 assert(appCode.includes('forceSettingsPanelOpen("supabase-sync")'), "Expected Supabase actions to keep the Supabase panel open after rendering.");
 
@@ -1096,6 +1096,8 @@ const coachPlanCopy = runScenario(`
       ]
     })
   ];
+  state.workoutDraft = [defaultDraftExercise("Bench Press")];
+  state.workoutDraft[0].notes = "Keep this draft";
   copyCoachPlanToLog({
     sessionPlan: {
       items: [
@@ -1107,18 +1109,22 @@ const coachPlanCopy = runScenario(`
   ({
     activeTab: state.activeTab,
     draftExercises: state.workoutDraft.map((draft) => draft.exercise),
+    draftNotes: state.workoutDraft.map((draft) => draft.notes || ""),
     setCounts: state.workoutDraft.map((draft) => draft.setRows.length),
     firstWeights: state.workoutDraft.map((draft) => draft.setRows[0].weight),
-    repeatedPrevious: state.workoutDraft[0].setRows[2].weight,
+    repeatedPrevious: state.workoutDraft[1].setRows[2].weight,
+    copiedPlanIds: state.workoutDraft.map((draft) => draft.coachCopiedPlanId || ""),
     editingIds: state.workoutDraft.map((draft) => draft.editingWorkoutId)
   });
 `);
 
 assert.strictEqual(coachPlanCopy.activeTab, "log", `Expected Coach copy to switch to Log, got ${coachPlanCopy.activeTab}`);
-assert.deepEqual(coachPlanCopy.draftExercises, ["Bench Press", "Cable Row"], `Expected Coach copy order, got ${coachPlanCopy.draftExercises.join(", ")}`);
-assert.deepEqual(coachPlanCopy.setCounts, [3, 2], `Expected planned set counts, got ${coachPlanCopy.setCounts.join(", ")}`);
-assert.deepEqual(coachPlanCopy.firstWeights, [100, 120], `Expected copied previous weights, got ${coachPlanCopy.firstWeights.join(", ")}`);
+assert.deepEqual(coachPlanCopy.draftExercises, ["Bench Press", "Bench Press", "Cable Row"], `Expected Coach copy to append after existing draft, got ${coachPlanCopy.draftExercises.join(", ")}`);
+assert.strictEqual(coachPlanCopy.draftNotes[0], "Keep this draft", "Expected existing draft to survive Coach copy.");
+assert.deepEqual(coachPlanCopy.setCounts, [3, 3, 2], `Expected existing draft plus planned set counts, got ${coachPlanCopy.setCounts.join(", ")}`);
+assert.deepEqual(coachPlanCopy.firstWeights, ["", 100, 120], `Expected copied previous weights after existing draft, got ${coachPlanCopy.firstWeights.join(", ")}`);
 assert.strictEqual(coachPlanCopy.repeatedPrevious, 95, `Expected missing planned sets to repeat last previous row, got ${coachPlanCopy.repeatedPrevious}`);
+assert(!coachPlanCopy.copiedPlanIds[0] && coachPlanCopy.copiedPlanIds[1] && coachPlanCopy.copiedPlanIds[1] === coachPlanCopy.copiedPlanIds[2], "Expected only appended Coach drafts to carry copied-plan metadata.");
 assert(coachPlanCopy.editingIds.every((id) => id === null), "Expected Coach copied drafts to be unsaved templates.");
 
 const coachCopiedRowHighlight = runScenario(`
@@ -1160,6 +1166,54 @@ const coachCopiedRowHighlight = runScenario(`
 assert.strictEqual(coachCopiedRowHighlight.beforeCount, 2, `Expected both copied Coach rows to be highlighted, got ${coachCopiedRowHighlight.beforeCount}`);
 assert.strictEqual(coachCopiedRowHighlight.afterCount, 1, `Expected dirty copied row to lose highlight only for that row, got ${coachCopiedRowHighlight.afterCount}`);
 assert.strictEqual(coachCopiedRowHighlight.savedHasMetadata, false, "Expected Coach copied row metadata to stay draft-only.");
+
+const clearCopiedCoachLogRows = runScenario(`
+  ${reset}
+  state.workouts = [
+    makeWorkout({
+      exercise: "Bench Press",
+      exerciseId: "custom-bench",
+      primaryMuscles: ["chest"],
+      secondaryMuscles: ["triceps"],
+      setRows: [{ weight: 100, reps: 10, rir: 2, restSeconds: 120 }]
+    }),
+    makeWorkout({
+      exercise: "Cable Row",
+      exerciseId: "custom-row",
+      primaryMuscles: ["back"],
+      secondaryMuscles: ["biceps"],
+      setRows: [{ weight: 120, reps: 10, rir: 2, restSeconds: 120 }]
+    })
+  ];
+  state.workoutDraft = [defaultDraftExercise("Bench Press")];
+  state.workoutDraft[0].notes = "manual draft";
+  copyCoachPlanToLog({
+    sessionPlan: {
+      items: [
+        { exercise: resolveExerciseMeta("Bench Press"), muscle: { id: "chest" }, sets: 1, reason: "Chest plan" },
+        { exercise: resolveExerciseMeta("Cable Row"), muscle: { id: "back" }, sets: 1, reason: "Back plan" }
+      ]
+    }
+  });
+  state.workoutDraft[2].setRows[0].reps = 12;
+  markCoachCopiedRowDirty(state.workoutDraft[2].draftId, 0);
+  var copiedId = state.copiedCoachPlan.id;
+  var result = clearCopiedCoachLogDrafts(copiedId);
+  ({
+    removed: result.removed,
+    preserved: result.preserved,
+    exercises: state.workoutDraft.map((draft) => draft.exercise),
+    notes: state.workoutDraft.map((draft) => draft.notes || ""),
+    copiedMarkers: state.workoutDraft.map((draft) => draft.coachCopiedPlanId || "")
+  });
+`);
+
+assert.strictEqual(clearCopiedCoachLogRows.removed, 1, `Expected one untouched copied Coach draft to be removed, got ${clearCopiedCoachLogRows.removed}`);
+assert.strictEqual(clearCopiedCoachLogRows.preserved, 1, `Expected one edited copied Coach draft to be preserved, got ${clearCopiedCoachLogRows.preserved}`);
+assert.deepEqual(clearCopiedCoachLogRows.exercises, ["Bench Press", "Cable Row"], `Expected manual draft and edited copied draft to remain, got ${clearCopiedCoachLogRows.exercises.join(", ")}`);
+assert.strictEqual(clearCopiedCoachLogRows.notes[0], "manual draft", "Expected non-Coach draft to be retained.");
+assert(clearCopiedCoachLogRows.copiedMarkers.every((value) => !value), "Expected preserved edited copied draft to have copied metadata stripped.");
+assert(!appCode.includes("state.workoutDraft = [defaultDraftExercise(state.selectedExercise)]"), "Expected exercise Log actions to append instead of replacing the active draft.");
 
 const renamedExerciseIdentity = runScenario(`
   ${reset}
@@ -1954,6 +2008,7 @@ const maintenanceSettingsAndTrends = runScenario(`
   var trends = renderTrends();
   var singlePointMaintenanceChart = lineChart([{ label: "07-13", value: 2372 }], "#4cc9f0", "", { axisMinRange: 300, showAverage: false });
   var safe = exportSafeSettings();
+  var syncRecord = buildLocalSyncRecords().find((record) => record.recordType === "preference" && record.recordId === "maintenanceProfile");
   var normalized = normalizeBackupPayload({ workouts: [], metrics: [], settings: { maintenanceProfile: safe.maintenanceProfile } });
   state.settings.maintenanceProfile = {};
   var prompt = renderTrends();
@@ -1967,7 +2022,8 @@ const maintenanceSettingsAndTrends = runScenario(`
     singlePointAxisLabels: (singlePointMaintenanceChart.match(/chart-y-axis[\\s\\S]*?<\\/div>/) || [""])[0],
     promptHasSetup: prompt.includes("Complete Maintenance profile in Settings"),
     safeActivity: safe.maintenanceProfile.activityLevel,
-    normalizedActivity: normalized.settings.maintenanceProfile.activityLevel
+    normalizedActivity: normalized.settings.maintenanceProfile.activityLevel,
+    syncActivity: syncRecord?.payload?.value?.activityLevel || ""
   });
 `);
 
@@ -1982,6 +2038,7 @@ assert.strictEqual(maintenanceSettingsAndTrends.trendsHasEstimateLabel, true, "E
 assert.strictEqual(maintenanceSettingsAndTrends.promptHasSetup, true, "Expected incomplete profile to show maintenance setup prompt.");
 assert.strictEqual(maintenanceSettingsAndTrends.safeActivity, "moderate", "Expected safe settings export to include maintenance profile.");
 assert.strictEqual(maintenanceSettingsAndTrends.normalizedActivity, "moderate", "Expected backup normalization to preserve maintenance profile.");
+assert.strictEqual(maintenanceSettingsAndTrends.syncActivity, "moderate", "Expected record sync payload to include maintenance profile.");
 
 const mobileQolMarkup = runScenario(`
   ${reset}
