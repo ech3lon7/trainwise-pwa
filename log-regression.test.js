@@ -195,9 +195,9 @@ assert(!appCode.includes('selectedExercise: "Push-up"'), "Expected Log startup n
 assert(!appCode.includes('showBanner("Unsaved draft restored."'), "Expected startup draft recovery not to show a top banner.");
 assert(appCode.includes("notifyMetricSaved"), "Expected metrics saves to use a dedicated bottom-only notification helper.");
 assert(!stylesCode.includes(".mobile-quick-toggle"), "Expected floating quick action button styling to be removed.");
-assert(indexCode.includes("v=1.5.56"), "Expected index shell references to use bumped app version.");
+assert(indexCode.includes("v=1.5.65"), "Expected index shell references to use bumped app version.");
 assert(!indexCode.includes('id="app" class="app-content" aria-live'), "Expected broad app aria-live to be removed in favor of targeted live regions.");
-assert(serviceWorkerCode.includes("trainwise-cache-v78"), "Expected service worker cache version bump.");
+assert(serviceWorkerCode.includes("trainwise-cache-v87"), "Expected service worker cache version bump.");
 assert(appCode.includes("data-settings-panel"), "Expected Settings panels to preserve open state with stable panel ids.");
 assert(appCode.includes('forceSettingsPanelOpen("supabase-sync")'), "Expected Supabase actions to keep the Supabase panel open after rendering.");
 
@@ -990,8 +990,9 @@ assert(/ensureUiAudioReady\(\)\.then\(\(context\) => \{\s*if \(context\) flushUi
 assert(appCode.includes('context.addEventListener?.("statechange", handleStateChange)'), "Expected browser-driven audio context interruptions to be observed.");
 assert(appCode.includes('if (context.state === "running") flushUiCueQueue(context)'), "Expected queued cues to flush when the audio context resumes.");
 assert(appCode.includes("activeUiFallbackAudio.add(audio)"), "Expected fallback audio players to stay retained until playback ends.");
-assert(/visibilitychange[\s\S]{0,180}else unlockUiAudio\(\)/.test(appCode), "Expected audio to retry when the app becomes visible again.");
-assert(/addEventListener\?\.\("focus"[\s\S]{0,180}unlockUiAudio\(\)/.test(appCode), "Expected audio to retry when the app regains focus.");
+assert(/visibilitychange[\s\S]{0,180}if \(document\.hidden\) markUiAudioForResume\(\)/.test(appCode), "Expected visibility changes to mark audio for gesture-time resume.");
+assert(!/visibilitychange[\s\S]{0,180}else unlockUiAudio\(\)/.test(appCode), "Expected visibility changes not to create or resume audio outside a user gesture.");
+assert(!/addEventListener\?\.\("focus"[\s\S]{0,180}unlockUiAudio\(\)/.test(appCode), "Expected focus events not to create or resume audio outside a user gesture.");
 
 const logLoadDirectionIndicator = runScenario(`
   ${reset}
@@ -1095,6 +1096,8 @@ const coachPlanCopy = runScenario(`
       ]
     })
   ];
+  state.workoutDraft = [defaultDraftExercise("Bench Press")];
+  state.workoutDraft[0].notes = "Keep this draft";
   copyCoachPlanToLog({
     sessionPlan: {
       items: [
@@ -1106,18 +1109,22 @@ const coachPlanCopy = runScenario(`
   ({
     activeTab: state.activeTab,
     draftExercises: state.workoutDraft.map((draft) => draft.exercise),
+    draftNotes: state.workoutDraft.map((draft) => draft.notes || ""),
     setCounts: state.workoutDraft.map((draft) => draft.setRows.length),
     firstWeights: state.workoutDraft.map((draft) => draft.setRows[0].weight),
-    repeatedPrevious: state.workoutDraft[0].setRows[2].weight,
+    repeatedPrevious: state.workoutDraft[1].setRows[2].weight,
+    copiedPlanIds: state.workoutDraft.map((draft) => draft.coachCopiedPlanId || ""),
     editingIds: state.workoutDraft.map((draft) => draft.editingWorkoutId)
   });
 `);
 
 assert.strictEqual(coachPlanCopy.activeTab, "log", `Expected Coach copy to switch to Log, got ${coachPlanCopy.activeTab}`);
-assert.deepEqual(coachPlanCopy.draftExercises, ["Bench Press", "Cable Row"], `Expected Coach copy order, got ${coachPlanCopy.draftExercises.join(", ")}`);
-assert.deepEqual(coachPlanCopy.setCounts, [3, 2], `Expected planned set counts, got ${coachPlanCopy.setCounts.join(", ")}`);
-assert.deepEqual(coachPlanCopy.firstWeights, [100, 120], `Expected copied previous weights, got ${coachPlanCopy.firstWeights.join(", ")}`);
+assert.deepEqual(coachPlanCopy.draftExercises, ["Bench Press", "Bench Press", "Cable Row"], `Expected Coach copy to append after existing draft, got ${coachPlanCopy.draftExercises.join(", ")}`);
+assert.strictEqual(coachPlanCopy.draftNotes[0], "Keep this draft", "Expected existing draft to survive Coach copy.");
+assert.deepEqual(coachPlanCopy.setCounts, [3, 3, 2], `Expected existing draft plus planned set counts, got ${coachPlanCopy.setCounts.join(", ")}`);
+assert.deepEqual(coachPlanCopy.firstWeights, ["", 100, 120], `Expected copied previous weights after existing draft, got ${coachPlanCopy.firstWeights.join(", ")}`);
 assert.strictEqual(coachPlanCopy.repeatedPrevious, 95, `Expected missing planned sets to repeat last previous row, got ${coachPlanCopy.repeatedPrevious}`);
+assert(!coachPlanCopy.copiedPlanIds[0] && coachPlanCopy.copiedPlanIds[1] && coachPlanCopy.copiedPlanIds[1] === coachPlanCopy.copiedPlanIds[2], "Expected only appended Coach drafts to carry copied-plan metadata.");
 assert(coachPlanCopy.editingIds.every((id) => id === null), "Expected Coach copied drafts to be unsaved templates.");
 
 const coachCopiedRowHighlight = runScenario(`
@@ -1159,6 +1166,54 @@ const coachCopiedRowHighlight = runScenario(`
 assert.strictEqual(coachCopiedRowHighlight.beforeCount, 2, `Expected both copied Coach rows to be highlighted, got ${coachCopiedRowHighlight.beforeCount}`);
 assert.strictEqual(coachCopiedRowHighlight.afterCount, 1, `Expected dirty copied row to lose highlight only for that row, got ${coachCopiedRowHighlight.afterCount}`);
 assert.strictEqual(coachCopiedRowHighlight.savedHasMetadata, false, "Expected Coach copied row metadata to stay draft-only.");
+
+const clearCopiedCoachLogRows = runScenario(`
+  ${reset}
+  state.workouts = [
+    makeWorkout({
+      exercise: "Bench Press",
+      exerciseId: "custom-bench",
+      primaryMuscles: ["chest"],
+      secondaryMuscles: ["triceps"],
+      setRows: [{ weight: 100, reps: 10, rir: 2, restSeconds: 120 }]
+    }),
+    makeWorkout({
+      exercise: "Cable Row",
+      exerciseId: "custom-row",
+      primaryMuscles: ["back"],
+      secondaryMuscles: ["biceps"],
+      setRows: [{ weight: 120, reps: 10, rir: 2, restSeconds: 120 }]
+    })
+  ];
+  state.workoutDraft = [defaultDraftExercise("Bench Press")];
+  state.workoutDraft[0].notes = "manual draft";
+  copyCoachPlanToLog({
+    sessionPlan: {
+      items: [
+        { exercise: resolveExerciseMeta("Bench Press"), muscle: { id: "chest" }, sets: 1, reason: "Chest plan" },
+        { exercise: resolveExerciseMeta("Cable Row"), muscle: { id: "back" }, sets: 1, reason: "Back plan" }
+      ]
+    }
+  });
+  state.workoutDraft[2].setRows[0].reps = 12;
+  markCoachCopiedRowDirty(state.workoutDraft[2].draftId, 0);
+  var copiedId = state.copiedCoachPlan.id;
+  var result = clearCopiedCoachLogDrafts(copiedId);
+  ({
+    removed: result.removed,
+    preserved: result.preserved,
+    exercises: state.workoutDraft.map((draft) => draft.exercise),
+    notes: state.workoutDraft.map((draft) => draft.notes || ""),
+    copiedMarkers: state.workoutDraft.map((draft) => draft.coachCopiedPlanId || "")
+  });
+`);
+
+assert.strictEqual(clearCopiedCoachLogRows.removed, 1, `Expected one untouched copied Coach draft to be removed, got ${clearCopiedCoachLogRows.removed}`);
+assert.strictEqual(clearCopiedCoachLogRows.preserved, 1, `Expected one edited copied Coach draft to be preserved, got ${clearCopiedCoachLogRows.preserved}`);
+assert.deepEqual(clearCopiedCoachLogRows.exercises, ["Bench Press", "Cable Row"], `Expected manual draft and edited copied draft to remain, got ${clearCopiedCoachLogRows.exercises.join(", ")}`);
+assert.strictEqual(clearCopiedCoachLogRows.notes[0], "manual draft", "Expected non-Coach draft to be retained.");
+assert(clearCopiedCoachLogRows.copiedMarkers.every((value) => !value), "Expected preserved edited copied draft to have copied metadata stripped.");
+assert(!appCode.includes("state.workoutDraft = [defaultDraftExercise(state.selectedExercise)]"), "Expected exercise Log actions to append instead of replacing the active draft.");
 
 const renamedExerciseIdentity = runScenario(`
   ${reset}
@@ -1929,6 +1984,61 @@ assert.strictEqual(chartAxesAndAverages.emptyHasNoAxis, true, "Expected empty ch
 assert(chartAxesAndAverages.trendsOverlayCount >= 7, `Expected every Trends chart to render an average overlay, got ${chartAxesAndAverages.trendsOverlayCount}.`);
 assert.strictEqual(chartAxesAndAverages.trendsUsesEntryWording, true, "Expected workout-derived Trends charts to use 7-entry average wording.");
 assert.strictEqual(chartAxesAndAverages.trendsUsesDayWordingForHealth, true, "Expected health Trends charts to use 7d average wording.");
+
+const maintenanceSettingsAndTrends = runScenario(`
+  ${reset}
+  state.settings.maintenanceProfile = {
+    sex: "male",
+    birthYear: 1990,
+    heightFeet: 5,
+    heightInches: 10,
+    activityLevel: "moderate",
+    lastReviewedAt: "2026-06-17T12:00:00.000Z"
+  };
+  state.metrics = [
+    { id: "m1", date: "2026-06-11", bodyWeight: 178, calories: 2500, protein: 170 },
+    { id: "m2", date: "2026-06-12", bodyWeight: 179, calories: 2600, protein: 170 },
+    { id: "m3", date: "2026-06-13", bodyWeight: 180, calories: 2700, protein: 170 },
+    { id: "m4", date: "2026-06-14", bodyWeight: 181, calories: 2800, protein: 170 },
+    { id: "m5", date: "2026-06-15", bodyWeight: 182, calories: 2900, protein: 170 },
+    { id: "m6", date: "2026-06-16", bodyWeight: 183, calories: 3000, protein: 170 },
+    { id: "m7", date: "2026-06-17", bodyWeight: 184, calories: 3100, protein: 170 }
+  ];
+  var form = renderMaintenanceProfileForm();
+  var trends = renderTrends();
+  var singlePointMaintenanceChart = lineChart([{ label: "07-13", value: 2372 }], "#4cc9f0", "", { axisMinRange: 300, showAverage: false });
+  var safe = exportSafeSettings();
+  var syncRecord = buildLocalSyncRecords().find((record) => record.recordType === "preference" && record.recordId === "maintenanceProfile");
+  var normalized = normalizeBackupPayload({ workouts: [], metrics: [], settings: { maintenanceProfile: safe.maintenanceProfile } });
+  state.settings.maintenanceProfile = {};
+  var prompt = renderTrends();
+  ({
+    formHasFields: form.includes("maintenance-sex") && form.includes("maintenance-birth-year") && form.includes("maintenance-activity"),
+    formHasPreview: form.includes("Estimated maintenance") && form.includes("7d avg body weight"),
+    trendsHasChart: trends.includes("Estimated maintenance") && trends.includes("#4cc9f0"),
+    trendsHasDistinctMaintenanceColor: trends.includes("#4cc9f0"),
+    trendsHasEstimateLabel: trends.includes("cal/day"),
+    trendsHasOnlyMaintenanceLine: !trends.includes("maintenance-polyline") && !trends.includes("Calories vs maintenance"),
+    singlePointAxisLabels: (singlePointMaintenanceChart.match(/chart-y-axis[\\s\\S]*?<\\/div>/) || [""])[0],
+    promptHasSetup: prompt.includes("Complete Maintenance profile in Settings"),
+    safeActivity: safe.maintenanceProfile.activityLevel,
+    normalizedActivity: normalized.settings.maintenanceProfile.activityLevel,
+    syncActivity: syncRecord?.payload?.value?.activityLevel || ""
+  });
+`);
+
+assert.strictEqual(maintenanceSettingsAndTrends.formHasFields, true, "Expected Settings to render maintenance profile fields.");
+assert.strictEqual(maintenanceSettingsAndTrends.formHasPreview, true, "Expected Settings to render maintenance profile preview.");
+assert.strictEqual(maintenanceSettingsAndTrends.trendsHasChart, true, "Expected Health trends to render Estimated maintenance with maintenance line.");
+assert.strictEqual(maintenanceSettingsAndTrends.trendsHasDistinctMaintenanceColor, true, "Expected Estimated maintenance to use a distinct maintenance line color.");
+assert.strictEqual(maintenanceSettingsAndTrends.trendsHasOnlyMaintenanceLine, true, "Expected Estimated maintenance chart to render only the maintenance line.");
+assert(maintenanceSettingsAndTrends.singlePointAxisLabels.includes(">2.6k<") && maintenanceSettingsAndTrends.singlePointAxisLabels.includes(">2.4k<") && maintenanceSettingsAndTrends.singlePointAxisLabels.includes(">2.2k<"), `Expected single-point maintenance chart to show distinct padded Y-axis labels, got ${maintenanceSettingsAndTrends.singlePointAxisLabels}`);
+assert(!appCode.includes("comparisonPoints: calorieAverageSeries"), "Expected Estimated maintenance to show one maintenance reference line instead of duplicating the calorie average overlay.");
+assert.strictEqual(maintenanceSettingsAndTrends.trendsHasEstimateLabel, true, "Expected maintenance chart header to show estimated maintenance.");
+assert.strictEqual(maintenanceSettingsAndTrends.promptHasSetup, true, "Expected incomplete profile to show maintenance setup prompt.");
+assert.strictEqual(maintenanceSettingsAndTrends.safeActivity, "moderate", "Expected safe settings export to include maintenance profile.");
+assert.strictEqual(maintenanceSettingsAndTrends.normalizedActivity, "moderate", "Expected backup normalization to preserve maintenance profile.");
+assert.strictEqual(maintenanceSettingsAndTrends.syncActivity, "moderate", "Expected record sync payload to include maintenance profile.");
 
 const mobileQolMarkup = runScenario(`
   ${reset}

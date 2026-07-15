@@ -475,6 +475,47 @@ const planIncludesProgressionTarget = runScenario(`
 assert(planIncludesProgressionTarget.label.includes("Target"), `Expected plan item to expose an actionable progression target, got ${planIncludesProgressionTarget.label}`);
 assert(planIncludesProgressionTarget.detail.includes("RIR"), `Expected progression detail to include RIR, got ${planIncludesProgressionTarget.detail}`);
 
+const progressionModeConstraints = runScenario(`
+  ${resetAndHelpers}
+  state.settings.customExercises = [
+    { id: "curl", name: "Bicep Curl", primaryMuscles: ["biceps"], secondaryMuscles: [], equipment: "dumbbells", reps: "8-15", rest: "60-120 sec", cue: "Curl.", userCreated: true, progressionMode: "normal" }
+  ];
+  state.workouts = [
+    {
+      id: "curl-good",
+      date: todayISO(),
+      exercise: "Bicep Curl",
+      exerciseId: "curl",
+      primaryMuscles: ["biceps"],
+      secondaryMuscles: [],
+      setRows: [
+        { weight: 25, reps: 15, rir: 2, restSeconds: 90 },
+        { weight: 25, reps: 13, rir: 2, restSeconds: 90 }
+      ]
+    }
+  ];
+  var normal = progressionTargetForExercise("Bicep Curl");
+  state.settings.customExercises[0].progressionMode = "rep-first";
+  var repFirst = progressionTargetForExercise("Bicep Curl");
+  state.settings.customExercises[0].progressionMode = "small-jumps";
+  var smallJumps = progressionTargetForExercise("Bicep Curl");
+  ({
+    normalIncrease: normal.increaseLoad,
+    normalTarget: normal.target,
+    repFirstIncrease: repFirst.increaseLoad,
+    repFirstTarget: repFirst.target,
+    repFirstBody: repFirst.body,
+    smallJumpBody: smallJumps.body
+  });
+`);
+
+assert.strictEqual(progressionModeConstraints.normalIncrease, true, "Expected normal progression to allow load increases when reps and RIR support it.");
+assert(progressionModeConstraints.normalTarget.includes("27.5 lb") || progressionModeConstraints.normalTarget.includes("30 lb"), `Expected normal target to increase load, got ${progressionModeConstraints.normalTarget}`);
+assert.strictEqual(progressionModeConstraints.repFirstIncrease, false, "Expected rep-first progression to suppress automatic load increases.");
+assert(progressionModeConstraints.repFirstTarget.startsWith("25"), `Expected rep-first target to keep current load, got ${progressionModeConstraints.repFirstTarget}`);
+assert(progressionModeConstraints.repFirstBody.includes("load-limited"), `Expected rep-first Coach wording to explain load limits, got ${progressionModeConstraints.repFirstBody}`);
+assert(progressionModeConstraints.smallJumpBody.includes("smallest practical load jump"), `Expected small-jump Coach wording, got ${progressionModeConstraints.smallJumpBody}`);
+
 const nutritionGoalDefault = runScenario(`
   ${resetAndHelpers}
   ({
@@ -575,6 +616,113 @@ const nutritionGoalExport = runScenario(`
 `);
 
 assert.strictEqual(nutritionGoalExport, "cut", `Expected backup-safe settings to include nutrition goal, got ${nutritionGoalExport}`);
+
+const maintenanceProfileCalculations = runScenario(`
+  ${resetAndHelpers}
+  state.settings.maintenanceProfile = {
+    sex: "male",
+    birthYear: 1990,
+    heightFeet: 5,
+    heightInches: 10,
+    activityLevel: "moderate"
+  };
+  state.metrics = [
+    { id: "m1", date: dateDaysAgo(6), bodyWeight: 178, calories: 2600, protein: 170 },
+    { id: "m2", date: dateDaysAgo(5), bodyWeight: 179, calories: 2600, protein: 170 },
+    { id: "m3", date: dateDaysAgo(4), bodyWeight: 180, calories: 2600, protein: 170 },
+    { id: "m4", date: dateDaysAgo(3), bodyWeight: 181, calories: 2600, protein: 170 },
+    { id: "m5", date: dateDaysAgo(2), bodyWeight: 182, calories: 2600, protein: 170 },
+    { id: "m6", date: dateDaysAgo(1), bodyWeight: 183, calories: 2600, protein: 170 },
+    { id: "m7", date: dateDaysAgo(0), bodyWeight: 184, calories: 2600, protein: 170 }
+  ];
+  var male = maintenanceEstimate();
+  state.settings.maintenanceProfile.sex = "female";
+  var female = maintenanceEstimate();
+  ({
+    maleBmr: Math.round(male.bmr),
+    maleMaintenance: Math.round(male.maintenanceCalories),
+    femaleBmr: Math.round(female.bmr),
+    femaleMaintenance: Math.round(female.maintenanceCalories),
+    weightUsed: male.weightLb,
+    weightSource: male.weightSource,
+    summary: maintenanceProfileSummary(male),
+    confidence: male.confidence
+  });
+`);
+
+assert.strictEqual(maintenanceProfileCalculations.maleBmr, 1757, `Expected male Mifflin-St Jeor BMR near 1757, got ${maintenanceProfileCalculations.maleBmr}`);
+assert.strictEqual(maintenanceProfileCalculations.maleMaintenance, 2724, `Expected moderate male maintenance near 2724, got ${maintenanceProfileCalculations.maleMaintenance}`);
+assert.strictEqual(maintenanceProfileCalculations.femaleBmr, 1591, `Expected female Mifflin-St Jeor BMR near 1591, got ${maintenanceProfileCalculations.femaleBmr}`);
+assert.strictEqual(maintenanceProfileCalculations.femaleMaintenance, 2466, `Expected moderate female maintenance near 2466, got ${maintenanceProfileCalculations.femaleMaintenance}`);
+assert.strictEqual(maintenanceProfileCalculations.weightUsed, 181, `Expected 7-day average weight to be used, got ${maintenanceProfileCalculations.weightUsed}`);
+assert.strictEqual(maintenanceProfileCalculations.weightSource, "7d avg body weight", `Expected maintenance to prefer 7d average weight, got ${maintenanceProfileCalculations.weightSource}`);
+assert(maintenanceProfileCalculations.summary.includes("Male, 36") && maintenanceProfileCalculations.summary.includes("5'10\"") && maintenanceProfileCalculations.summary.includes("Moderate"), `Expected readable profile summary, got ${maintenanceProfileCalculations.summary}`);
+assert.strictEqual(maintenanceProfileCalculations.confidence, "High", `Expected complete recent profile to be high confidence, got ${maintenanceProfileCalculations.confidence}`);
+
+const maintenanceMissingGuidance = runScenario(`
+  ${resetAndHelpers}
+  state.metrics = [{ id: "m1", date: dateDaysAgo(0), bodyWeight: 180, calories: 2500, protein: 180 }];
+  var estimate = maintenanceEstimate();
+  ({
+    complete: estimate.complete,
+    confidence: estimate.confidence,
+    missing: estimate.missing,
+    recommendation: healthCoachSummary().recommendation
+  });
+`);
+
+assert.strictEqual(maintenanceMissingGuidance.complete, false, "Expected incomplete maintenance profile to be unavailable.");
+assert.strictEqual(maintenanceMissingGuidance.confidence, "Low", `Expected incomplete maintenance profile to be low confidence, got ${maintenanceMissingGuidance.confidence}`);
+assert(maintenanceMissingGuidance.missing.includes("sex") && maintenanceMissingGuidance.missing.includes("activity level"), `Expected missing profile fields, got ${maintenanceMissingGuidance.missing.join(", ")}`);
+assert(maintenanceMissingGuidance.recommendation.includes("Log body weight consistently"), `Expected existing data-needed guidance to remain, got ${maintenanceMissingGuidance.recommendation}`);
+
+const maintenanceAwareHealthCoach = runScenario(`
+  ${resetAndHelpers}
+  state.settings.nutritionGoal = "cut";
+  state.settings.maintenanceProfile = {
+    sex: "male",
+    birthYear: 1990,
+    heightFeet: 5,
+    heightInches: 10,
+    activityLevel: "moderate"
+  };
+  state.metrics = [
+    { id: "m1", date: dateDaysAgo(13), bodyWeight: 180, calories: 3000, protein: 180 },
+    { id: "m2", date: dateDaysAgo(6), bodyWeight: 180.1, calories: 3000, protein: 180 },
+    { id: "m3", date: dateDaysAgo(5), bodyWeight: 180.1, calories: 3000, protein: 180 },
+    { id: "m4", date: dateDaysAgo(4), bodyWeight: 180.1, calories: 3000, protein: 180 },
+    { id: "m5", date: dateDaysAgo(3), bodyWeight: 180.2, calories: 3000, protein: 180 },
+    { id: "m6", date: dateDaysAgo(2), bodyWeight: 180.2, calories: 3000, protein: 180 },
+    { id: "m7", date: dateDaysAgo(1), bodyWeight: 180.2, calories: 3000, protein: 180 },
+    { id: "m8", date: dateDaysAgo(0), bodyWeight: 180.2, calories: 3000, protein: 180 }
+  ];
+  var coach = healthCoachSummary();
+  ({
+    maintenance: Math.round(coach.maintenance.maintenanceCalories),
+    recommendation: coach.recommendation,
+    stats: healthCoachStatMarkup(coach)
+  });
+`);
+
+assert(maintenanceAwareHealthCoach.maintenance > 0, "Expected health coach summary to include estimated maintenance.");
+assert(maintenanceAwareHealthCoach.recommendation.includes("estimated maintenance"), `Expected health recommendation to compare calories against maintenance, got ${maintenanceAwareHealthCoach.recommendation}`);
+assert(maintenanceAwareHealthCoach.recommendation.includes("-150-250 cal/day"), `Expected cut guidance above maintenance to suggest a small decrease, got ${maintenanceAwareHealthCoach.recommendation}`);
+assert(maintenanceAwareHealthCoach.stats.includes("Maintenance") && maintenanceAwareHealthCoach.stats.includes("confidence"), "Expected Today/Coach health stats to show maintenance and confidence.");
+
+const maintenanceProfileExport = runScenario(`
+  ${resetAndHelpers}
+  state.settings.maintenanceProfile = {
+    sex: "male",
+    birthYear: 1990,
+    heightFeet: 5,
+    heightInches: 10,
+    activityLevel: "moderate",
+    lastReviewedAt: "2026-06-17T12:00:00.000Z"
+  };
+  exportSafeSettings().maintenanceProfile;
+`);
+
+assert.strictEqual(maintenanceProfileExport.activityLevel, "moderate", "Expected backup-safe settings to include maintenance profile.");
 
 const secondaryReadiness = runScenario(`
   ${resetAndHelpers}

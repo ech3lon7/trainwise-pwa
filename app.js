@@ -3,13 +3,13 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 3;
 const STORES = ["workouts", "metrics", "settings", "syncQueue"];
-const APP_VERSION = "1.5.56";
+const APP_VERSION = "1.5.65";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 const DRAFT_RECOVERY_KEY = "trainwise-draft-recovery-v1";
 const COPIED_COACH_PLAN_KEY = "trainwise-copied-coach-plan-v1";
 const SYNC_BOOTSTRAP_VERSION = 1;
 const SYNC_POLL_MS = 60000;
-const SYNC_SAFE_PREFERENCES = ["hypertrophyProfile", "nutritionGoal", "dashboardWidgets", "dashboardWidgetOrder"];
+const SYNC_SAFE_PREFERENCES = ["hypertrophyProfile", "nutritionGoal", "maintenanceProfile", "dashboardWidgets", "dashboardWidgetOrder"];
 const COLLAPSE_ANIMATION_MS = 360;
 const COLLAPSE_REVEAL_MS = 1600;
 const COLLAPSIBLE_SELECTOR = "details.collapsible-panel, details.coverage-row, details.inline-disclosure";
@@ -43,6 +43,21 @@ const NUTRITION_GOAL_OPTIONS = [
   { id: "bulk", label: "Bulk", hint: "Lean gain" },
   { id: "maintain", label: "Maintain", hint: "Hold steady" },
   { id: "cut", label: "Cut", hint: "Slow loss" }
+];
+const MAINTENANCE_SEX_OPTIONS = [
+  { id: "male", label: "Male" },
+  { id: "female", label: "Female" }
+];
+const MAINTENANCE_ACTIVITY_OPTIONS = [
+  { id: "sedentary", label: "Mostly seated", multiplier: 1.2, hint: "Little cardio or daily movement" },
+  { id: "light", label: "Light active", multiplier: 1.375, hint: "Lift 3-5x/week, low daily movement" },
+  { id: "moderate", label: "Moderate", multiplier: 1.55, hint: "Lift 4-6x/week or regular cardio" },
+  { id: "very", label: "Very active", multiplier: 1.725, hint: "Active job or hard cardio most days" }
+];
+const PROGRESSION_MODE_OPTIONS = [
+  { id: "normal", label: "Normal", hint: "Load can progress normally" },
+  { id: "small-jumps", label: "Small jumps only", hint: "Use the smallest load jump available" },
+  { id: "rep-first", label: "Rep-first / load-limited", hint: "Add reps or control before load" }
 ];
 const NUTRITION_MEALS = [
   { id: "breakfast", label: "Breakfast" },
@@ -497,7 +512,7 @@ function queueUiCue(type) {
 }
 
 function flushUiCueQueue(context) {
-  if (!context || context.state !== "running") return false;
+  if (!context || context.state === "closed") return false;
   const queued = pendingUiCues.splice(0, pendingUiCues.length);
   queued.forEach((type) => emitUiCue(context, type));
   return queued.length > 0;
@@ -539,7 +554,14 @@ function ensureUiAudioReady() {
           uiAudioNeedsResume = uiAudioContext.state !== "running";
           return uiAudioContext.state === "running" ? uiAudioContext : null;
         })
-        .catch(() => null)
+        .catch(() => {
+          if (uiAudioContext?.state === "suspended") {
+            try { uiAudioContext.close(); } catch {}
+            uiAudioContext = null;
+          }
+          uiAudioNeedsResume = true;
+          return null;
+        })
         .finally(() => { uiAudioResumePromise = null; });
     }
     return uiAudioResumePromise;
@@ -567,9 +589,11 @@ function playUiCue(type = "tap", options = {}) {
   if (["tap", "navigate"].includes(type) && now - lastUiCueAt < 45) return false;
   lastUiCueAt = now;
   queueUiCue(type);
-  ensureUiAudioReady().then((context) => {
-    if (context) flushUiCueQueue(context);
-    else flushUiCueFallback();
+  if (uiAudioContext && uiAudioContext.state !== "closed") {
+    flushUiCueQueue(uiAudioContext);
+  }
+  ensureUiAudioReady().then((ctx) => {
+    if (ctx) flushUiCueQueue(ctx);
   });
   return true;
 }
@@ -872,6 +896,7 @@ function localSyncRecord(recordType, recordId, payload) {
 function safePreferenceValue(key) {
   if (key === "hypertrophyProfile") return hypertrophySettings();
   if (key === "nutritionGoal") return selectedNutritionGoal();
+  if (key === "maintenanceProfile") return selectedMaintenanceProfile();
   if (key === "dashboardWidgets") return selectedDashboardWidgets();
   if (key === "dashboardWidgetOrder") return dashboardWidgetOrder();
   return undefined;
@@ -941,6 +966,15 @@ function uniqueMuscles(values = []) {
     .filter((value) => valid.has(value) && !seen.has(value) && seen.add(value));
 }
 
+function normalizeProgressionMode(value) {
+  const mode = String(value || "normal").trim();
+  return PROGRESSION_MODE_OPTIONS.some((option) => option.id === mode) ? mode : "normal";
+}
+
+function progressionModeLabel(value) {
+  return PROGRESSION_MODE_OPTIONS.find((option) => option.id === normalizeProgressionMode(value))?.label || "Normal";
+}
+
 function normalizeExerciseDefinition(exercise) {
   const name = String(exercise?.name || "").trim();
   if (!name) return null;
@@ -958,6 +992,7 @@ function normalizeExerciseDefinition(exercise) {
     equipment: String(exercise.equipment || "custom").trim() || "custom",
     reps: String(exercise.reps || "8-15").trim() || "8-15",
     rest: String(exercise.rest || "60-120 sec").trim() || "60-120 sec",
+    progressionMode: normalizeProgressionMode(exercise.progressionMode),
     cue: String(exercise.cue || "Custom exercise. Keep form strict and progress gradually.").trim(),
     userCreated: true,
     createdAt: exercise.createdAt || new Date().toISOString(),
@@ -1189,9 +1224,16 @@ function isCoachCopiedRowUnchanged(draft = {}, row = {}, index = 0) {
   return copiedRowMatches(row, draft.coachCopiedRows[index]);
 }
 
+function isCoachCopiedDraftUntouched(draft = {}) {
+  if (!Array.isArray(draft.coachCopiedRows) || !Array.isArray(draft.setRows)) return false;
+  if ((draft.coachCopiedDirtyRows || []).length) return false;
+  return draft.setRows.every((row, index) => isCoachCopiedRowUnchanged(draft, row, index));
+}
+
 function clearCoachCopiedDraftMarkers(draft = {}) {
   delete draft.coachCopiedRows;
   delete draft.coachCopiedDirtyRows;
+  delete draft.coachCopiedPlanId;
 }
 
 function markCoachCopiedRowDirty(draftId, index) {
@@ -1559,6 +1601,7 @@ function exerciseFormValuesFromInput(data = {}) {
     equipment: String(formDataValue(data, "equipment") || "").trim(),
     reps: String(formDataValue(data, "reps") || "").trim(),
     rest: String(formDataValue(data, "rest") || "").trim(),
+    progressionMode: normalizeProgressionMode(formDataValue(data, "progressionMode")),
     cue: String(formDataValue(data, "cue") || "").trim()
   };
 }
@@ -1591,6 +1634,7 @@ function validateExerciseFormInput(data = {}, editingId = state.editingExerciseI
       equipment: values.equipment || "custom",
       reps,
       rest,
+      progressionMode: normalizeProgressionMode(values.progressionMode),
       cue: values.cue || "Custom exercise. Keep form strict and progress gradually."
     }
   };
@@ -1647,17 +1691,25 @@ function progressionTargetForExercise(exerciseName) {
   const nextRep = Math.min(range.high, top.reps + 1);
   const loadStep = top.weight >= 50 ? 5 : 2.5;
   const indicator = progressiveOverloadIndicator(exerciseName);
-  const target = increaseLoad
+  const progressionMode = normalizeProgressionMode(meta.progressionMode);
+  const constrainedLoad = increaseLoad && progressionMode !== "normal";
+  const target = increaseLoad && progressionMode === "normal"
     ? `${fmt(top.weight + loadStep, 1)} lb x ${fmt(range.low)}-${fmt(Math.max(range.low, Math.min(range.high, top.reps - 2)))}`
     : `${fmt(top.weight, 1)} lb x ${fmt(nextRep)}-${fmt(range.high)}`;
+  const modeCue = constrainedLoad
+    ? progressionMode === "small-jumps"
+      ? " Since this movement is marked small-jumps only, use the smallest practical load jump only if it is available; otherwise own the top reps first."
+      : " Since this movement is marked load-limited, add reps, control, or cleaner RIR before forcing more weight."
+    : "";
   return {
     exercise: exerciseName,
     latest,
     top,
     indicator,
-    increaseLoad,
+    increaseLoad: increaseLoad && progressionMode === "normal",
+    progressionMode,
     target,
-    body: `Last time you hit ${fmt(top.weight, 1)} lb x ${fmt(top.reps)} on ${exerciseName}. I'm setting ${target} as the next target - keep ${HYPERTROPHY.idealRirMin}-${HYPERTROPHY.idealRirMax} clean reps in reserve.`
+    body: `Last time you hit ${fmt(top.weight, 1)} lb x ${fmt(top.reps)} on ${exerciseName}. I'm setting ${target} as the next target - keep ${HYPERTROPHY.idealRirMin}-${HYPERTROPHY.idealRirMax} clean reps in reserve.${modeCue}`
   };
 }
 
@@ -1927,6 +1979,115 @@ function nutritionGoalLabel(goal = selectedNutritionGoal()) {
   return NUTRITION_GOAL_OPTIONS.find((option) => option.id === goal)?.label || "Bulk";
 }
 
+function normalizeMaintenanceProfile(profile = {}) {
+  const sex = MAINTENANCE_SEX_OPTIONS.some((option) => option.id === profile.sex) ? profile.sex : "";
+  const birthYear = Number(profile.birthYear);
+  const heightFeet = Number(profile.heightFeet);
+  const heightInches = Number(profile.heightInches);
+  const activityLevel = MAINTENANCE_ACTIVITY_OPTIONS.some((option) => option.id === profile.activityLevel) ? profile.activityLevel : "";
+  return {
+    sex,
+    birthYear: Number.isFinite(birthYear) && birthYear >= 1900 && birthYear <= new Date().getFullYear() ? Math.round(birthYear) : "",
+    heightFeet: Number.isFinite(heightFeet) && heightFeet >= 0 && heightFeet <= 9 ? Math.round(heightFeet) : "",
+    heightInches: Number.isFinite(heightInches) && heightInches >= 0 && heightInches <= 11 ? Math.round(heightInches) : "",
+    activityLevel,
+    lastReviewedAt: String(profile.lastReviewedAt || "")
+  };
+}
+
+function selectedMaintenanceProfile() {
+  return normalizeMaintenanceProfile(state.settings.maintenanceProfile || {});
+}
+
+function maintenanceActivityOption(activityLevel) {
+  return MAINTENANCE_ACTIVITY_OPTIONS.find((option) => option.id === activityLevel) || null;
+}
+
+function maintenanceProfileAge(profile = selectedMaintenanceProfile(), date = new Date()) {
+  if (!profile.birthYear) return 0;
+  return Math.max(0, date.getFullYear() - Number(profile.birthYear));
+}
+
+function maintenanceProfileHeightCm(profile = selectedMaintenanceProfile()) {
+  if (profile.heightFeet === "" || profile.heightInches === "") return 0;
+  const totalInches = Number(profile.heightFeet) * 12 + Number(profile.heightInches);
+  return totalInches > 0 ? totalInches * 2.54 : 0;
+}
+
+function maintenanceWeightPoint() {
+  const bodyWeightSeries = seriesFromMetrics("bodyWeight");
+  const average = latestRollingAverage(bodyWeightSeries, 7);
+  const latest = lastMetric("bodyWeight")?.bodyWeight || 0;
+  const value = average || latest;
+  return {
+    value,
+    source: average ? "7d avg body weight" : latest ? "latest body weight" : "missing body weight"
+  };
+}
+
+function maintenanceProfileMissingFields(profile = selectedMaintenanceProfile(), weight = maintenanceWeightPoint()) {
+  const missing = [];
+  if (!profile.sex) missing.push("sex");
+  if (!profile.birthYear) missing.push("birth year");
+  if (!maintenanceProfileHeightCm(profile)) missing.push("height");
+  if (!profile.activityLevel) missing.push("activity level");
+  if (!weight.value) missing.push("body weight");
+  return missing;
+}
+
+function maintenanceEstimate(profile = selectedMaintenanceProfile()) {
+  const normalized = normalizeMaintenanceProfile(profile);
+  const weight = maintenanceWeightPoint();
+  const missing = maintenanceProfileMissingFields(normalized, weight);
+  const age = maintenanceProfileAge(normalized);
+  const heightCm = maintenanceProfileHeightCm(normalized);
+  const activity = maintenanceActivityOption(normalized.activityLevel);
+  const weightKg = weight.value / 2.20462;
+  const complete = !missing.length;
+  const bmr = complete
+    ? (10 * weightKg) + (6.25 * heightCm) - (5 * age) + (normalized.sex === "male" ? 5 : -161)
+    : 0;
+  const maintenanceCalories = complete ? bmr * activity.multiplier : 0;
+  const calorieLogs = metricEntriesForField("calories", 7).length;
+  const weightLogs = metricEntriesForField("bodyWeight", 7).length;
+  const confidence = !complete
+    ? "Low"
+    : calorieLogs >= 7 && weightLogs >= 7
+      ? "High"
+      : calorieLogs >= 3 && weightLogs >= 3
+        ? "Medium"
+        : "Low";
+  const staleReview = normalized.lastReviewedAt
+    ? daysBetween(normalized.lastReviewedAt.slice(0, 10), todayISO()) > 60
+    : complete;
+  return {
+    profile: normalized,
+    complete,
+    missing,
+    age,
+    heightCm,
+    weightLb: weight.value,
+    weightSource: weight.source,
+    activity,
+    bmr,
+    maintenanceCalories,
+    confidence,
+    staleReview
+  };
+}
+
+function maintenanceProfileSummary(estimate = maintenanceEstimate()) {
+  const profile = estimate.profile;
+  if (!estimate.complete) return `Missing ${estimate.missing.join(", ") || "profile"}`;
+  const sex = MAINTENANCE_SEX_OPTIONS.find((option) => option.id === profile.sex)?.label || "Profile";
+  return `${sex}, ${estimate.age}, ${profile.heightFeet}'${profile.heightInches}", ${estimate.activity?.label || "activity"}`;
+}
+
+function maintenanceSeriesFor(points = [], estimate = maintenanceEstimate()) {
+  if (!estimate.complete || !estimate.maintenanceCalories || !points.length) return [];
+  return points.map((point) => ({ label: point.label, value: estimate.maintenanceCalories }));
+}
+
 function metricEntriesForField(field, days) {
   const start = recentDays(days);
   return canonicalMetricEntries()
@@ -1937,6 +2098,7 @@ function metricEntriesForField(field, days) {
 function healthCoachSummary() {
   const goal = selectedNutritionGoal();
   const protein = proteinTargets();
+  const maintenance = maintenanceEstimate();
   const calorieAverage = getAverage("calories", 7);
   const proteinAverage = getAverage("protein", 7);
   const latestWeight = lastMetric("bodyWeight")?.bodyWeight || 0;
@@ -1956,6 +2118,7 @@ function healthCoachSummary() {
     latestWeight,
     weightTrendLb,
     weeklyWeightRate,
+    maintenance,
     proteinFloor: protein.floor,
     proteinUpper: protein.upper,
     tone: "warn",
@@ -1977,6 +2140,41 @@ function healthCoachSummary() {
   }
   if (!protein.bodyWeightLb || !proteinAverage) {
     summary.recommendation = "Log body weight and protein so Coach can verify the hypertrophy protein floor.";
+    return summary;
+  }
+
+  if (maintenance.complete && maintenance.maintenanceCalories) {
+    const delta = calorieAverage - maintenance.maintenanceCalories;
+    const estimateLabel = fmt(maintenance.maintenanceCalories);
+    const averageLabel = fmt(calorieAverage);
+    const contradiction = Math.abs(delta) >= 250 && Math.abs(weeklyWeightRate) <= 0.25
+      ? " Formula may be off for you; your recent weight trend looks steadier than the estimate implies."
+      : "";
+    if (goal === "bulk") {
+      if (calorieAverage <= maintenance.maintenanceCalories || weeklyWeightRate <= 0) {
+        summary.recommendation = `You're averaging ${averageLabel} cal against an estimated maintenance of ${estimateLabel}. For a bulk, add about +150-250 cal/day and watch the next 2 weeks.${contradiction}`;
+      } else {
+        summary.tone = "good";
+        summary.recommendation = `You're averaging ${averageLabel} cal above an estimated maintenance of ${estimateLabel}. That lines up with a bulk unless weight jumps faster than intended.${contradiction}`;
+      }
+    } else if (goal === "cut") {
+      if (calorieAverage >= maintenance.maintenanceCalories || weeklyWeightRate >= 0) {
+        summary.recommendation = `You're averaging ${averageLabel} cal against an estimated maintenance of ${estimateLabel}. For a cut, reduce about -150-250 cal/day and watch the next 2 weeks.${contradiction}`;
+      } else {
+        summary.tone = "good";
+        summary.recommendation = `You're averaging ${averageLabel} cal below an estimated maintenance of ${estimateLabel}. That lines up with a cut; keep protein high.${contradiction}`;
+      }
+    } else if (Math.abs(delta) <= 150 && Math.abs(weeklyWeightRate) <= 0.25) {
+      summary.tone = "good";
+      summary.recommendation = `You're averaging ${averageLabel} cal near estimated maintenance of ${estimateLabel}. Stay the course.${contradiction}`;
+    } else if (delta > 150 || weeklyWeightRate > 0.25) {
+      summary.recommendation = `You're averaging ${averageLabel} cal above estimated maintenance of ${estimateLabel}. Trim about -150-250 cal/day if you want weight steadier.${contradiction}`;
+    } else {
+      summary.recommendation = `You're averaging ${averageLabel} cal below estimated maintenance of ${estimateLabel}. Add about +150-250 cal/day if you want weight steadier.${contradiction}`;
+    }
+    if (maintenance.confidence === "Low") {
+      summary.recommendation += " Confidence is low, so review the maintenance profile before making a big change.";
+    }
     return summary;
   }
 
@@ -2008,10 +2206,12 @@ function healthCoachSummary() {
 function healthCoachStatMarkup(summary) {
   const trend = summary.weightTrendLb === null ? "--" : `${summary.weightTrendLb >= 0 ? "+" : ""}${fmt(summary.weightTrendLb, 1)} lb`;
   const weekly = summary.weeklyWeightRate === null ? "--" : `${summary.weeklyWeightRate >= 0 ? "+" : ""}${fmt(summary.weeklyWeightRate, 2)} lb/wk`;
+  const maintenance = summary.maintenance || maintenanceEstimate();
   return `
     <div class="grid four health-summary-grid">
       <div class="stat"><span class="label">Goal</span><span class="value">${escapeHtml(summary.goalLabel)}</span><span class="hint">nutrition phase</span></div>
       <div class="stat"><span class="label">Calories</span><span class="value">${summary.calorieAverage ? fmt(summary.calorieAverage) : "--"}</span><span class="hint">7-day avg</span></div>
+      <div class="stat"><span class="label">Maintenance</span><span class="value">${maintenance.complete ? fmt(maintenance.maintenanceCalories) : "--"}</span><span class="hint">${maintenance.complete ? `${escapeHtml(maintenance.confidence)} confidence` : "set profile"}</span></div>
       <div class="stat"><span class="label">Protein</span><span class="value">${summary.proteinAverage ? `${fmt(summary.proteinAverage)}g` : "--"}</span><span class="hint">${summary.proteinFloor ? `${fmt(summary.proteinFloor)}g floor` : "needs weight"}</span></div>
       <div class="stat"><span class="label">Weight</span><span class="value">${trend}</span><span class="hint">${weekly}</span></div>
     </div>
@@ -3935,14 +4135,25 @@ function lineChart(points, color = "#35d58c", unit = "", options = {}) {
   const averagePoints = shouldShowAverage ? chartRollingAverage(points, options.averageWindow || 7) : [];
   const comparisonPoints = hasComparisonOverride ? options.comparisonPoints : averagePoints;
   const comparisonColor = options.comparisonColor || "rgba(255,255,255,0.68)";
+  const extraComparisonSeries = Array.isArray(options.extraComparisonSeries) ? options.extraComparisonSeries : [];
 
   const chartPoints = points.length > 1 ? points : [
     { label: points[0].label, value: points[0].value - 1, hidden: true },
     points[0]
   ];
-  const rangePoints = [...chartPoints, ...comparisonPoints].filter((point) => Number.isFinite(point.value));
-  const dataMin = Math.min(...rangePoints.map((point) => point.value));
-  const dataMax = Math.max(...rangePoints.map((point) => point.value));
+  const rangePoints = [
+    ...chartPoints,
+    ...comparisonPoints,
+    ...extraComparisonSeries.flatMap((series) => Array.isArray(series.points) ? series.points : [])
+  ].filter((point) => Number.isFinite(point.value));
+  let dataMin = Math.min(...rangePoints.map((point) => point.value));
+  let dataMax = Math.max(...rangePoints.map((point) => point.value));
+  const axisMinRange = Number(options.axisMinRange || 0);
+  if (axisMinRange > 0 && dataMax - dataMin < axisMinRange) {
+    const center = (dataMin + dataMax) / 2;
+    dataMin = center - axisMinRange / 2;
+    dataMax = center + axisMinRange / 2;
+  }
   const axisTicks = niceAxisTicks(dataMin, dataMax, unit);
   const min = axisTicks.length ? Math.min(...axisTicks.map((tick) => tick.value)) : dataMin;
   const max = axisTicks.length ? Math.max(...axisTicks.map((tick) => tick.value)) : dataMax;
@@ -3957,6 +4168,21 @@ function lineChart(points, color = "#35d58c", unit = "", options = {}) {
     const y = 84 - ((point.value - min) / range) * 68;
     return { x, y, ...point };
   });
+  const extraComparisonPolylines = extraComparisonSeries
+    .map((series) => {
+      const pointsForSeries = Array.isArray(series.points) ? series.points : [];
+      const coordsForSeries = pointsForSeries.map((point, index) => {
+        const x = 8 + (index / Math.max(pointsForSeries.length - 1, 1)) * 84;
+        const y = 84 - ((point.value - min) / range) * 68;
+        return { x, y, ...point };
+      });
+      return {
+        color: series.color || "rgba(242, 208, 107, 0.78)",
+        dash: series.dash || "1 2",
+        points: coordsForSeries.map((point) => `${point.x},${point.y}`).join(" ")
+      };
+    })
+    .filter((series) => series.points);
   const polyline = coords.map((point) => `${point.x},${point.y}`).join(" ");
   const comparisonPolyline = comparisonCoords.map((point) => `${point.x},${point.y}`).join(" ");
   const area = `8,92 ${polyline} 92,92`;
@@ -3992,6 +4218,7 @@ function lineChart(points, color = "#35d58c", unit = "", options = {}) {
           <polygon points="${area}" fill="url(#${gradientId})"></polygon>
           <polyline points="${polyline}" fill="none" stroke="${color}" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"></polyline>
           ${comparisonPolyline ? `<polyline class="comparison-polyline" points="${comparisonPolyline}" fill="none" stroke="${escapeHtml(comparisonColor)}" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="3 2"></polyline>` : ""}
+          ${extraComparisonPolylines.map((series) => `<polyline class="comparison-polyline maintenance-polyline" points="${series.points}" fill="none" stroke="${escapeHtml(series.color)}" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="${escapeHtml(series.dash)}"></polyline>`).join("")}
           ${visibleCoords.map((point) => `<circle cx="${point.x}" cy="${point.y}" r="1.7" fill="${color}"></circle>`).join("")}
         </svg>
         <div class="chart-marker" style="left:${last.x}%; top:${last.y}%"></div>
@@ -4525,6 +4752,7 @@ function readWorkoutDraftFromForm() {
       }))),
       coachCopiedRows: existing.coachCopiedRows,
       coachCopiedDirtyRows: existing.coachCopiedDirtyRows,
+      coachCopiedPlanId: existing.coachCopiedPlanId,
       order: index
     };
   });
@@ -4598,6 +4826,7 @@ function cloneCoachPlanSnapshot(plan) {
 function copiedCoachPlanSnapshot(plan) {
   return {
     ...cloneCoachPlanSnapshot(plan),
+    id: uid(),
     copiedDate: todayISO(),
     copiedAt: new Date().toISOString(),
     timeframeMinutes: selectedCoachTimeframeMinutes(),
@@ -4721,13 +4950,10 @@ function buildNextCoachPlanPreview(copiedPlan = activeCopiedCoachPlan()) {
   };
 }
 
-function copyCoachPlanToLog(plan = buildTodayPlan(selectedCoachTimeframeMinutes())) {
+function coachDraftsFromPlan(plan, copiedPlanId = "") {
   const items = plan.sessionPlan.items || [];
   if (!items.length) throw new Error("Coach needs a plan before it can copy to Log.");
-  state.copiedCoachPlan = copiedCoachPlanSnapshot(plan);
-  persistCopiedCoachPlan(state.copiedCoachPlan);
-  state.previewNextCoachPlan = false;
-  state.workoutDraft = items.map((item) => {
+  return items.map((item) => {
     const setRows = plannedSetRowsFromPreviousSession(item.exercise, item.sets, item.planTarget);
     return {
       draftId: uid(),
@@ -4737,10 +4963,20 @@ function copyCoachPlanToLog(plan = buildTodayPlan(selectedCoachTimeframeMinutes(
       notes: `Coach plan: ${item.reason}${item.growthMode ? ` ${coachGrowthModeLabel(item.growthMode)} mode.` : ""}${item.planTarget ? ` ${item.planTarget.label}.` : ""}`,
       setRows,
       coachCopiedRows: setRows.map(copiedRowSnapshot),
-      coachCopiedDirtyRows: []
+      coachCopiedDirtyRows: [],
+      coachCopiedPlanId: copiedPlanId
     };
   });
-  state.templateQueue = state.workoutDraft.map((draft) => ({
+}
+
+function copyCoachPlanToLog(plan = buildTodayPlan(selectedCoachTimeframeMinutes())) {
+  const snapshot = copiedCoachPlanSnapshot(plan);
+  const copiedDrafts = coachDraftsFromPlan(snapshot, snapshot.id);
+  state.copiedCoachPlan = snapshot;
+  persistCopiedCoachPlan(state.copiedCoachPlan);
+  state.previewNextCoachPlan = false;
+  state.workoutDraft = [...(Array.isArray(state.workoutDraft) ? state.workoutDraft : []), ...copiedDrafts];
+  state.templateQueue = copiedDrafts.map((draft) => ({
     exercise: draft.exercise,
     targetMuscle: draft.targetMuscle,
     notes: draft.notes,
@@ -4752,6 +4988,28 @@ function copyCoachPlanToLog(plan = buildTodayPlan(selectedCoachTimeframeMinutes(
   state.editingWorkoutId = null;
   state.showTemplatePanel = false;
   syncLegacyDraftFromFirst();
+}
+
+function clearCopiedCoachLogDrafts(planId = activeCopiedCoachPlan()?.id) {
+  if (!planId || !Array.isArray(state.workoutDraft)) return { removed: 0, preserved: 0 };
+  let removed = 0;
+  let preserved = 0;
+  state.workoutDraft = state.workoutDraft.reduce((drafts, draft) => {
+    if (draft.coachCopiedPlanId !== planId) {
+      drafts.push(draft);
+      return drafts;
+    }
+    if (isCoachCopiedDraftUntouched(draft)) {
+      removed += 1;
+      return drafts;
+    }
+    preserved += 1;
+    clearCoachCopiedDraftMarkers(draft);
+    drafts.push(draft);
+    return drafts;
+  }, []);
+  syncLegacyDraftFromFirst();
+  return { removed, preserved };
 }
 
 function recordWeightKey(weight) {
@@ -5167,6 +5425,7 @@ function exerciseFormValues(editing = null) {
     equipment: editing?.equipment || "",
     reps: editing?.reps || "",
     rest: editing?.rest || "",
+    progressionMode: normalizeProgressionMode(editing?.progressionMode),
     cue: editing?.cue || ""
   };
 }
@@ -5215,6 +5474,7 @@ function exerciseCard(exercise, editable = false) {
         ${exerciseMuscleBadges(exercise)}
         ${exerciseUsageMetaMarkup(exercise)}
         <p class="muted small">${escapeHtml(exercise.equipment || "custom")} - ${escapeHtml(exercise.reps || "8-15")} reps - ${escapeHtml(exercise.rest || "60-120 sec")}</p>
+        ${normalizeProgressionMode(exercise.progressionMode) === "normal" ? "" : `<p class="muted micro">${escapeHtml(progressionModeLabel(exercise.progressionMode))}</p>`}
         <p class="muted micro">${escapeHtml(exercise.cue || "Keep form strict and progress gradually.")}</p>
       </div>
       ${exerciseCardActions(exercise, editable)}
@@ -5296,6 +5556,9 @@ function renderExercises() {
   const primaryOptions = muscleGroups.map((muscle) => `
     <option value="${muscle.id}" ${primary === muscle.id ? "selected" : ""}>${escapeHtml(muscle.label)}</option>
   `).join("");
+  const progressionOptions = PROGRESSION_MODE_OPTIONS.map((option) => `
+    <option value="${option.id}" ${normalizeProgressionMode(values.progressionMode) === option.id ? "selected" : ""}>${escapeHtml(option.label)}</option>
+  `).join("");
   const visibleExercises = filteredExerciseList();
   const archivedExercises = filteredExerciseList({ includeArchived: true, archivedOnly: true, search: state.exerciseSearch, muscle: state.exerciseMuscleFilter, sort: "az" });
 
@@ -5341,6 +5604,10 @@ function renderExercises() {
             <label for="exercise-rest">Rest range</label>
             <input id="exercise-rest" name="rest" placeholder="60-120 sec" value="${escapeHtml(values.rest || "")}">
             ${exerciseFormErrorMarkup(errors, "rest")}
+          </div>
+          <div class="field">
+            <label for="exercise-progression-mode">Progression</label>
+            <select id="exercise-progression-mode" name="progressionMode">${progressionOptions}</select>
           </div>
         </div>
         <div class="field">
@@ -5445,6 +5712,7 @@ function exerciseDraftTable(draft, index, total) {
             <div class="table-menu">
               <button type="button" data-action="open-exercise-history" data-exercise="${escapeHtml(draft.exercise)}">History</button>
               <button type="button" data-action="use-last-session" data-draft-id="${escapeHtml(draft.draftId)}">Use last session</button>
+              <button type="button" data-action="mark-load-limited" data-exercise="${escapeHtml(draft.exercise)}">Mark load-limited</button>
             </div>
           ` : ""}
         </div>
@@ -6082,6 +6350,7 @@ function renderTrends() {
   const bodyWeightAverage = latestRollingAverage(bodyWeightSeries, 7);
   const proteinSeries = seriesFromMetrics("protein");
   const calorieSeries = seriesFromMetrics("calories");
+  const maintenanceSeries = maintenanceSeriesFor(calorieSeries, health.maintenance);
 
   return `
     <details class="section trend-section collapsible-panel muscle-trends-panel" open>
@@ -6153,6 +6422,12 @@ function renderTrends() {
         <div class="chart-panel">
           <div class="chart-header"><h3>Calories</h3><span class="muted small">daily intake - 7d avg</span></div>
           ${lineChart(calorieSeries, "#35d58c", "", { showAverage: true })}
+        </div>
+        <div class="chart-panel">
+          <div class="chart-header"><h3>Estimated maintenance</h3><span class="muted small">${health.maintenance?.complete ? `${fmt(health.maintenance.maintenanceCalories)} cal/day` : "complete profile to estimate"}</span></div>
+          ${health.maintenance?.complete
+            ? lineChart(maintenanceSeries, "#4cc9f0", "", { axisMinRange: 300, showAverage: false })
+            : `<div class="empty maintenance-empty">Complete Maintenance profile in Settings to compare calories with estimated maintenance.</div>`}
         </div>
       </div>
     </details>
@@ -6356,7 +6631,7 @@ function renderCopiedCoachPlan() {
       <p class="muted small">${escapeHtml(copied.title || "Coach plan")} copied to Log. Return here to keep context while logging.</p>
       <div class="grid two">
         <button class="ghost-button" type="button" data-action="preview-next-coach-plan">${state.previewNextCoachPlan ? "Hide next plan" : "Preview next plan"}</button>
-        <button class="ghost-button" type="button" data-action="clear-copied-coach-plan">Clear copied plan</button>
+        <button class="ghost-button" type="button" data-action="clear-copied-coach-plan">Clear copied log</button>
       </div>
       ${preview ? `
         <div class="coach-next-preview">
@@ -6588,6 +6863,54 @@ function renderNutritionGoalSelector() {
   `;
 }
 
+function renderMaintenanceProfileForm() {
+  const profile = selectedMaintenanceProfile();
+  const estimate = maintenanceEstimate(profile);
+  const reviewed = profile.lastReviewedAt ? `Reviewed ${formatShortDate(profile.lastReviewedAt)}` : "Not reviewed";
+  return `
+    <div class="maintenance-profile-form">
+      <div class="field-row compact-metric-row">
+        <div class="field">
+          <label for="maintenance-sex">Sex</label>
+          <select id="maintenance-sex">
+            <option value="">Select</option>
+            ${MAINTENANCE_SEX_OPTIONS.map((option) => `<option value="${option.id}" ${profile.sex === option.id ? "selected" : ""}>${escapeHtml(option.label)}</option>`).join("")}
+          </select>
+        </div>
+        <div class="field">
+          <label for="maintenance-birth-year">Birth year</label>
+          <input id="maintenance-birth-year" type="number" inputmode="numeric" min="1900" max="${new Date().getFullYear()}" step="1" value="${escapeHtml(profile.birthYear || "")}" placeholder="1990">
+        </div>
+      </div>
+      <div class="field-row compact-metric-row">
+        <div class="field">
+          <label for="maintenance-height-feet">Height ft</label>
+          <input id="maintenance-height-feet" type="number" inputmode="numeric" min="0" max="9" step="1" value="${escapeHtml(profile.heightFeet === "" ? "" : profile.heightFeet)}" placeholder="5">
+        </div>
+        <div class="field">
+          <label for="maintenance-height-inches">Height in</label>
+          <input id="maintenance-height-inches" type="number" inputmode="numeric" min="0" max="11" step="1" value="${escapeHtml(profile.heightInches === "" ? "" : profile.heightInches)}" placeholder="10">
+        </div>
+      </div>
+      <div class="field">
+        <label for="maintenance-activity">Activity level</label>
+        <select id="maintenance-activity">
+          <option value="">Select activity</option>
+          ${MAINTENANCE_ACTIVITY_OPTIONS.map((option) => `<option value="${option.id}" ${profile.activityLevel === option.id ? "selected" : ""}>${escapeHtml(option.label)} - ${escapeHtml(option.hint)}</option>`).join("")}
+        </select>
+      </div>
+      <div class="grid two maintenance-preview">
+        <div class="stat"><span class="label">BMR</span><span class="value">${estimate.complete ? fmt(estimate.bmr) : "--"}</span><span class="hint">Mifflin-St Jeor</span></div>
+        <div class="stat"><span class="label">Estimated maintenance</span><span class="value">${estimate.complete ? fmt(estimate.maintenanceCalories) : "--"}</span><span class="hint">${estimate.complete ? "cal/day estimate" : "needs profile"}</span></div>
+        <div class="stat"><span class="label">Weight used</span><span class="value">${estimate.weightLb ? `${fmt(estimate.weightLb, 1)} lb` : "--"}</span><span class="hint">${escapeHtml(estimate.weightSource)}</span></div>
+        <div class="stat"><span class="label">Confidence</span><span class="value">${escapeHtml(estimate.confidence)}</span><span class="hint">${escapeHtml(reviewed)}</span></div>
+      </div>
+      <p class="muted small">${escapeHtml(maintenanceProfileSummary(estimate))}${estimate.staleReview ? " - Review activity if your day-to-day movement changed." : ""}</p>
+      <button class="primary-button full-button" type="button" data-action="save-maintenance-profile">Save maintenance profile</button>
+    </div>
+  `;
+}
+
 function renderDashboardWidgetSelector() {
   const enabled = selectedDashboardWidgets();
   const order = dashboardWidgetOrder();
@@ -6668,6 +6991,11 @@ async function renderSettings() {
       <p class="muted small">Coach uses this to interpret calories and body-weight trend.</p>
       ${renderNutritionGoalSelector()}
     `, { id: "nutrition-goal" })}
+
+    ${renderSettingsPanel("Maintenance profile", maintenanceEstimate().complete ? `${fmt(maintenanceEstimate().maintenanceCalories)} cal/day` : "setup needed", `
+      <p class="muted small">Used for estimated maintenance calories with Mifflin-St Jeor. This is an estimate, not true maintenance.</p>
+      ${renderMaintenanceProfileForm()}
+    `, { id: "maintenance-profile" })}
 
     ${renderSettingsPanel("Today widgets", `${selectedDashboardWidgets().length} shown`, `
       <p class="muted small">Choose what appears below the Today summary and put the most useful cards first.</p>
@@ -7061,6 +7389,23 @@ async function saveExercise(form) {
   await render();
 }
 
+async function updateExerciseProgressionMode(exerciseName, progressionMode) {
+  const exercises = getCustomExercises({ includeArchived: true });
+  const normalizedName = normalizeName(exerciseName);
+  const existing = exercises.find((exercise) => normalizeName(exercise.name) === normalizedName);
+  if (!existing) throw new Error("Add this exercise to your library before setting progression limits.");
+  const updated = normalizeExerciseDefinition({
+    ...existing,
+    progressionMode,
+    updatedAt: new Date().toISOString()
+  });
+  const nextExercises = exercises.map((exercise) => exercise.id === existing.id ? updated : exercise);
+  await saveSetting("customExercises", nextExercises);
+  await queueSyncChange("exercise", updated.id, updated);
+  scheduleRecordSync();
+  return updated;
+}
+
 async function saveWorkout(form) {
   readWorkoutDraftFromForm();
   const data = Object.fromEntries(new FormData(form));
@@ -7289,6 +7634,7 @@ function exportSafeSettings() {
   return {
     hypertrophyProfile: hypertrophySettings(),
     nutritionGoal: selectedNutritionGoal(),
+    maintenanceProfile: selectedMaintenanceProfile(),
     dayTemplates: getDayTemplates(),
     customExercises: getCustomExercises({ includeArchived: true }),
     dashboardWidgets: selectedDashboardWidgets(),
@@ -7731,6 +8077,7 @@ function normalizeBackupSettings(settings = {}) {
     nutritionGoal: NUTRITION_GOAL_OPTIONS.some((option) => option.id === settings.nutritionGoal)
       ? settings.nutritionGoal
       : "bulk",
+    maintenanceProfile: normalizeMaintenanceProfile(settings.maintenanceProfile || {}),
     dayTemplates: Array.isArray(settings.dayTemplates) ? settings.dayTemplates : [],
     customExercises,
     dashboardWidgets: Array.isArray(settings.dashboardWidgets) ? settings.dashboardWidgets : [...DEFAULT_TODAY_WIDGETS],
@@ -7760,6 +8107,7 @@ async function importPayload(payload) {
   for (const entry of normalized.metrics) await dbPut("metrics", entry);
   await saveSetting("hypertrophyProfile", normalized.settings.hypertrophyProfile);
   await saveSetting("nutritionGoal", normalized.settings.nutritionGoal);
+  await saveSetting("maintenanceProfile", normalized.settings.maintenanceProfile);
   await saveSetting("dayTemplates", normalized.settings.dayTemplates);
   await saveSetting("customExercises", normalized.settings.customExercises);
   await saveSetting("dashboardWidgets", normalized.settings.dashboardWidgets);
@@ -8066,7 +8414,10 @@ async function applyRemoteSyncRecord(remoteInput) {
       : [...current.filter((entry) => entry.id !== remote.recordId), { ...remote.payload, id: remote.recordId }];
     await saveSetting("dayTemplates", next);
   } else if (remote.recordType === "preference" && SYNC_SAFE_PREFERENCES.includes(remote.recordId) && !deleted) {
-    await saveSetting(remote.recordId, clonePlain(remote.payload?.value));
+    const value = remote.recordId === "maintenanceProfile"
+      ? normalizeMaintenanceProfile(remote.payload?.value || {})
+      : clonePlain(remote.payload?.value);
+    await saveSetting(remote.recordId, value);
   }
 
   await saveSyncRecordMeta(remote.recordType, remote.recordId, remote.revision, remote.payload, deleted);
@@ -8789,8 +9140,9 @@ async function handleAction(action, target) {
       await render();
     },
     async "copy-coach-plan"() {
+      readDraftFromForm();
       copyCoachPlanToLog(buildTodayPlan(selectedCoachTimeframeMinutes()));
-      announce("Coach plan copied to Log.", { tone: "good", sound: "success", detail: "Exercises and planned sets are ready as an unsaved draft." });
+      announce("Coach plan added to Log.", { tone: "good", sound: "success", detail: "Exercises and planned sets were appended as an unsaved draft." });
       await render({ animate: true });
     },
     async "export-coach-debug"() { await downloadCoachDebugReport(); },
@@ -8799,9 +9151,13 @@ async function handleAction(action, target) {
       await render();
     },
     async "clear-copied-coach-plan"() {
+      readDraftFromForm();
+      const result = clearCopiedCoachLogDrafts(activeCopiedCoachPlan()?.id);
       state.copiedCoachPlan = null;
       state.previewNextCoachPlan = false;
       persistCopiedCoachPlan(null);
+      const detail = result.preserved ? "Edited copied rows were kept." : "";
+      toast(result.removed ? `Removed ${result.removed} copied Coach ${result.removed === 1 ? "exercise" : "exercises"}. ${detail}`.trim() : "No untouched copied Coach rows to remove.");
       await render();
     },
     async "dismiss-record-trophy"() {
@@ -8862,6 +9218,14 @@ async function handleAction(action, target) {
       }
       state.logHistoryExercise = "";
       await render({ animate: true });
+    },
+    async "mark-load-limited"() {
+      readDraftFromForm();
+      const exercise = target.dataset.exercise;
+      await updateExerciseProgressionMode(exercise, "rep-first");
+      state.openExerciseMenu = null;
+      announce(`${exercise} set to rep-first progression.`, { tone: "good" });
+      await render();
     },
     async "edit-exercise"() {
       state.activeTab = "exercises";
@@ -8964,13 +9328,15 @@ async function handleAction(action, target) {
     async "log-exercise"() {
       await flashSelection(target);
       preserveVisibleDraft("log-exercise");
+      readDraftFromForm();
       state.activeTab = "log";
       state.logMode = "strength";
       state.editingWorkoutId = null;
       state.selectedExercise = target.dataset.exercise;
       state.draftTargetMuscle = resolveExerciseMeta(state.selectedExercise).primaryMuscles[0] || "chest";
       state.setRows = defaultSetRows();
-      state.workoutDraft = [defaultDraftExercise(state.selectedExercise)];
+      state.workoutDraft = [...(Array.isArray(state.workoutDraft) ? state.workoutDraft : []), defaultDraftExercise(state.selectedExercise)];
+      syncLegacyDraftFromFirst();
       await render();
     },
     async "open-exercise-trend"() {
@@ -9173,6 +9539,22 @@ async function handleAction(action, target) {
       announce(`Nutrition goal set to ${nutritionGoalLabel(goal)}.`, { tone: "good" });
       await render();
     },
+    async "save-maintenance-profile"() {
+      forceSettingsPanelOpen("maintenance-profile");
+      const profile = normalizeMaintenanceProfile({
+        sex: document.getElementById("maintenance-sex")?.value || "",
+        birthYear: document.getElementById("maintenance-birth-year")?.value || "",
+        heightFeet: document.getElementById("maintenance-height-feet")?.value || "",
+        heightInches: document.getElementById("maintenance-height-inches")?.value || "",
+        activityLevel: document.getElementById("maintenance-activity")?.value || "",
+        lastReviewedAt: new Date().toISOString()
+      });
+      await saveSetting("maintenanceProfile", profile);
+      await queueSyncChange("preference", "maintenanceProfile", { value: profile });
+      scheduleRecordSync();
+      announce("Maintenance profile saved.", { tone: "good" });
+      await render();
+    },
     async "load-sample-data"() { await loadSampleData(); },
     async "remove-sample-data"() { await removeSampleData(); },
     async "clear-all"() { await clearAll(); }
@@ -9190,6 +9572,7 @@ const dragState = {
   pending: false,
   dragTimer: null,
   handle: null,
+  inputType: "",
   holdDelay: 150
 };
 
@@ -9210,12 +9593,15 @@ function activateDrag() {
 }
 
 function startExerciseDrag(handle, event) {
+  if ((dragState.pending || dragState.active) && dragState.handle === handle) return;
+  if (dragState.pending || dragState.active) resetDragState();
   dragState.handle = handle;
   dragState.startY = event.clientY;
   dragState.currentY = event.clientY;
   dragState.pending = true;
   dragState.moved = false;
   dragState.pointerId = event.pointerId;
+  dragState.inputType = event.inputType || event.pointerType || "";
   state.dragPendingDraftId = handle.dataset?.draftId || null;
   handle.classList.add("is-pending");
   clearTimeout(dragState.dragTimer);
@@ -9227,13 +9613,14 @@ function cancelPendingDrag() {
   dragState.handle?.classList?.remove("is-pending");
   dragState.pending = false;
   dragState.handle = null;
+  dragState.inputType = "";
   state.dragPendingDraftId = null;
 }
 
 function updatePendingExerciseDrag(event) {
   if (!dragState.pending) return;
   dragState.currentY = event.clientY;
-  if (Math.abs(dragState.currentY - dragState.startY) > 14) cancelPendingDrag();
+  if (Math.abs(dragState.currentY - dragState.startY) > 24) cancelPendingDrag();
 }
 
 function resetDragState() {
@@ -9242,6 +9629,7 @@ function resetDragState() {
   dragState.pending = false;
   dragState.moved = false;
   dragState.handle = null;
+  dragState.inputType = "";
   state.draggingDraftId = null;
   state.dragPendingDraftId = null;
   document.querySelectorAll(".drag-handle.is-pending").forEach((handle) => handle.classList.remove("is-pending"));
@@ -9321,17 +9709,15 @@ function restoreCoachTargetScroll(scrollLeft) {
 
 document.addEventListener("pointerdown", unlockUiAudio, { capture: true, passive: true });
 document.addEventListener("touchstart", unlockUiAudio, { capture: true, passive: true });
+document.addEventListener("touchend", unlockUiAudio, { capture: true, passive: true });
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) markUiAudioForResume();
-  else unlockUiAudio();
 });
 window.addEventListener?.("pageshow", () => {
   markUiAudioForResume();
-  unlockUiAudio();
 });
 window.addEventListener?.("focus", () => {
   if (uiAudioContext?.state !== "running") markUiAudioForResume();
-  unlockUiAudio();
 });
 
 document.addEventListener("toggle", (event) => {
@@ -9520,7 +9906,7 @@ document.addEventListener("pointermove", (event) => {
 document.addEventListener("pointerdown", (event) => {
   const handle = event.target.closest("[data-drag-handle]");
   if (handle) {
-    startExerciseDrag(handle, event);
+    startExerciseDrag(handle, { clientY: event.clientY, pointerId: event.pointerId, pointerType: event.pointerType, inputType: "pointer" });
     return;
   }
   const chart = event.target.closest(".interactive-chart");
@@ -9544,6 +9930,7 @@ document.addEventListener("pointercancel", async (event) => {
     dragState.pending = false;
     dragState.moved = false;
     dragState.handle = null;
+    dragState.inputType = "";
     state.draggingDraftId = null;
     state.dragPendingDraftId = null;
     document.querySelectorAll(".exercise-draft.is-dragging").forEach((section) => {
@@ -9558,7 +9945,7 @@ document.addEventListener("touchstart", (event) => {
   if (handle) {
     event.preventDefault();
     const touch = event.touches[0];
-    startExerciseDrag(handle, { clientY: touch.clientY, pointerId: touch.identifier });
+    startExerciseDrag(handle, { clientY: touch.clientY, pointerId: touch.identifier, inputType: "touch" });
   }
 }, { passive: false });
 
@@ -9572,6 +9959,7 @@ document.addEventListener("touchmove", (event) => {
     const dragged = document.querySelector(`.exercise-draft[data-draft-id="${dragState.id}"]`);
     if (dragged) dragged.style.transform = `translateY(${delta}px)`;
   } else if (dragState.pending) {
+    event.preventDefault();
     const touch = event.touches[0];
     updatePendingExerciseDrag({ clientY: touch.clientY });
   }
@@ -9592,6 +9980,7 @@ document.addEventListener("touchcancel", () => {
   dragState.pending = false;
   dragState.moved = false;
   dragState.handle = null;
+  dragState.inputType = "";
   state.draggingDraftId = null;
   state.dragPendingDraftId = null;
   document.querySelectorAll(".drag-handle.is-pending").forEach((handle) => handle.classList.remove("is-pending"));
