@@ -1912,6 +1912,51 @@ assert.notStrictEqual(highRepPerformanceTrack.status, "isolated-failure", "Expec
 assert.strictEqual(highRepPerformanceTrack.historyCount, 2, "Expected high-rep performance comparisons to ignore standard-loading history.");
 assert(highRepPerformanceTrack.target.includes("12.5"), `Expected high-rep progression to preserve the configured half-pound load, got ${highRepPerformanceTrack.target}`);
 
+const standardToHighRepConversion = runScenario(`
+  ${resetAndHelpers}
+  state.settings.customExercises = [{
+    id: "conversion-curl", name: "Conversion Curl", primaryMuscles: ["biceps"], secondaryMuscles: [],
+    equipment: "cable", reps: "20-30", rest: "60 sec", loadingStyle: "high-rep", loadIncrement: 2.5, userCreated: true
+  }];
+  state.workouts = [{
+    id: "standard-curl", date: dateDaysAgo(3), exercise: "Conversion Curl", exerciseId: "conversion-curl",
+    primaryMuscles: ["biceps"], secondaryMuscles: [], loadingStyle: "standard",
+    setRows: [{ weight: 100, reps: 10, rir: 2, restSeconds: 60 }]
+  }];
+  var exercise = resolveExerciseMeta("Conversion Curl");
+  var progression = progressionTargetForExercise(exercise.name);
+  var planTarget = coachPlanTargetForExercise(exercise, coachExercisePerformanceSignal(exercise));
+  var rows = plannedSetRowsFromPreviousSession(exercise, 2, planTarget);
+  ({ progression, planTarget, rows });
+`);
+
+assert.strictEqual(standardToHighRepConversion.progression.styleConversion, true, "Expected a new high-rep track to use a converted standard baseline.");
+assert.strictEqual(standardToHighRepConversion.planTarget.kind, "style-conversion", "Expected Coach copy to identify a style conversion rather than ordinary progression.");
+assert.strictEqual(standardToHighRepConversion.rows[0].weight, 72.5, "Expected 100 x 10 at 2 RIR to convert conservatively to 72.5 lb for the high-rep midpoint.");
+assert.strictEqual(standardToHighRepConversion.rows[0].reps, 25, "Expected a 20-30 range conversion to target its 25-rep midpoint.");
+assert.strictEqual(standardToHighRepConversion.rows[0].rir, 2, "Expected the converted first-session target to use 2 RIR.");
+
+const highRepToStandardConversion = runScenario(`
+  ${resetAndHelpers}
+  state.settings.customExercises = [{
+    id: "conversion-curl", name: "Conversion Curl", primaryMuscles: ["biceps"], secondaryMuscles: [],
+    equipment: "cable", reps: "8-12", rest: "60 sec", loadingStyle: "standard", loadIncrement: 2.5, userCreated: true
+  }];
+  state.workouts = [{
+    id: "high-curl", date: dateDaysAgo(3), exercise: "Conversion Curl", exerciseId: "conversion-curl",
+    primaryMuscles: ["biceps"], secondaryMuscles: [], loadingStyle: "high-rep",
+    setRows: [{ weight: 72.5, reps: 25, rir: 2, restSeconds: 60 }]
+  }];
+  var exercise = resolveExerciseMeta("Conversion Curl");
+  var planTarget = coachPlanTargetForExercise(exercise, coachExercisePerformanceSignal(exercise));
+  var rows = plannedSetRowsFromPreviousSession(exercise, 1, planTarget);
+  ({ planTarget, row: rows[0] });
+`);
+
+assert.strictEqual(highRepToStandardConversion.planTarget.kind, "style-conversion", "Expected switching back to standard loading to convert the high-rep baseline.");
+assert.strictEqual(highRepToStandardConversion.row.weight, 97.5, "Expected the high-rep set to convert conservatively to the configured 2.5 lb increment.");
+assert.strictEqual(highRepToStandardConversion.row.reps, 10, "Expected an 8-12 standard range conversion to target its 10-rep midpoint.");
+
 const weeklyCoachPlan = runScenario(`
   ${resetAndHelpers}
   state.workouts = muscleGroups.map((muscle) => makeWorkout(muscle, 2, 10));

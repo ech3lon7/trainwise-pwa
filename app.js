@@ -3,7 +3,7 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 3;
 const STORES = ["workouts", "metrics", "settings", "syncQueue"];
-const APP_VERSION = "1.5.67";
+const APP_VERSION = "1.5.68";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 const DRAFT_RECOVERY_KEY = "trainwise-draft-recovery-v1";
 const DATED_STRENGTH_DRAFTS_KEY = "trainwise-strength-drafts-by-date-v1";
@@ -1740,8 +1740,7 @@ function exerciseStats(exerciseName) {
   };
 }
 
-function progressiveOverloadIndicator(exerciseName) {
-  const entries = exerciseHistoryEntries(exerciseName);
+function progressiveOverloadIndicator(exerciseName, entries = exerciseHistoryEntries(exerciseName)) {
   if (entries.length < 2) return { symbol: "-", tone: "flat", label: "Need another session" };
   const latest = e1rm(entries[0]);
   const previous = e1rm(entries[1]);
@@ -1750,11 +1749,46 @@ function progressiveOverloadIndicator(exerciseName) {
   return { symbol: "=", tone: "flat", label: "e1RM steady" };
 }
 
+function convertSetRowToLoadingStyle(row, exercise, sourceStyle, targetStyle = effectiveLoadingStyle(exercise)) {
+  const source = normalizeSetRows([row])[0];
+  if (!source || sourceStyle === targetStyle || source.weight <= 0 || source.reps <= 0) return source;
+  const range = parseRepRange(exercise.reps);
+  const targetReps = Math.round((range.low + range.high) / 2);
+  const targetRir = 2;
+  const estimatedMaxReps = source.reps + Math.max(0, Number(source.rir) || 0);
+  const estimatedOneRepMax = source.weight * (1 + estimatedMaxReps / 30);
+  const estimatedLoad = estimatedOneRepMax / (1 + (targetReps + targetRir) / 30);
+  const increment = effectiveLoadIncrement(exercise, estimatedLoad);
+  const convertedWeight = Math.max(increment, Math.floor((estimatedLoad + Number.EPSILON) / increment) * increment);
+  return { ...source, weight: convertedWeight, reps: targetReps, rir: targetRir };
+}
+
 function progressionTargetForExercise(exerciseName) {
   const meta = resolveExerciseMeta(exerciseName);
   const loadingStyle = effectiveLoadingStyle(meta);
-  const latest = exerciseHistoryEntries(exerciseName).find((workout) => workoutLoadingStyle(workout) === loadingStyle);
-  if (!latest) return null;
+  const history = exerciseHistoryEntries(exerciseName);
+  const latest = history.find((workout) => workoutLoadingStyle(workout) === loadingStyle);
+  if (!latest) {
+    const source = history[0];
+    const sourceTop = source ? bestSet(source) : null;
+    const sourceStyle = source ? workoutLoadingStyle(source) : loadingStyle;
+    if (!sourceTop || sourceStyle === loadingStyle) return null;
+    const converted = convertSetRowToLoadingStyle(sourceTop, meta, sourceStyle, loadingStyle);
+    if (!converted) return null;
+    return {
+      exercise: exerciseName,
+      latest: source,
+      top: sourceTop,
+      indicator: { symbol: "=", tone: "flat", label: `${loadingStyleLabel(loadingStyle)} baseline` },
+      increaseLoad: false,
+      progressionMode: normalizeProgressionMode(meta.progressionMode),
+      styleConversion: true,
+      sourceLoadingStyle: sourceStyle,
+      targetLoadingStyle: loadingStyle,
+      target: `${fmtLoad(converted.weight)} lb x ${fmt(converted.reps)}`,
+      body: `Based on your latest ${loadingStyleLabel(sourceStyle).toLowerCase()} set, start the ${loadingStyleLabel(loadingStyle).toLowerCase()} track around ${fmtLoad(converted.weight)} lb x ${fmt(converted.reps)} at ${fmt(converted.rir)} RIR. Treat this as a first-session estimate, then Coach will use your submitted ${loadingStyleLabel(loadingStyle).toLowerCase()} history.`
+    };
+  }
   const top = bestSet(latest);
   if (!top) return null;
   const range = parseRepRange(meta.reps);
@@ -1764,7 +1798,7 @@ function progressionTargetForExercise(exerciseName) {
   const increaseLoad = estimatedCapacity >= range.high && backoffSetsHeldRange;
   const nextRep = Math.min(range.high, top.reps + 1);
   const loadStep = effectiveLoadIncrement(meta, top.weight);
-  const indicator = progressiveOverloadIndicator(exerciseName);
+  const indicator = progressiveOverloadIndicator(exerciseName, history.filter((workout) => workoutLoadingStyle(workout) === loadingStyle));
   const progressionMode = normalizeProgressionMode(meta.progressionMode);
   const constrainedLoad = increaseLoad && progressionMode !== "normal";
   const target = increaseLoad && progressionMode === "normal"
@@ -2929,7 +2963,7 @@ function coachPlanTargetForExercise(exercise, signal = coachExercisePerformanceS
   const progression = progressionTargetForExercise(exercise.name);
   if (progression) {
     return {
-      kind: "progression",
+      kind: progression.styleConversion ? "style-conversion" : "progression",
       label: `Target ${progression.target}`,
       detail: `${HYPERTROPHY.idealRirMin}-${HYPERTROPHY.idealRirMax} RIR`,
       tone: progression.indicator.tone,
@@ -5136,17 +5170,21 @@ function adjustedCoachPlanRow(row, exercise, planTarget = null) {
 
 function plannedSetRowsFromPreviousSession(exercise, setCount, planTarget = null) {
   const count = Math.max(1, Math.round(parseNum(setCount)));
-  const last = lastSessionForExercise(exercise);
+  const history = exerciseHistoryForDefinition(exercise);
+  const targetStyle = effectiveLoadingStyle(exercise);
+  const last = history.find((workout) => workoutLoadingStyle(workout) === targetStyle) || history[0] || null;
   const previousRows = last ? setRowsFromWorkout(last) : [];
   if (!previousRows.length) return defaultSetRows(count);
+  const sourceStyle = workoutLoadingStyle(last);
   return Array.from({ length: count }, (_, index) => {
     const source = previousRows[index] || previousRows[previousRows.length - 1];
-    return adjustedCoachPlanRow({
+    const prepared = convertSetRowToLoadingStyle({
       weight: source.weight,
       reps: source.reps,
       rir: source.rir ?? 2,
       restSeconds: source.restSeconds ?? null
-    }, exercise, planTarget);
+    }, exercise, sourceStyle, targetStyle);
+    return adjustedCoachPlanRow(prepared, exercise, planTarget);
   });
 }
 
