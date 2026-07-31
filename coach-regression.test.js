@@ -1874,4 +1874,75 @@ assert(copiedPlanSameDayRetention.sameDayItems > 0, "Expected copied Coach plan 
 assert.strictEqual(copiedPlanSameDayRetention.wrongDayVisible, false, "Expected copied Coach plan to hide when its copied date no longer matches today.");
 assert.strictEqual(copiedPlanSameDayRetention.storagePayload.copiedDate, "2026-06-17", "Expected copied Coach plan to persist with the same-day date key.");
 
+const highRepPerformanceTrack = runScenario(`
+  ${resetAndHelpers}
+  var exercise = normalizeExerciseDefinition({
+    id: "high-rep-raise",
+    name: "High Rep Raise",
+    primaryMuscles: ["shoulders"],
+    reps: "20-30",
+    loadingStyle: "high-rep",
+    loadIncrement: 0.5
+  });
+  state.settings.customExercises = [exercise];
+  var older = makeWorkout({ id: "shoulders" }, 4, 2, {
+      exercise: exercise.name,
+      exerciseId: exercise.id,
+      primaryMuscles: ["shoulders"]
+    });
+  Object.assign(older, { loadingStyle: "high-rep", setRows: [{ weight: 12.5, reps: 24, rir: 1 }, { weight: 12.5, reps: 22, rir: 1 }] });
+  var latest = makeWorkout({ id: "shoulders" }, 2, 2, {
+      exercise: exercise.name,
+      exerciseId: exercise.id,
+      primaryMuscles: ["shoulders"]
+    });
+  Object.assign(latest, { loadingStyle: "high-rep", setRows: [{ weight: 12.5, reps: 26, rir: 0 }, { weight: 12.5, reps: 23, rir: 0 }] });
+  var standard = makeWorkout({ id: "shoulders" }, 6, 1, {
+      exercise: exercise.name,
+      exerciseId: exercise.id,
+      primaryMuscles: ["shoulders"]
+    });
+  Object.assign(standard, { loadingStyle: "standard", setRows: [{ weight: 20, reps: 8, rir: 1 }] });
+  state.workouts = [older, latest, standard];
+  var signal = coachExercisePerformanceSignal(exercise);
+  ({ status: signal.status, historyCount: signal.history.length, target: progressionTargetForExercise(exercise.name)?.target || "" });
+`);
+
+assert.notStrictEqual(highRepPerformanceTrack.status, "isolated-failure", "Expected in-range high-rep work at 0 RIR not to be mislabeled as failure.");
+assert.strictEqual(highRepPerformanceTrack.historyCount, 2, "Expected high-rep performance comparisons to ignore standard-loading history.");
+assert(highRepPerformanceTrack.target.includes("12.5"), `Expected high-rep progression to preserve the configured half-pound load, got ${highRepPerformanceTrack.target}`);
+
+const weeklyCoachPlan = runScenario(`
+  ${resetAndHelpers}
+  state.workouts = muscleGroups.map((muscle) => makeWorkout(muscle, 2, 10));
+  state.settings.coachWeeklyPlan = normalizeCoachWeeklyPlan({
+    days: [5, 0],
+    averageMinutes: 60,
+    priorities: ["biceps"],
+    targets: Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, muscle.id === "biceps" ? 24 : 10]))
+  });
+  var plan = buildCoachWeeklyPlan();
+  ({
+    priorityProjected: plan.projected.biceps,
+    priorityTarget: plan.setup.targets.biceps,
+    plannedDays: plan.sessions.filter((session) => session.status === "planned").length,
+    capacityMessage: plan.capacity.message,
+    markup: renderCoachWeek()
+  });
+`);
+
+assert(weeklyCoachPlan.priorityProjected > 10, `Expected weekly plan to add volume to priority Biceps, got ${weeklyCoachPlan.priorityProjected}`);
+assert.strictEqual(weeklyCoachPlan.priorityTarget, 24, "Expected numeric weekly target to remain attached to the priority muscle.");
+assert(weeklyCoachPlan.plannedDays > 0, "Expected the weekly planner to create remaining sessions.");
+assert(weeklyCoachPlan.markup.includes("Weekly distribution") && weeklyCoachPlan.markup.includes("Copy this day to Log"), "Expected weekly Coach distribution and day-copy controls.");
+
+const weeklyPreferenceSync = runScenario(`
+  ${resetAndHelpers}
+  state.settings.coachWeeklyPlan = normalizeCoachWeeklyPlan({ days: [1, 3, 5], averageMinutes: 50, priorities: ["chest"], targets: { chest: 22 } });
+  safePreferenceValue("coachWeeklyPlan");
+`);
+
+assert.deepEqual(weeklyPreferenceSync.days, [1, 3, 5], "Expected weekly plan days to use safe preference sync.");
+assert.strictEqual(weeklyPreferenceSync.targets.chest, 22, "Expected weekly target settings to sync.");
+
 console.log("coach regression tests passed");
