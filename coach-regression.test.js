@@ -1945,4 +1945,16 @@ const weeklyPreferenceSync = runScenario(`
 assert.deepEqual(weeklyPreferenceSync.days, [1, 3, 5], "Expected weekly plan days to use safe preference sync.");
 assert.strictEqual(weeklyPreferenceSync.targets.chest, 22, "Expected weekly target settings to sync.");
 
+const weeklyDraftPreview = runScenario(`
+  ${resetAndHelpers}
+  state.settings.coachWeeklyPlan = normalizeCoachWeeklyPlan({ days: [1, 3, 5, 6], averageMinutes: 60 });
+  state.coachWeekDraft = normalizeCoachWeeklyPlan({ days: [5, 6], averageMinutes: 40 });
+  var selected = selectedCoachWeeklyPlan();
+  ({ days: selected.days, averageMinutes: selected.averageMinutes, markup: renderCoachWeek() });
+`);
+
+assert.deepEqual(weeklyDraftPreview.days, [5, 6], "Expected changed weekly day selections to preview before saving.");
+assert.strictEqual(weeklyDraftPreview.averageMinutes, 40, "Expected changed workout time to preview before saving.");
+assert(weeklyDraftPreview.markup.includes("2 days - 40 min average"), "Expected the weekly summary to reflect live setup changes.");
+
 console.log("coach regression tests passed");

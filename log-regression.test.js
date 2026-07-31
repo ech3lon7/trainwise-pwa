@@ -197,9 +197,9 @@ assert(!appCode.includes('selectedExercise: "Push-up"'), "Expected Log startup n
 assert(!appCode.includes('showBanner("Unsaved draft restored."'), "Expected startup draft recovery not to show a top banner.");
 assert(appCode.includes("notifyMetricSaved"), "Expected metrics saves to use a dedicated bottom-only notification helper.");
 assert(!stylesCode.includes(".mobile-quick-toggle"), "Expected floating quick action button styling to be removed.");
-assert(indexCode.includes("v=1.5.66"), "Expected index shell references to use bumped app version.");
+assert(indexCode.includes("v=1.5.67"), "Expected index shell references to use bumped app version.");
 assert(!indexCode.includes('id="app" class="app-content" aria-live'), "Expected broad app aria-live to be removed in favor of targeted live regions.");
-assert(serviceWorkerCode.includes("trainwise-cache-v88"), "Expected service worker cache version bump.");
+assert(serviceWorkerCode.includes("trainwise-cache-v89"), "Expected service worker cache version bump.");
 assert(appCode.includes("data-settings-panel"), "Expected Settings panels to preserve open state with stable panel ids.");
 assert(appCode.includes('forceSettingsPanelOpen("supabase-sync")'), "Expected Supabase actions to keep the Supabase panel open after rendering.");
 
@@ -2477,6 +2477,29 @@ const dateScopedStrengthDrafts = runScenario(`
 assert.strictEqual(dateScopedStrengthDrafts.tuesdayCount, 0, "Expected a draft on Monday not to appear on Tuesday.");
 assert.strictEqual(dateScopedStrengthDrafts.mondayWeight, 102.5, "Expected half-pound draft weights to survive date-scoped recovery.");
 assert.strictEqual(dateScopedStrengthDrafts.mondayNote, "Monday draft", "Expected returning to the original date to restore only that date's draft.");
+
+const dateNavigationPreservesSourceKey = runScenario(`
+  ${reset}
+  state.activeTab = "log";
+  state.logMode = "strength";
+  state.draftDate = "2026-06-22";
+  var originalReadDraftFromForm = readDraftFromForm;
+  var originalSaveStrengthDraftForDate = saveStrengthDraftForDate;
+  var originalSaveDraftRecovery = saveDraftRecovery;
+  var savedUnderDate = "";
+  readDraftFromForm = () => { state.draftDate = "2026-06-23"; };
+  saveStrengthDraftForDate = (date) => { savedUnderDate = date; };
+  saveDraftRecovery = () => true;
+  preserveVisibleDraft("date-change");
+  var result = { savedUnderDate, retainedDate: state.draftDate };
+  readDraftFromForm = originalReadDraftFromForm;
+  saveStrengthDraftForDate = originalSaveStrengthDraftForDate;
+  saveDraftRecovery = originalSaveDraftRecovery;
+  result;
+`);
+
+assert.strictEqual(dateNavigationPreservesSourceKey.savedUnderDate, "2026-06-22", "Expected date navigation to save the visible workout under its source date.");
+assert.strictEqual(dateNavigationPreservesSourceKey.retainedDate, "2026-06-22", "Expected reading the destination date input not to relabel the visible workout.");
 
 const exerciseLoadingPreferences = runScenario(`
   ${reset}

@@ -3,7 +3,7 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 3;
 const STORES = ["workouts", "metrics", "settings", "syncQueue"];
-const APP_VERSION = "1.5.66";
+const APP_VERSION = "1.5.67";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 const DRAFT_RECOVERY_KEY = "trainwise-draft-recovery-v1";
 const DATED_STRENGTH_DRAFTS_KEY = "trainwise-strength-drafts-by-date-v1";
@@ -2589,8 +2589,10 @@ function loadMetricDateDraft(date = todayISO()) {
 function preserveVisibleDraft(reason = "navigation") {
   const active = state.activeTab;
   if (active === "log" && state.logMode === "strength") {
+    const sourceDate = state.draftDate;
     readDraftFromForm();
-    saveStrengthDraftForDate(state.draftDate);
+    state.draftDate = sourceDate;
+    saveStrengthDraftForDate(sourceDate);
   }
   if (active === "log" && state.logMode === "metrics") state.metricFormDraft = metricDraftFromForm();
   if (active === "exercises") state.exerciseFormDraft = exerciseFormDraftFromForm() || state.exerciseFormDraft;
@@ -4170,7 +4172,18 @@ function normalizeCoachWeeklyPlan(value = {}) {
 }
 
 function selectedCoachWeeklyPlan() {
-  return normalizeCoachWeeklyPlan(state.settings.coachWeeklyPlan || state.coachWeekDraft || {});
+  return normalizeCoachWeeklyPlan(state.coachWeekDraft || state.settings.coachWeeklyPlan || {});
+}
+
+function coachWeeklyPlanFromForm(form) {
+  const data = new FormData(form);
+  return normalizeCoachWeeklyPlan({
+    days: data.getAll("days").map(Number),
+    averageMinutes: Number(data.get("averageMinutes")),
+    priorities: data.getAll("priorities").map(String),
+    targets: Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, Number(data.get(`target-${muscle.id}`))])),
+    generatedAt: state.settings.coachWeeklyPlan?.generatedAt || ""
+  });
 }
 
 function coachWeekDate(day, weekStart = currentTrainingWeekStart()) {
@@ -7061,14 +7074,11 @@ function renderCoachWeek() {
 }
 
 async function saveCoachWeeklyPlan(form) {
-  const data = new FormData(form);
   const setup = normalizeCoachWeeklyPlan({
-    days: data.getAll("days").map(Number),
-    averageMinutes: Number(data.get("averageMinutes")),
-    priorities: data.getAll("priorities").map(String),
-    targets: Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, Number(data.get(`target-${muscle.id}`))])),
+    ...coachWeeklyPlanFromForm(form),
     generatedAt: new Date().toISOString()
   });
+  state.coachWeekDraft = null;
   await saveSetting("coachWeeklyPlan", setup);
   await queueSyncChange("preference", "coachWeeklyPlan", { value: setup });
   scheduleRecordSync();
@@ -10278,6 +10288,12 @@ document.addEventListener("click", async (event) => {
 
 document.addEventListener("change", async (event) => {
   try {
+    const coachWeekForm = event.target.closest("#coach-week-form");
+    if (coachWeekForm) {
+      state.coachWeekDraft = coachWeeklyPlanFromForm(coachWeekForm);
+      await render();
+      return;
+    }
     if (event.target.matches("[data-sound-effects-enabled]")) {
       await saveSetting("soundEffectsEnabled", Boolean(event.target.checked));
       forceSettingsPanelOpen("sound-effects");
