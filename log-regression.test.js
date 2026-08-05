@@ -197,9 +197,9 @@ assert(!appCode.includes('selectedExercise: "Push-up"'), "Expected Log startup n
 assert(!appCode.includes('showBanner("Unsaved draft restored."'), "Expected startup draft recovery not to show a top banner.");
 assert(appCode.includes("notifyMetricSaved"), "Expected metrics saves to use a dedicated bottom-only notification helper.");
 assert(!stylesCode.includes(".mobile-quick-toggle"), "Expected floating quick action button styling to be removed.");
-assert(indexCode.includes("v=1.5.68"), "Expected index shell references to use bumped app version.");
+assert(indexCode.includes("v=1.5.69"), "Expected index shell references to use bumped app version.");
 assert(!indexCode.includes('id="app" class="app-content" aria-live'), "Expected broad app aria-live to be removed in favor of targeted live regions.");
-assert(serviceWorkerCode.includes("trainwise-cache-v90"), "Expected service worker cache version bump.");
+assert(serviceWorkerCode.includes("trainwise-cache-v91"), "Expected service worker cache version bump.");
 assert(appCode.includes("data-settings-panel"), "Expected Settings panels to preserve open state with stable panel ids.");
 assert(appCode.includes('forceSettingsPanelOpen("supabase-sync")'), "Expected Supabase actions to keep the Supabase panel open after rendering.");
 
@@ -2256,6 +2256,8 @@ const coachDebugReport = runScenario(`
     app: report.app,
     notBackup: report.notBackup,
     hasCoachPlan: Boolean(report.coach.todayPlan),
+    hasWeeklyPlan: Boolean(report.coach.weeklyPlan?.setup && Array.isArray(report.coach.weeklyPlan?.sessions)),
+    hasWeeklyCapacity: Number.isFinite(report.coach.weeklyPlan?.capacity?.estimatedSetCapacity),
     hasMuscleAudit: report.coach.muscleAudit.length > 0,
     modeKeys: Object.keys(report.coach.modeComparison || {}),
     modeItemCounts: Object.fromEntries(Object.entries(report.coach.modeComparison || {}).map(([mode, plan]) => [mode, plan.items.length])),
@@ -2272,6 +2274,8 @@ const coachDebugReport = runScenario(`
 assert.strictEqual(coachDebugReport.app, "TrainWise Coach Debug Report", `Expected Coach debug report app label, got ${coachDebugReport.app}`);
 assert.strictEqual(coachDebugReport.notBackup, true, "Expected Coach debug report to mark itself as non-backup.");
 assert(coachDebugReport.hasCoachPlan, "Expected Coach debug report to include today's plan.");
+assert(coachDebugReport.hasWeeklyPlan, "Expected Coach debug report to include the committed weekly setup and generated sessions.");
+assert(coachDebugReport.hasWeeklyCapacity, "Expected Coach debug report to include weekly capacity diagnostics.");
 assert(coachDebugReport.hasMuscleAudit, "Expected Coach debug report to include muscle audit.");
 assert.deepEqual(coachDebugReport.modeKeys, ["soft", "medium", "aggressive"], `Expected Coach debug report to compare all three modes, got ${coachDebugReport.modeKeys.join(", ")}`);
 assert(Object.values(coachDebugReport.modeItemCounts).every((count) => Number.isFinite(count)), `Expected every mode comparison to include item counts, got ${JSON.stringify(coachDebugReport.modeItemCounts)}`);
@@ -2520,6 +2524,23 @@ const exerciseLoadingPreferences = runScenario(`
 assert.strictEqual(exerciseLoadingPreferences.ok, true, "Expected high-rep exercise settings to validate.");
 assert.strictEqual(exerciseLoadingPreferences.exercise.loadingStyle, "high-rep", "Expected loading style to be stored on the exercise.");
 assert.strictEqual(exerciseLoadingPreferences.exercise.loadIncrement, 0.5, "Expected configured half-pound load increments to remain exact.");
+
+const loadingStyleRepRangeCoherence = runScenario(`
+  ${reset}
+  var normalizedHigh = normalizeExerciseDefinition({ id: "high", name: "High", primaryMuscles: ["biceps"], loadingStyle: "high-rep", reps: "8-15" });
+  var normalizedStandard = normalizeExerciseDefinition({ id: "standard", name: "Standard", primaryMuscles: ["biceps"], loadingStyle: "standard", reps: "20-30" });
+  var invalidHigh = validateExerciseFormInput({ name: "Invalid High", primaryMuscle: "biceps", reps: "8-15", rest: "60 sec", loadingStyle: "high-rep" });
+  var invalidStandard = validateExerciseFormInput({ name: "Invalid Standard", primaryMuscle: "biceps", reps: "20-30", rest: "60 sec", loadingStyle: "standard" });
+  var automatic = validateExerciseFormInput({ name: "Automatic", primaryMuscle: "biceps", reps: "20-30", rest: "60 sec", loadingStyle: "auto" });
+  ({ highReps: normalizedHigh.reps, standardReps: normalizedStandard.reps, invalidHigh, invalidStandard, automatic });
+`);
+
+assert.strictEqual(loadingStyleRepRangeCoherence.highReps, "20-30", "Expected existing High-rep + 8-15 definitions to normalize to 20-30.");
+assert.strictEqual(loadingStyleRepRangeCoherence.standardReps, "8-15", "Expected existing Standard + 20-30 definitions to normalize to 8-15.");
+assert.strictEqual(loadingStyleRepRangeCoherence.invalidHigh.ok, false, "Expected explicit High-rep exercises to reject a standard rep range.");
+assert.strictEqual(loadingStyleRepRangeCoherence.invalidStandard.ok, false, "Expected explicit Standard exercises to reject a high-rep-only range.");
+assert.strictEqual(loadingStyleRepRangeCoherence.automatic.ok, true, "Expected Auto loading style to preserve a manually entered high-rep range.");
+assert(appCode.includes('repsInput.value = "20-30"') && appCode.includes('repsInput.value = "8-15"'), "Expected loading-style selection to update the exercise rep range immediately.");
 
 const coachSubstitutionProvenance = runScenario(`
   ${reset}

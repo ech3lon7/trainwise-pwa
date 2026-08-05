@@ -3,7 +3,7 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 3;
 const STORES = ["workouts", "metrics", "settings", "syncQueue"];
-const APP_VERSION = "1.5.68";
+const APP_VERSION = "1.5.69";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 const DRAFT_RECOVERY_KEY = "trainwise-draft-recovery-v1";
 const DATED_STRENGTH_DRAFTS_KEY = "trainwise-strength-drafts-by-date-v1";
@@ -922,7 +922,7 @@ function safePreferenceValue(key) {
   if (key === "maintenanceProfile") return selectedMaintenanceProfile();
   if (key === "dashboardWidgets") return selectedDashboardWidgets();
   if (key === "dashboardWidgetOrder") return dashboardWidgetOrder();
-  if (key === "coachWeeklyPlan") return selectedCoachWeeklyPlan();
+  if (key === "coachWeeklyPlan") return normalizeCoachWeeklyPlan(state.settings.coachWeeklyPlan || {});
   return undefined;
 }
 
@@ -1024,6 +1024,15 @@ function effectiveLoadingStyle(exercise = {}) {
   return parseRepRange(exercise.reps).low >= 15 ? "high-rep" : "standard";
 }
 
+function repRangeForLoadingStyle(reps, loadingStyle) {
+  const normalized = normalizeRepRangeInput(reps) || "8-15";
+  const style = normalizeLoadingStyle(loadingStyle);
+  const range = parseRepRange(normalized);
+  if (style === "high-rep" && range.low < 15) return "20-30";
+  if (style === "standard" && range.low >= 15) return "8-15";
+  return normalized;
+}
+
 function workoutLoadingStyle(workout = {}) {
   return normalizeLoadingStyle(workout.loadingStyle) === "high-rep" ? "high-rep" : "standard";
 }
@@ -1037,16 +1046,17 @@ function normalizeExerciseDefinition(exercise) {
     .filter((muscle) => !primaryMuscles.includes(muscle));
   const id = String(exercise.id || `user-${normalizeName(name)}`).trim();
 
+  const loadingStyle = normalizeLoadingStyle(exercise.loadingStyle);
   const normalized = {
     id,
     name,
     primaryMuscles,
     secondaryMuscles,
     equipment: String(exercise.equipment || "custom").trim() || "custom",
-    reps: String(exercise.reps || "8-15").trim() || "8-15",
+    reps: repRangeForLoadingStyle(exercise.reps, loadingStyle),
     rest: String(exercise.rest || "60-120 sec").trim() || "60-120 sec",
     progressionMode: normalizeProgressionMode(exercise.progressionMode),
-    loadingStyle: normalizeLoadingStyle(exercise.loadingStyle),
+    loadingStyle,
     loadIncrement: normalizeLoadIncrement(exercise.loadIncrement),
     cue: String(exercise.cue || "Custom exercise. Keep form strict and progress gradually.").trim(),
     userCreated: true,
@@ -1689,6 +1699,11 @@ function validateExerciseFormInput(data = {}, editingId = state.editingExerciseI
   if (duplicate) errors.name = "That custom exercise already exists.";
   const reps = normalizeRepRangeInput(values.reps);
   if (!reps) errors.reps = "Use a rep target like 10 or 8-15.";
+  if (reps && values.loadingStyle !== "auto" && repRangeForLoadingStyle(reps, values.loadingStyle) !== reps) {
+    errors.reps = values.loadingStyle === "high-rep"
+      ? "High-rep exercises need a range starting at 15 or higher, such as 20-30."
+      : "Standard exercises need a range starting below 15, such as 8-15.";
+  }
   const rest = normalizeRestRangeInput(values.rest);
   if (!rest) errors.rest = "Use rest like 60 sec, 90-120 sec, or 1:30.";
   const secondaryMuscles = uniqueMuscles(values.secondaryMuscles).filter((muscle) => muscle !== primaryMuscle);
@@ -1715,6 +1730,20 @@ function validateExerciseFormInput(data = {}, editingId = state.editingExerciseI
 
 function exerciseHistoryEntries(exerciseName, newestFirst = true) {
   return exerciseHistoryForIdentity(exerciseName, state.workouts, newestFirst);
+}
+
+function exerciseLoadingStylePhase(exercise, workouts = state.workouts) {
+  const targetStyle = effectiveLoadingStyle(exercise);
+  const allHistory = exerciseHistoryForDefinition(exercise, workouts);
+  const transitionSource = allHistory[0] && workoutLoadingStyle(allHistory[0]) !== targetStyle ? allHistory[0] : null;
+  const history = [];
+  if (!transitionSource) {
+    for (const workout of allHistory) {
+      if (workoutLoadingStyle(workout) !== targetStyle) break;
+      history.push(workout);
+    }
+  }
+  return { targetStyle, history, transitionSource, allHistory };
 }
 
 function exerciseStats(exerciseName) {
@@ -1765,11 +1794,12 @@ function convertSetRowToLoadingStyle(row, exercise, sourceStyle, targetStyle = e
 
 function progressionTargetForExercise(exerciseName) {
   const meta = resolveExerciseMeta(exerciseName);
-  const loadingStyle = effectiveLoadingStyle(meta);
-  const history = exerciseHistoryEntries(exerciseName);
-  const latest = history.find((workout) => workoutLoadingStyle(workout) === loadingStyle);
+  const phase = exerciseLoadingStylePhase(meta);
+  const loadingStyle = phase.targetStyle;
+  const history = phase.history;
+  const latest = history[0] || null;
   if (!latest) {
-    const source = history[0];
+    const source = phase.transitionSource;
     const sourceTop = source ? bestSet(source) : null;
     const sourceStyle = source ? workoutLoadingStyle(source) : loadingStyle;
     if (!sourceTop || sourceStyle === loadingStyle) return null;
@@ -2817,9 +2847,9 @@ function coachPerformanceMessage(exercise, status, detail = "") {
 }
 
 function coachExercisePerformanceSignal(exercise, workouts = coachWorkoutEntries()) {
-  const loadingStyle = effectiveLoadingStyle(exercise);
-  const history = exerciseHistoryForDefinition(exercise, workouts)
-    .filter((workout) => workoutLoadingStyle(workout) === loadingStyle);
+  const phase = exerciseLoadingStylePhase(exercise, workouts);
+  const loadingStyle = phase.targetStyle;
+  const history = phase.history;
   if (history.length < 2) {
     return {
       status: "neutral",
@@ -2827,6 +2857,7 @@ function coachExercisePerformanceSignal(exercise, workouts = coachWorkoutEntries
       history,
       latest: history[0] || null,
       previous: null,
+      transitionSource: phase.transitionSource,
       message: ""
     };
   }
@@ -5170,9 +5201,9 @@ function adjustedCoachPlanRow(row, exercise, planTarget = null) {
 
 function plannedSetRowsFromPreviousSession(exercise, setCount, planTarget = null) {
   const count = Math.max(1, Math.round(parseNum(setCount)));
-  const history = exerciseHistoryForDefinition(exercise);
-  const targetStyle = effectiveLoadingStyle(exercise);
-  const last = history.find((workout) => workoutLoadingStyle(workout) === targetStyle) || history[0] || null;
+  const phase = exerciseLoadingStylePhase(exercise);
+  const targetStyle = phase.targetStyle;
+  const last = phase.history[0] || phase.transitionSource || null;
   const previousRows = last ? setRowsFromWorkout(last) : [];
   if (!previousRows.length) return defaultSetRows(count);
   const sourceStyle = workoutLoadingStyle(last);
@@ -7116,9 +7147,9 @@ async function saveCoachWeeklyPlan(form) {
     ...coachWeeklyPlanFromForm(form),
     generatedAt: new Date().toISOString()
   });
-  state.coachWeekDraft = null;
   await saveSetting("coachWeeklyPlan", setup);
   await queueSyncChange("preference", "coachWeeklyPlan", { value: setup });
+  state.coachWeekDraft = null;
   scheduleRecordSync();
   toast("Weekly plan generated.");
   await render();
@@ -8434,6 +8465,31 @@ function recordsDebugSummary(records = allTimeRecords()) {
   };
 }
 
+function coachDebugWeeklyPlan() {
+  const plan = buildCoachWeeklyPlan(normalizeCoachWeeklyPlan(state.settings.coachWeeklyPlan || {}));
+  return {
+    setup: clonePlain(plan.setup),
+    remainingDates: plan.sessions.filter((session) => session.status === "planned").map((session) => session.date),
+    capacity: clonePlain(plan.capacity),
+    actualSets: Object.fromEntries(plan.actualStats.map((stat) => [stat.id, stat.sets])),
+    projectedSets: clonePlain(plan.projected),
+    sessions: plan.sessions.map((session) => ({
+      date: session.date,
+      status: session.status,
+      totalMinutes: session.totalMinutes,
+      submittedSets: session.submitted.reduce((sum, workout) => sum + setRowsFromWorkout(workout).length, 0),
+      items: session.items.map((item) => ({
+        exercise: item.exercise.name,
+        muscle: item.muscle.id,
+        sets: item.sets,
+        loadingStyle: effectiveLoadingStyle(item.exercise),
+        planTarget: item.planTarget?.label || "",
+        performanceStatus: item.performanceSignal?.status || "neutral"
+      }))
+    }))
+  };
+}
+
 function buildCoachDebugReport() {
   const planningContext = coachPlanningContext();
   const todayPlan = buildTodayPlan(selectedCoachTimeframeMinutes());
@@ -8475,6 +8531,7 @@ function buildCoachDebugReport() {
     coach: {
       todayPlan: coachDebugPlanSummary(todayPlan),
       copiedPlan: copiedPlan ? coachDebugPlanSummary(copiedPlan) : null,
+      weeklyPlan: coachDebugWeeklyPlan(),
       modeComparison: coachDebugModeComparison(),
       muscleAudit: coachDebugMuscleAudit(planningContext),
       libraryCoverage: coachDebugLibraryCoverage(),
@@ -10367,6 +10424,11 @@ document.addEventListener("change", async (event) => {
     }
     if (event.target.matches("#exercise-primary")) {
       syncSecondaryMuscleCheckboxes(event.target.closest("#exercise-form"));
+    }
+    if (event.target.matches("#exercise-loading-style")) {
+      const repsInput = event.target.closest("#exercise-form")?.querySelector("#exercise-reps");
+      if (repsInput && event.target.value === "high-rep") repsInput.value = "20-30";
+      if (repsInput && event.target.value === "standard") repsInput.value = "8-15";
     }
     if (event.target.closest("#exercise-form")) {
       state.exerciseFormDraft = exerciseFormDraftFromForm(event.target.closest("#exercise-form"));

@@ -1957,6 +1957,51 @@ assert.strictEqual(highRepToStandardConversion.planTarget.kind, "style-conversio
 assert.strictEqual(highRepToStandardConversion.row.weight, 97.5, "Expected the high-rep set to convert conservatively to the configured 2.5 lb increment.");
 assert.strictEqual(highRepToStandardConversion.row.reps, 10, "Expected an 8-12 standard range conversion to target its 10-rep midpoint.");
 
+const interruptedLoadingStylePhase = runScenario(`
+  ${resetAndHelpers}
+  state.settings.customExercises = [{
+    id: "phase-curl", name: "Phase Curl", primaryMuscles: ["biceps"], secondaryMuscles: [],
+    equipment: "cable", reps: "20-30", rest: "60 sec", loadingStyle: "high-rep", loadIncrement: 2.5, userCreated: true
+  }];
+  var exercise = resolveExerciseMeta("Phase Curl");
+  var olderHigh = makeWorkout({ id: "biceps" }, 6, 1, { id: "old-high", exercise: exercise.name, exerciseId: exercise.id });
+  Object.assign(olderHigh, { loadingStyle: "high-rep", setRows: [{ weight: 50, reps: 28, rir: 1 }] });
+  var interveningStandard = makeWorkout({ id: "biceps" }, 4, 1, { id: "middle-standard", exercise: exercise.name, exerciseId: exercise.id });
+  Object.assign(interveningStandard, { loadingStyle: "standard", setRows: [{ weight: 75, reps: 10, rir: 2 }] });
+  var latestHigh = makeWorkout({ id: "biceps" }, 2, 1, { id: "new-high", exercise: exercise.name, exerciseId: exercise.id });
+  Object.assign(latestHigh, { loadingStyle: "high-rep", setRows: [{ weight: 52.5, reps: 22, rir: 2 }] });
+  state.workouts = [olderHigh, interveningStandard, latestHigh];
+  var phase = exerciseLoadingStylePhase(exercise);
+  var signal = coachExercisePerformanceSignal(exercise);
+  ({ phaseIds: phase.history.map((workout) => workout.id), status: signal.status, historyCount: signal.history.length });
+`);
+
+assert.deepEqual(interruptedLoadingStylePhase.phaseIds, ["new-high"], "Expected the active high-rep phase to stop at the intervening standard workout.");
+assert.strictEqual(interruptedLoadingStylePhase.status, "neutral", "Expected the first workout in a new loading-style phase to establish a neutral baseline.");
+assert.strictEqual(interruptedLoadingStylePhase.historyCount, 1, "Expected old high-rep phases not to affect current progression or regression.");
+
+const returningStyleUsesTransition = runScenario(`
+  ${resetAndHelpers}
+  state.settings.customExercises = [{
+    id: "return-curl", name: "Return Curl", primaryMuscles: ["biceps"], secondaryMuscles: [],
+    equipment: "cable", reps: "20-30", rest: "60 sec", loadingStyle: "high-rep", loadIncrement: 2.5, userCreated: true
+  }];
+  var exercise = resolveExerciseMeta("Return Curl");
+  var oldHigh = makeWorkout({ id: "biceps" }, 8, 1, { id: "old-high", exercise: exercise.name, exerciseId: exercise.id });
+  Object.assign(oldHigh, { loadingStyle: "high-rep", setRows: [{ weight: 45, reps: 25, rir: 2 }] });
+  var latestStandard = makeWorkout({ id: "biceps" }, 2, 1, { id: "latest-standard", exercise: exercise.name, exerciseId: exercise.id });
+  Object.assign(latestStandard, { loadingStyle: "standard", setRows: [{ weight: 80, reps: 10, rir: 2 }] });
+  state.workouts = [oldHigh, latestStandard];
+  var progression = progressionTargetForExercise(exercise.name);
+  var signal = coachExercisePerformanceSignal(exercise);
+  ({ styleConversion: progression.styleConversion, sourceId: progression.latest.id, status: signal.status, historyCount: signal.history.length });
+`);
+
+assert.strictEqual(returningStyleUsesTransition.styleConversion, true, "Expected the latest opposite-style workout to create a new conversion baseline even when an older target-style phase exists.");
+assert.strictEqual(returningStyleUsesTransition.sourceId, "latest-standard", "Expected conversion to use the newest opposite-style performance.");
+assert.strictEqual(returningStyleUsesTransition.status, "neutral", "Expected no progression or regression verdict across a loading-style transition.");
+assert.strictEqual(returningStyleUsesTransition.historyCount, 0, "Expected previous high-rep phases to remain outside the new transition baseline.");
+
 const weeklyCoachPlan = runScenario(`
   ${resetAndHelpers}
   state.workouts = muscleGroups.map((muscle) => makeWorkout(muscle, 2, 10));
@@ -1989,6 +2034,19 @@ const weeklyPreferenceSync = runScenario(`
 
 assert.deepEqual(weeklyPreferenceSync.days, [1, 3, 5], "Expected weekly plan days to use safe preference sync.");
 assert.strictEqual(weeklyPreferenceSync.targets.chest, 22, "Expected weekly target settings to sync.");
+
+const weeklyCommittedPreferenceWins = runScenario(`
+  ${resetAndHelpers}
+  state.settings.coachWeeklyPlan = normalizeCoachWeeklyPlan({ days: [2, 4, 6], averageMinutes: 50, priorities: ["back"], targets: { back: 24 } });
+  state.coachWeekDraft = normalizeCoachWeeklyPlan({ days: [5], averageMinutes: 30, priorities: ["chest"], targets: { chest: 20 } });
+  var synced = safePreferenceValue("coachWeeklyPlan");
+  ({ days: synced.days, minutes: synced.averageMinutes, priorities: synced.priorities, backTarget: synced.targets.back });
+`);
+
+assert.deepEqual(weeklyCommittedPreferenceWins.days, [2, 4, 6], "Expected record sync to use the committed weekly setup, not a transient preview draft.");
+assert.strictEqual(weeklyCommittedPreferenceWins.minutes, 50, "Expected committed weekly duration to remain authoritative.");
+assert.deepEqual(weeklyCommittedPreferenceWins.priorities, ["back"], "Expected committed weekly priorities to remain authoritative.");
+assert.strictEqual(weeklyCommittedPreferenceWins.backTarget, 24, "Expected committed weekly targets to remain authoritative.");
 
 const weeklyDraftPreview = runScenario(`
   ${resetAndHelpers}
