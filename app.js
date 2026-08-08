@@ -3,7 +3,7 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 3;
 const STORES = ["workouts", "metrics", "settings", "syncQueue"];
-const APP_VERSION = "1.5.69";
+const APP_VERSION = "1.5.70";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 const DRAFT_RECOVERY_KEY = "trainwise-draft-recovery-v1";
 const DATED_STRENGTH_DRAFTS_KEY = "trainwise-strength-drafts-by-date-v1";
@@ -23,6 +23,7 @@ let reloadingForUpdate = false;
 let renderToken = 0;
 let scrollTopTimer = null;
 let recordSyncTimer = null;
+let coachWeekPreviewRenderTimer = null;
 let recordSyncPromise = null;
 let recordSyncLifecycleStarted = false;
 let uiAudioContext = null;
@@ -3033,17 +3034,19 @@ function logLoadDirectionForExercise(exercise, options = {}) {
       message: signal.message || `${exercise.name} dipped last session; reduce load and rebuild with controlled reps.`
     };
   }
+  const progression = progressionTargetForExercise(exercise.name);
+  const hasHistory = Boolean(signal.latest || signal.transitionSource || progression?.latest);
   return {
     direction: "neutral",
-    symbol: "",
+    symbol: hasHistory ? "\u2192" : "",
     label: "Coach recommends holding workload",
-    message: signal.message || ""
+    message: signal.message || progression?.body || "Coach does not have enough comparable evidence to call this progression or regression yet."
   };
 }
 
 function logLoadDirectionIndicator(exercise, draft = {}) {
   const direction = logLoadDirectionForExercise(exercise, { excludeId: draft.editingWorkoutId });
-  if (direction.direction === "neutral") return "";
+  if (!direction.symbol) return "";
   return `
     <button class="load-direction-indicator ${direction.direction}" type="button" data-action="show-load-direction" data-message="${escapeHtml(direction.message)}" aria-label="${escapeHtml(direction.label)}" title="${escapeHtml(direction.message || direction.label)}">
       ${escapeHtml(direction.symbol)}
@@ -4267,6 +4270,32 @@ function coachWeeklyCapacity(setup, plannedDates) {
   return { totalMinutes, estimatedSetCapacity };
 }
 
+function coachWeeklyAttainment(setup, projected = {}) {
+  const results = muscleGroups.map((muscle) => {
+    const planned = Number(projected[muscle.id] || 0);
+    const target = Number(setup.targets[muscle.id] || HYPERTROPHY.minimumSets);
+    return {
+      id: muscle.id,
+      label: muscle.label,
+      planned,
+      target,
+      floorMet: planned >= HYPERTROPHY.minimumSets,
+      targetMet: planned >= target,
+      priority: setup.priorities.includes(muscle.id)
+    };
+  });
+  return {
+    results,
+    floorMet: results.filter((item) => item.floorMet).length,
+    targetMet: results.filter((item) => item.targetMet).length,
+    priorityMet: results.filter((item) => item.priority && item.targetMet).length,
+    priorityTotal: results.filter((item) => item.priority).length,
+    unmet: results.filter((item) => !item.targetMet),
+    floorUnmet: results.filter((item) => !item.floorMet),
+    priorityUnmet: results.filter((item) => item.priority && !item.targetMet)
+  };
+}
+
 function buildCoachWeeklyPlan(setupInput = selectedCoachWeeklyPlan()) {
   const setup = normalizeCoachWeeklyPlan(setupInput);
   const weekStart = currentTrainingWeekStart();
@@ -4352,22 +4381,27 @@ function buildCoachWeeklyPlan(setupInput = selectedCoachWeeklyPlan()) {
   const capacity = coachWeeklyCapacity(setup, futureDates);
   const remainingSets = muscleGroups.reduce((sum, muscle) => sum + Math.max(0, setup.targets[muscle.id] - (actualStats.find((stat) => stat.id === muscle.id)?.sets || 0)), 0);
   const missing = muscleGroups.filter((muscle) => setup.targets[muscle.id] > (projected[muscle.id] || 0) && !hasPrimaryExerciseForMuscle(muscle.id));
-  const capacityFits = remainingSets <= capacity.estimatedSetCapacity && !missing.length;
+  const attainment = coachWeeklyAttainment(setup, projected);
+  const capacityFits = attainment.unmet.length === 0 && !missing.length;
+  const unmetSummary = attainment.unmet.slice(0, 4).map((item) => `${item.label} ${fmt(item.planned, 1)}/${fmt(item.target)}`).join(", ");
+  const unmetRemainder = Math.max(0, attainment.unmet.length - 4);
+  const attainmentSummary = `Floors planned: ${attainment.floorMet}/${muscleGroups.length}. Defined targets planned: ${attainment.targetMet}/${muscleGroups.length}.${attainment.priorityTotal ? ` Priority targets planned: ${attainment.priorityMet}/${attainment.priorityTotal}.` : ""}`;
   return {
     setup,
     sessions,
     actualStats,
     projected,
     missing,
+    attainment,
     capacity: {
       ...capacity,
       requestedSets: remainingSets,
       fits: capacityFits,
       message: missing.length
-        ? `Add primary exercises for ${missing.map((muscle) => muscle.label).join(", ")} before Coach can distribute those targets.`
-        : remainingSets <= capacity.estimatedSetCapacity
-        ? `${fmt(remainingSets)} remaining credited sets fit the estimated ${fmt(capacity.estimatedSetCapacity)}-set capacity.`
-        : `${fmt(remainingSets)} credited sets are requested, but these days hold about ${fmt(capacity.estimatedSetCapacity)}. Add time/days or lower targets.`
+        ? `${attainmentSummary} Add primary exercises for ${missing.map((muscle) => muscle.label).join(", ")} before Coach can distribute those targets.`
+        : capacityFits
+        ? `${attainmentSummary} Coach can schedule every weekly floor and defined target across the remaining selected days.`
+        : `${attainmentSummary} Still short: ${unmetSummary}${unmetRemainder ? `, and ${unmetRemainder} more` : ""}. ${remainingSets > capacity.estimatedSetCapacity ? "The selected days do not provide enough estimated set capacity." : "The remaining day spacing, recovery rules, or per-session limits prevent Coach from safely assigning every requested set."}`
     }
   };
 }
@@ -6879,7 +6913,7 @@ function renderTodayPlan(plan) {
               <div>
                 <strong>${escapeHtml(item.exercise.name)}</strong>
                 <span>${escapeHtml(item.muscle.label)} - ${escapeHtml(item.exercise.reps)} reps - ${HYPERTROPHY.idealRirMin}-${HYPERTROPHY.idealRirMax} RIR</span>
-                ${item.planTarget ? `<span class="today-plan-target">${escapeHtml(item.planTarget.label)} - ${escapeHtml(item.planTarget.detail)}</span>` : ""}
+                ${item.planTarget ? `<span class="today-plan-target">${escapeHtml(item.planTarget.label)} - ${escapeHtml(item.planTarget.detail)} ${coachPlanDirectionIndicator(item.planTarget)}</span>` : ""}
                 <div class="mini-action-row">
                   <button class="ghost-mini" type="button" data-action="log-exercise" data-exercise="${escapeHtml(item.exercise.name)}">Log</button>
                   <button class="ghost-mini" type="button" data-action="open-exercise-trend" data-exercise="${escapeHtml(item.exercise.name)}">Trend</button>
@@ -7082,6 +7116,19 @@ function renderCoachViewSelector() {
   `;
 }
 
+function coachPlanDirectionIndicator(planTarget) {
+  if (!planTarget || planTarget.kind === "baseline") return "";
+  const direction = planTarget.tone === "up" ? "up" : (planTarget.tone === "down" || planTarget.tone === "warn") ? "down" : "neutral";
+  const symbol = direction === "up" ? "\u2191" : direction === "down" ? "\u2193" : "\u2192";
+  const label = direction === "up"
+    ? "Coach recommends raising workload"
+    : direction === "down"
+    ? "Coach recommends lowering workload"
+    : "Coach recommends holding workload while establishing a comparable baseline";
+  const message = planTarget.message || `${planTarget.label}. ${planTarget.detail}`;
+  return `<button class="load-direction-indicator ${direction}" type="button" data-action="show-load-direction" data-message="${escapeHtml(message)}" aria-label="${escapeHtml(label)}" title="${escapeHtml(message)}">${escapeHtml(symbol)}</button>`;
+}
+
 function renderCoachWeekDistribution(plan) {
   return `
     <div class="coach-week-distribution">
@@ -7111,7 +7158,7 @@ function renderCoachWeekDay(session) {
         <div class="coach-week-day-items">${session.submitted.map((workout) => `<div><strong>${escapeHtml(workout.exercise)}</strong><span>${setRowsFromWorkout(workout).length} sets locked in</span></div>`).join("")}</div>
       ` : session.status === "past" ? `<div class="empty compact-empty">No submitted workout on this selected day.</div>` : session.items.length ? `
         <div class="coach-week-day-items">
-          ${session.items.map((item) => `<div><strong>${escapeHtml(item.exercise.name)}</strong><span>${escapeHtml(item.muscle.label)} - ${item.sets} sets - ${escapeHtml(item.planTarget?.label || item.exercise.reps)}</span></div>`).join("")}
+          ${session.items.map((item) => `<div><strong>${escapeHtml(item.exercise.name)}</strong><span>${escapeHtml(item.muscle.label)} - ${item.sets} sets - ${escapeHtml(item.planTarget?.label || item.exercise.reps)} ${coachPlanDirectionIndicator(item.planTarget)}</span></div>`).join("")}
         </div>
         <button class="primary-button" type="button" data-action="copy-coach-week-day" data-date="${escapeHtml(session.date)}">Copy this day to Log</button>
       ` : `<div class="empty compact-empty">Recovery gaps or completed targets leave this day open.</div>`}
@@ -7136,13 +7183,15 @@ function renderCoachWeek() {
         <button class="primary-button" type="submit">Generate weekly plan</button>
       </form>
     </details>
-    <section class="section coach-week-capacity ${plan.capacity.fits ? "good" : "warn"}"><strong>${plan.capacity.fits ? "Capacity looks workable" : "Targets exceed estimated capacity"}</strong><p>${escapeHtml(plan.capacity.message)}</p></section>
+    <section class="section coach-week-capacity ${plan.capacity.fits ? "good" : "warn"}"><strong>${plan.capacity.fits ? "All weekly targets are planned" : "Some weekly targets cannot be planned"}</strong><p>${escapeHtml(plan.capacity.message)}</p></section>
     <details class="section chart-panel collapsible-panel" open><summary><span>Weekly distribution</span><small>actual + planned credits</small></summary>${renderCoachWeekDistribution(plan)}</details>
     <section class="section coach-week-days">${plan.sessions.map(renderCoachWeekDay).join("")}</section>
   `;
 }
 
 async function saveCoachWeeklyPlan(form) {
+  clearTimeout(coachWeekPreviewRenderTimer);
+  coachWeekPreviewRenderTimer = null;
   const setup = normalizeCoachWeeklyPlan({
     ...coachWeeklyPlanFromForm(form),
     generatedAt: new Date().toISOString()
@@ -7151,7 +7200,7 @@ async function saveCoachWeeklyPlan(form) {
   await queueSyncChange("preference", "coachWeeklyPlan", { value: setup });
   state.coachWeekDraft = null;
   scheduleRecordSync();
-  toast("Weekly plan generated.");
+  toast("Weekly plan regenerated from your current setup and submitted workouts.");
   await render();
 }
 
@@ -8471,6 +8520,7 @@ function coachDebugWeeklyPlan() {
     setup: clonePlain(plan.setup),
     remainingDates: plan.sessions.filter((session) => session.status === "planned").map((session) => session.date),
     capacity: clonePlain(plan.capacity),
+    attainment: clonePlain(plan.attainment),
     actualSets: Object.fromEntries(plan.actualStats.map((stat) => [stat.id, stat.sets])),
     projectedSets: clonePlain(plan.projected),
     sessions: plan.sessions.map((session) => ({
@@ -10386,7 +10436,11 @@ document.addEventListener("change", async (event) => {
     const coachWeekForm = event.target.closest("#coach-week-form");
     if (coachWeekForm) {
       state.coachWeekDraft = coachWeeklyPlanFromForm(coachWeekForm);
-      await render();
+      clearTimeout(coachWeekPreviewRenderTimer);
+      coachWeekPreviewRenderTimer = setTimeout(() => {
+        coachWeekPreviewRenderTimer = null;
+        if (coachWeekForm.isConnected) render();
+      }, 0);
       return;
     }
     if (event.target.matches("[data-sound-effects-enabled]")) {

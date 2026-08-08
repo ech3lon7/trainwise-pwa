@@ -2201,6 +2201,11 @@ textarea {
   background: rgba(255, 107, 95, 0.12);
 }
 
+.load-direction-indicator.neutral {
+  color: var(--muted);
+  background: rgba(255, 255, 255, 0.06);
+}
+
 .record-trophy:focus-visible {
   outline: 2px solid rgba(242, 208, 107, 0.75);
   outline-offset: 3px;

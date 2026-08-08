@@ -2004,6 +2004,7 @@ assert.strictEqual(returningStyleUsesTransition.historyCount, 0, "Expected previ
 
 const weeklyCoachPlan = runScenario(`
   ${resetAndHelpers}
+  state.coachWeekDraft = null;
   state.workouts = muscleGroups.map((muscle) => makeWorkout(muscle, 2, 10));
   state.settings.coachWeeklyPlan = normalizeCoachWeeklyPlan({
     days: [5, 0],
@@ -2059,5 +2060,50 @@ const weeklyDraftPreview = runScenario(`
 assert.deepEqual(weeklyDraftPreview.days, [5, 6], "Expected changed weekly day selections to preview before saving.");
 assert.strictEqual(weeklyDraftPreview.averageMinutes, 40, "Expected changed workout time to preview before saving.");
 assert(weeklyDraftPreview.markup.includes("2 days - 40 min average"), "Expected the weekly summary to reflect live setup changes.");
+
+const weeklyAttainmentWarning = runScenario(`
+  ${resetAndHelpers}
+  state.coachWeekDraft = null;
+  state.workouts = muscleGroups.map((muscle) => makeWorkout(muscle, 2, 10));
+  state.settings.coachWeeklyPlan = normalizeCoachWeeklyPlan({
+    days: [3, 4],
+    averageMinutes: 60,
+    priorities: ["biceps"],
+    targets: Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, muscle.id === "biceps" ? 30 : 10]))
+  });
+  var plan = buildCoachWeeklyPlan();
+  ({
+    fits: plan.capacity.fits,
+    estimatedCapacity: plan.capacity.estimatedSetCapacity,
+    requestedSets: plan.capacity.requestedSets,
+    targetMet: plan.attainment.targetMet,
+    priorityMet: plan.attainment.priorityMet,
+    priorityTotal: plan.attainment.priorityTotal,
+    message: plan.capacity.message,
+    markup: renderCoachWeek()
+  });
+`);
+
+assert(weeklyAttainmentWarning.requestedSets <= weeklyAttainmentWarning.estimatedCapacity, "Expected this scenario to expose why rough capacity alone is insufficient.");
+assert.strictEqual(weeklyAttainmentWarning.fits, false, "Expected weekly capacity status to follow the scheduled projection, not only rough minute capacity.");
+assert(weeklyAttainmentWarning.targetMet < 10, "Expected adjacent remaining days to leave at least one defined target unmet.");
+assert(weeklyAttainmentWarning.priorityMet < weeklyAttainmentWarning.priorityTotal, "Expected unmet priority targets to be reported explicitly.");
+assert(weeklyAttainmentWarning.message.includes("Floors planned:") && weeklyAttainmentWarning.message.includes("Priority targets planned:"), "Expected weekly status to report floor and priority-target attainability.");
+assert(weeklyAttainmentWarning.markup.includes("Some weekly targets cannot be planned"), "Expected Coach Week UI to clearly warn when the generated schedule misses targets.");
+
+const coachPlanDirections = runScenario(`
+  ({
+    up: coachPlanDirectionIndicator({ kind: "progression", tone: "up", label: "Add a rep", detail: "1-3 RIR", message: "Progressing" }),
+    down: coachPlanDirectionIndicator({ kind: "reset", tone: "warn", label: "Reset load", detail: "1-2 RIR", message: "Regressing" }),
+    transition: coachPlanDirectionIndicator({ kind: "style-conversion", tone: "flat", label: "High-rep baseline", detail: "1-3 RIR", message: "Establish baseline" })
+  });
+`);
+
+assert(coachPlanDirections.up.includes("load-direction-indicator up") && coachPlanDirections.up.includes("\u2191"), "Expected progressing Coach exercises to show a green up direction.");
+assert(coachPlanDirections.down.includes("load-direction-indicator down") && coachPlanDirections.down.includes("\u2193"), "Expected regressing Coach exercises to show a red down direction.");
+assert(coachPlanDirections.transition.includes("load-direction-indicator neutral") && coachPlanDirections.transition.includes("\u2192"), "Expected loading-style transitions to show an honest hold/baseline direction instead of a false up/down verdict.");
+
+assert(appCode.includes("if (coachWeekForm.isConnected) render();"), "Expected weekly preview rendering to defer until after a possible Generate submit.");
+assert(appCode.includes("clearTimeout(coachWeekPreviewRenderTimer);"), "Expected weekly generation to cancel a pending preview render before committing the form.");
 
 console.log("coach regression tests passed");
