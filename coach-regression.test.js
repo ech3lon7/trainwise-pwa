@@ -747,16 +747,14 @@ const missingCoverage = runScenario(`
   state.settings.customExercises = state.settings.customExercises.filter((ex) => !ex.primaryMuscles.includes("back"));
   state.workouts = muscleGroups.map((muscle) => makeWorkout(muscle, 2, 2));
   var plan = buildTodayPlan(60);
-  var whyHtml = renderCoachWhy(plan);
   ({
     missing: plan.sessionPlan.missing.map((muscle) => muscle.label),
-    whyHasLibraryGap: whyHtml.includes("Library gaps"),
-    whyHasBack: whyHtml.includes("Back")
+    explanation: plan.explanation.missing.join(" ")
   });
 `);
 
 assert(missingCoverage.missing.includes("Back"), `Expected missing coverage to include Back, got ${missingCoverage.missing.join(", ")}`);
-assert(missingCoverage.whyHasLibraryGap && missingCoverage.whyHasBack, "Why this? should expose missing library coverage.");
+assert(missingCoverage.explanation.includes("Back"), "Expected Coach reasoning data to preserve missing Back coverage.");
 
 const targetedMuscles = runScenario(`
   ${resetAndHelpers}
@@ -864,11 +862,9 @@ const conversationalCoachBriefing = runScenario(`
   var chest = muscleGroups.find((muscle) => muscle.id === "chest");
   state.workouts = [makeWorkout(chest, 1, 3)];
   var plan = buildTodayPlan(60);
-  var whyMarkup = renderCoachWhy(plan);
   var todayAction = actionFromSessionPlan(plan);
   ({
     briefing: plan.briefing || [],
-    whyMarkup,
     todayBody: todayAction.body,
     skipped: plan.explanation.skipped.join(" "),
     recoverySummary: plan.explanation.recoverySummary || ""
@@ -877,7 +873,6 @@ const conversationalCoachBriefing = runScenario(`
 
 assert(conversationalCoachBriefing.briefing.length > 0, "Expected Coach to provide a short briefing summary.");
 assert(conversationalCoachBriefing.briefing[0].includes("Here's the play"), `Expected briefing to speak directly, got ${conversationalCoachBriefing.briefing.join(" ")}`);
-assert(conversationalCoachBriefing.whyMarkup.includes("Coach's read"), "Expected Why this? to render the briefing above detailed reasons.");
 assert(conversationalCoachBriefing.recoverySummary.includes("Chest") && conversationalCoachBriefing.recoverySummary.includes("2-day"), `Expected one aggregated recovery summary, got ${conversationalCoachBriefing.recoverySummary}`);
 assert(!/champ|boss/.test(conversationalCoachBriefing.skipped), `Expected routine skipped reasons not to spam nicknames, got ${conversationalCoachBriefing.skipped}`);
 assert(conversationalCoachBriefing.todayBody.includes("Here's the play"), `Expected Today action to reuse Coach briefing, got ${conversationalCoachBriefing.todayBody}`);

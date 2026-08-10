@@ -3,7 +3,7 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 3;
 const STORES = ["workouts", "metrics", "settings", "syncQueue"];
-const APP_VERSION = "1.5.71";
+const APP_VERSION = "1.5.72";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 const DRAFT_RECOVERY_KEY = "trainwise-draft-recovery-v1";
 const DATED_STRENGTH_DRAFTS_KEY = "trainwise-strength-drafts-by-date-v1";
@@ -7218,40 +7218,6 @@ function renderCoachTargetSelector() {
   `;
 }
 
-function renderCoachWhy(plan) {
-  const explanation = plan.explanation || {};
-  const briefing = plan.briefing || [];
-  const sections = [
-    { title: "Selected", items: explanation.selected || plan.why || [] },
-    { title: "Waiting", items: explanation.skipped || [] },
-    { title: "Library gaps", items: explanation.missing || [] },
-    { title: "Other checks", items: explanation.notes || plan.notes || [] }
-  ].filter((section) => section.items.length);
-  return `
-    <details class="section card coach-why-card collapsible-panel" open>
-      <summary><span>Why this?</span><small>readiness + gaps</small></summary>
-      ${briefing.length ? `
-        <div class="coach-why-list coach-briefing">
-          <div class="coach-why-section">
-            <h4>Coach's read</h4>
-            ${briefing.map((item) => `<span>${escapeHtml(item)}</span>`).join("")}
-          </div>
-        </div>
-      ` : ""}
-      ${sections.length ? `
-        <div class="coach-why-list">
-          ${sections.map((section) => `
-            <div class="coach-why-section">
-              <h4>${escapeHtml(section.title)}</h4>
-              ${section.items.map((item) => `<span>${escapeHtml(item)}</span>`).join("")}
-            </div>
-          `).join("")}
-        </div>
-      ` : `<div class="empty compact-empty">No priority issues right now.</div>`}
-    </details>
-  `;
-}
-
 function renderCopiedCoachPlan() {
   const copied = activeCopiedCoachPlan();
   if (!copied) {
@@ -7437,7 +7403,6 @@ function renderCoach() {
     ${renderCoachTargetSelector()}
     ${renderCopiedCoachPlan()}
     ${renderTodayPlan(todayPlan)}
-    ${renderCoachWhy(todayPlan)}
     <details class="section chart-panel collapsible-panel muscle-audit-panel" open>
       <summary><span>Muscle set audit</span><small>10 set floor, 12-20 growth zone</small></summary>
       ${muscleProgressMarkup(coachMuscleSetStats())}

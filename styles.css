@@ -1218,8 +1218,7 @@ textarea {
   font-weight: 800;
 }
 
-.today-plan-list,
-.coach-why-list {
+.today-plan-list {
   display: grid;
   gap: 8px;
 }
@@ -1235,8 +1234,7 @@ textarea {
   background: rgba(255, 255, 255, 0.045);
 }
 
-.today-plan-item span,
-.coach-why-list span {
+.today-plan-item span {
   color: var(--muted);
   font-size: 12px;
   line-height: 1.35;
@@ -1276,30 +1274,6 @@ textarea {
 
 .today-plan-summary span {
   overflow-wrap: anywhere;
-}
-
-.coach-why-card {
-  border-color: rgba(155, 140, 255, 0.18);
-}
-
-.coach-why-list span {
-  display: block;
-  padding: 10px;
-  border-radius: 8px;
-  background: rgba(255, 255, 255, 0.045);
-}
-
-.coach-why-section {
-  display: grid;
-  gap: 6px;
-}
-
-.coach-why-section h4 {
-  margin: 2px 0 0;
-  color: var(--muted);
-  font-size: 11px;
-  letter-spacing: 0;
-  text-transform: uppercase;
 }
 
 .coach-notes-header {
