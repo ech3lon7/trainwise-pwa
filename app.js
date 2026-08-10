@@ -3,7 +3,7 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 3;
 const STORES = ["workouts", "metrics", "settings", "syncQueue"];
-const APP_VERSION = "1.5.70";
+const APP_VERSION = "1.5.71";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 const DRAFT_RECOVERY_KEY = "trainwise-draft-recovery-v1";
 const DATED_STRENGTH_DRAFTS_KEY = "trainwise-strength-drafts-by-date-v1";
@@ -23,7 +23,6 @@ let reloadingForUpdate = false;
 let renderToken = 0;
 let scrollTopTimer = null;
 let recordSyncTimer = null;
-let coachWeekPreviewRenderTimer = null;
 let recordSyncPromise = null;
 let recordSyncLifecycleStarted = false;
 let uiAudioContext = null;
@@ -1133,6 +1132,11 @@ function resolveExerciseMeta(name, fallbackMuscle = "chest") {
     progressionMode: "normal",
     cue: "Custom exercise. Keep form strict and progress gradually."
   };
+}
+
+function isActiveCoachExercise(exercise) {
+  const exerciseId = String(exercise?.id || "");
+  return Boolean(exerciseId && exerciseDatabase().some((candidate) => candidate.id === exerciseId));
 }
 
 function exerciseIdentity(exerciseOrName, fallbackMuscle = "chest") {
@@ -3566,6 +3570,57 @@ function targetReserveSetCount(target, growthMode, limitMinutes = selectedCoachT
   return Math.min(timed, highVolumeRoom);
 }
 
+function coachExerciseStimulusCredits(exercise, sets = 1) {
+  const count = Number(sets) || 0;
+  const credits = {};
+  uniqueMuscles(exercise?.primaryMuscles || []).forEach((muscleId) => {
+    credits[muscleId] = (credits[muscleId] || 0) + count;
+  });
+  uniqueMuscles(exercise?.secondaryMuscles || [])
+    .filter((muscleId) => !uniqueMuscles(exercise?.primaryMuscles || []).includes(muscleId))
+    .forEach((muscleId) => {
+      credits[muscleId] = (credits[muscleId] || 0) + count * 0.5;
+    });
+  return credits;
+}
+
+function applyCoachStimulusCredits(projected, exercise, sets = 1) {
+  Object.entries(coachExerciseStimulusCredits(exercise, sets)).forEach(([muscleId, credit]) => {
+    projected[muscleId] = Math.max(0, (Number(projected[muscleId]) || 0) + credit);
+  });
+}
+
+function reconcileCoachSecondaryStimulus(sessions, projected, targets) {
+  const plannedSessions = Array.isArray(sessions) ? sessions : [];
+  muscleGroups.forEach((muscle) => {
+    const target = Math.max(HYPERTROPHY.minimumSets, Number(targets?.[muscle.id]) || HYPERTROPHY.minimumSets);
+    while ((projected[muscle.id] || 0) - target >= 1) {
+      const candidates = plannedSessions.flatMap((session) => session.items.map((item) => ({ session, item })))
+        .filter(({ item }) => item.muscle.id === muscle.id && item.sets > 0)
+        .sort((a, b) => (
+          a.item.exercise.secondaryMuscles.length - b.item.exercise.secondaryMuscles.length
+          || b.item.sets - a.item.sets
+        ));
+      const candidate = candidates.find(({ item }) => {
+        const credits = coachExerciseStimulusCredits(item.exercise, 1);
+        return Object.entries(credits).every(([muscleId, credit]) => (
+          muscleId === muscle.id || (projected[muscleId] || 0) - credit >= (Number(targets?.[muscleId]) || HYPERTROPHY.minimumSets)
+        ));
+      });
+      if (!candidate) break;
+      candidate.item.sets -= 1;
+      applyCoachStimulusCredits(projected, candidate.item.exercise, -1);
+      if (candidate.item.sets > 0) {
+        candidate.item.minutes = plannedExerciseMinutes(candidate.item);
+      } else {
+        candidate.session.items.splice(candidate.session.items.indexOf(candidate.item), 1);
+      }
+      candidate.session.totalMinutes = candidate.session.items.reduce((sum, item) => sum + item.minutes, 0);
+    }
+  });
+  return projected;
+}
+
 function mediumComparisonGrowthModes(growthModes = {}) {
   return Object.fromEntries(Object.entries(growthModes).map(([muscleId, mode]) => [
     muscleId,
@@ -3698,7 +3753,7 @@ function buildSessionPlan(limitMinutes = SESSION_LIMIT_MINUTES, options = {}) {
       .filter((exercise) => exercise.primaryMuscles.includes(target.id) && !usedExercises.has(exercise.id))
       .map((exercise) => ({ exercise, signal: coachExercisePerformanceSignal(exercise, coachWorkouts) }));
     const exercise = chooseExerciseForMuscle(target.id, usedExercises, { workouts: coachWorkouts });
-    if (!exercise) {
+    if (!exercise || !isActiveCoachExercise(exercise)) {
       if (trackMissing && !missingIds.has(target.id)) {
         missing.push(target);
         missingIds.add(target.id);
@@ -4014,6 +4069,19 @@ function buildSessionPlan(limitMinutes = SESSION_LIMIT_MINUTES, options = {}) {
     addSetsToExisting({ allowHighVolume: !restart });
   }
 
+  const projected = Object.fromEntries(allStats.map((stat) => [stat.id, stat.sets]));
+  items.forEach((item) => applyCoachStimulusCredits(projected, item.exercise, item.sets));
+  const session = { items, totalMinutes };
+  const targets = Object.fromEntries(allStats.map((target) => [
+    target.id,
+    planSetCeilingForTarget(target, allowsHighVolumeTarget(target), growthModeFor(target.id))
+  ]));
+  items.filter((item) => item.phase === "target-extra").forEach((item) => {
+    targets[item.muscle.id] = Math.max(targets[item.muscle.id], item.muscle.sets + item.sets);
+  });
+  reconcileCoachSecondaryStimulus([session], projected, targets);
+  totalMinutes = session.totalMinutes;
+
   let shortfallReason = sessionShortfallReason({ totalMinutes, cappedLimit, targetFloor, allStats, items, missing });
   if (conservativeSoftPlan && totalMinutes < targetFloor) {
     shortfallReason = `Estimated ${totalMinutes}/${cappedLimit} min because Soft keeps volume conservative while weekly floor gaps are spread across multiple muscles.`;
@@ -4235,12 +4303,55 @@ function normalizeCoachWeeklyPlan(value = {}) {
     averageMinutes: Math.min(75, Math.max(30, Number(value.averageMinutes) || 60)),
     priorities,
     targets,
-    generatedAt: String(value.generatedAt || "")
+    generatedAt: String(value.generatedAt || ""),
+    sourceFingerprint: String(value.sourceFingerprint || ""),
+    generatedPlan: value.generatedPlan && typeof value.generatedPlan === "object" ? clonePlain(value.generatedPlan) : null
   };
 }
 
 function selectedCoachWeeklyPlan() {
-  return normalizeCoachWeeklyPlan(state.coachWeekDraft || state.settings.coachWeeklyPlan || {});
+  return normalizeCoachWeeklyPlan(state.settings.coachWeeklyPlan || {});
+}
+
+function coachWeeklySourceFingerprint(setupInput = selectedCoachWeeklyPlan()) {
+  const setup = normalizeCoachWeeklyPlan(setupInput);
+  const source = JSON.stringify(canonicalSyncValue({
+    setup: {
+      days: setup.days,
+      averageMinutes: setup.averageMinutes,
+      priorities: setup.priorities,
+      targets: setup.targets
+    },
+    workouts: coachWeeklyWorkouts().map((workout) => ({
+      id: workout.id,
+      date: workout.date,
+      exerciseId: workout.exerciseId || "",
+      exercise: workout.exercise || "",
+      loadingStyle: workout.loadingStyle || "",
+      primaryMuscles: workoutMeta(workout).primaryMuscles,
+      secondaryMuscles: workoutMeta(workout).secondaryMuscles,
+      setRows: setRowsFromWorkout(workout).map((row) => ({ weight: row.weight, reps: row.reps, rir: row.rir, restSeconds: row.restSeconds })),
+      updatedAt: workout.updatedAt || workout.createdAt || ""
+    })),
+    exercises: getCustomExercises({ includeArchived: true }).map((exercise) => ({
+      id: exercise.id,
+      archivedAt: exercise.archivedAt || "",
+      primaryMuscles: exercise.primaryMuscles,
+      secondaryMuscles: exercise.secondaryMuscles,
+      loadingStyle: effectiveLoadingStyle(exercise),
+      reps: exercise.reps,
+      rest: exercise.rest,
+      progressionMode: exercise.progressionMode,
+      loadIncrement: exercise.loadIncrement
+    })),
+    hiddenExercises: getHiddenExercises()
+  }));
+  let hash = 2166136261;
+  for (let index = 0; index < source.length; index += 1) {
+    hash ^= source.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(36);
 }
 
 function coachWeeklyPlanFromForm(form) {
@@ -4342,7 +4453,7 @@ function buildCoachWeeklyPlan(setupInput = selectedCoachWeeklyPlan()) {
       const exerciseCandidates = coachExerciseCandidates(muscle.id, usedThisSession)
         .sort((a, b) => (plannedExerciseUses.get(a.exercise.id) || 0) - (plannedExerciseUses.get(b.exercise.id) || 0) || b.score - a.score);
       const chosen = exerciseCandidates.find((candidate) => candidate.eligible) || exerciseCandidates[0];
-      if (!chosen) break;
+      if (!chosen || !isActiveCoachExercise(chosen.exercise)) break;
       const sets = Math.max(1, Math.min(4, Math.ceil(muscle.gap), muscle.floorGap > 0 ? Math.ceil(muscle.floorGap) : 4));
       const minutes = estimateExerciseMinutes(chosen.exercise, sets);
       if (totalMinutes + minutes > setup.averageMinutes + COACH_TIME_TOLERANCE_MINUTES) break;
@@ -4378,6 +4489,8 @@ function buildCoachWeeklyPlan(setupInput = selectedCoachWeeklyPlan()) {
     sessions.push({ ...selected, status: "planned", items: orderCoachSessionItems(items), submitted: [], totalMinutes });
   }
 
+  reconcileCoachSecondaryStimulus(sessions, projected, setup.targets);
+
   const capacity = coachWeeklyCapacity(setup, futureDates);
   const remainingSets = muscleGroups.reduce((sum, muscle) => sum + Math.max(0, setup.targets[muscle.id] - (actualStats.find((stat) => stat.id === muscle.id)?.sets || 0)), 0);
   const missing = muscleGroups.filter((muscle) => setup.targets[muscle.id] > (projected[muscle.id] || 0) && !hasPrimaryExerciseForMuscle(muscle.id));
@@ -4403,6 +4516,84 @@ function buildCoachWeeklyPlan(setupInput = selectedCoachWeeklyPlan()) {
         ? `${attainmentSummary} Coach can schedule every weekly floor and defined target across the remaining selected days.`
         : `${attainmentSummary} Still short: ${unmetSummary}${unmetRemainder ? `, and ${unmetRemainder} more` : ""}. ${remainingSets > capacity.estimatedSetCapacity ? "The selected days do not provide enough estimated set capacity." : "The remaining day spacing, recovery rules, or per-session limits prevent Coach from safely assigning every requested set."}`
     }
+  };
+}
+
+function compactCoachWeeklyPlanSnapshot(plan) {
+  return {
+    sessions: plan.sessions.map((session) => ({
+      day: session.day,
+      date: session.date,
+      status: session.status,
+      totalMinutes: session.totalMinutes,
+      items: session.items.map((item) => ({
+        muscleId: item.muscle.id,
+        exerciseId: item.exercise.id,
+        sets: item.sets,
+        minutes: item.minutes,
+        phase: item.phase,
+        growthMode: item.growthMode,
+        planTarget: clonePlain(item.planTarget || null),
+        reason: item.reason || ""
+      }))
+    })),
+    actualSets: Object.fromEntries(plan.actualStats.map((stat) => [stat.id, stat.sets])),
+    projected: clonePlain(plan.projected),
+    missingIds: plan.missing.map((muscle) => muscle.id),
+    capacity: clonePlain(plan.capacity),
+    attainment: clonePlain(plan.attainment)
+  };
+}
+
+function displayedCoachWeeklyPlan(setupInput = selectedCoachWeeklyPlan()) {
+  const setup = normalizeCoachWeeklyPlan(setupInput);
+  const snapshot = setup.generatedPlan;
+  if (!snapshot?.sessions?.length) return { ...buildCoachWeeklyPlan(setup), stale: false };
+
+  const activeExercises = new Map(exerciseDatabase().map((exercise) => [exercise.id, exercise]));
+  let invalidExercise = false;
+  const sessions = snapshot.sessions.map((saved) => {
+    const submitted = workoutsForDate(saved.date);
+    const items = submitted.length ? [] : (saved.items || []).map((savedItem) => {
+      const exercise = activeExercises.get(savedItem.exerciseId);
+      const muscle = muscleGroups.find((candidate) => candidate.id === savedItem.muscleId);
+      if (!exercise || !muscle) {
+        invalidExercise = true;
+        return null;
+      }
+      return {
+        muscle,
+        exercise,
+        sets: Math.max(1, Number(savedItem.sets) || 1),
+        minutes: Math.max(0, Number(savedItem.minutes) || 0),
+        phase: savedItem.phase || "weekly-target",
+        growthMode: savedItem.growthMode || "medium",
+        performanceSignal: coachExercisePerformanceSignal(exercise),
+        planTarget: clonePlain(savedItem.planTarget || coachPlanTargetForExercise(exercise)),
+        reason: savedItem.reason || ""
+      };
+    }).filter(Boolean);
+    const status = submitted.length ? "completed" : saved.date < todayISO() ? "past" : saved.status;
+    return {
+      day: saved.day,
+      date: saved.date,
+      option: COACH_WEEKDAY_OPTIONS.find((option) => option.day === Number(saved.day)),
+      status,
+      items,
+      submitted,
+      totalMinutes: items.reduce((sum, item) => sum + item.minutes, 0)
+    };
+  });
+  const currentFingerprint = coachWeeklySourceFingerprint(setup);
+  return {
+    setup,
+    sessions,
+    actualStats: muscleGroups.map((muscle) => ({ ...muscle, sets: Number(snapshot.actualSets?.[muscle.id]) || 0 })),
+    projected: clonePlain(snapshot.projected || {}),
+    missing: (snapshot.missingIds || []).map((id) => muscleGroups.find((muscle) => muscle.id === id)).filter(Boolean),
+    capacity: clonePlain(snapshot.capacity || {}),
+    attainment: clonePlain(snapshot.attainment || {}),
+    stale: invalidExercise || !setup.sourceFingerprint || setup.sourceFingerprint !== currentFingerprint
   };
 }
 
@@ -7168,7 +7359,7 @@ function renderCoachWeekDay(session) {
 
 function renderCoachWeek() {
   const setup = selectedCoachWeeklyPlan();
-  const plan = buildCoachWeeklyPlan(setup);
+  const plan = displayedCoachWeeklyPlan(setup);
   return `
     <details class="section form-panel collapsible-panel coach-week-setup" open>
       <summary><span>Build the week</span><small>${setup.days.length} days - ${setup.averageMinutes} min average</small></summary>
@@ -7183,6 +7374,7 @@ function renderCoachWeek() {
         <button class="primary-button" type="submit">Generate weekly plan</button>
       </form>
     </details>
+    ${plan.stale ? `<section class="section coach-week-capacity warn"><strong>Weekly plan needs regeneration</strong><p>Inputs, submitted workouts, loading styles, or the active exercise library changed. Generate again before copying a planned day.</p></section>` : ""}
     <section class="section coach-week-capacity ${plan.capacity.fits ? "good" : "warn"}"><strong>${plan.capacity.fits ? "All weekly targets are planned" : "Some weekly targets cannot be planned"}</strong><p>${escapeHtml(plan.capacity.message)}</p></section>
     <details class="section chart-panel collapsible-panel" open><summary><span>Weekly distribution</span><small>actual + planned credits</small></summary>${renderCoachWeekDistribution(plan)}</details>
     <section class="section coach-week-days">${plan.sessions.map(renderCoachWeekDay).join("")}</section>
@@ -7190,22 +7382,28 @@ function renderCoachWeek() {
 }
 
 async function saveCoachWeeklyPlan(form) {
-  clearTimeout(coachWeekPreviewRenderTimer);
-  coachWeekPreviewRenderTimer = null;
   const setup = normalizeCoachWeeklyPlan({
     ...coachWeeklyPlanFromForm(form),
     generatedAt: new Date().toISOString()
   });
-  await saveSetting("coachWeeklyPlan", setup);
-  await queueSyncChange("preference", "coachWeeklyPlan", { value: setup });
   state.coachWeekDraft = null;
+  const sourceFingerprint = coachWeeklySourceFingerprint(setup);
+  const generatedPlan = buildCoachWeeklyPlan(setup);
+  const committed = normalizeCoachWeeklyPlan({
+    ...setup,
+    sourceFingerprint,
+    generatedPlan: compactCoachWeeklyPlanSnapshot(generatedPlan)
+  });
+  await saveSetting("coachWeeklyPlan", committed);
+  await queueSyncChange("preference", "coachWeeklyPlan", { value: committed });
   scheduleRecordSync();
   toast("Weekly plan regenerated from your current setup and submitted workouts.");
   await render();
 }
 
 function copyCoachWeekDayToLog(date) {
-  const plan = buildCoachWeeklyPlan();
+  const plan = displayedCoachWeeklyPlan();
+  if (plan.stale) throw new Error("Generate the weekly plan again before copying this day.");
   const session = plan.sessions.find((item) => item.date === date && item.status === "planned");
   if (!session?.items.length) throw new Error("That day has no planned exercises to copy.");
   preserveVisibleDraft("coach-week-copy");
@@ -10436,11 +10634,6 @@ document.addEventListener("change", async (event) => {
     const coachWeekForm = event.target.closest("#coach-week-form");
     if (coachWeekForm) {
       state.coachWeekDraft = coachWeeklyPlanFromForm(coachWeekForm);
-      clearTimeout(coachWeekPreviewRenderTimer);
-      coachWeekPreviewRenderTimer = setTimeout(() => {
-        coachWeekPreviewRenderTimer = null;
-        if (coachWeekForm.isConnected) render();
-      }, 0);
       return;
     }
     if (event.target.matches("[data-sound-effects-enabled]")) {
