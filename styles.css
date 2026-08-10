@@ -1160,10 +1160,6 @@ textarea {
   line-height: 1.45;
 }
 
-.coach-notes-panel .coach-card + .coach-card {
-  margin-top: 8px;
-}
-
 .coach-action h3 {
   margin-top: 8px;
 }

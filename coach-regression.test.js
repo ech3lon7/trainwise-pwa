@@ -1689,7 +1689,7 @@ const copiedPlanPreview = runScenario(`
 assert(copiedPlanPreview.copiedTitle, "Expected Coach copy to preserve a copied-plan snapshot.");
 assert(copiedPlanPreview.copiedItems > 0, "Expected copied-plan snapshot to keep plan items.");
 assert(copiedPlanPreview.workoutsUnchanged && copiedPlanPreview.workoutsStillUnchanged, "Expected next-plan preview to avoid writing simulated workouts.");
-assert(copiedPlanPreview.hasPreviewButton, "Expected copied Coach plan to expose a next-plan preview button.");
+assert.strictEqual(copiedPlanPreview.hasPreviewButton, false, "Expected the next-plan preview control to be removed from Coach.");
 assert(copiedPlanPreview.previewNotice.includes("only the next plan"), `Expected preview advisory, got ${copiedPlanPreview.previewNotice}`);
 
 const copiedPlanCompletionAwarePreview = runScenario(`
@@ -1745,12 +1745,14 @@ const coachCopiedPlanEmptyStateAndAudit = runScenario(`
   var markup = renderCoach();
   ({
     hasEmptyCopyMessage: markup.includes("Copy today's plan to preview the next one."),
+    hasCoachNotes: markup.includes("Coach notes"),
     auditOpen: markup.includes('muscle-audit-panel" open') || markup.includes("muscle-audit-panel' open"),
     auditHasProgress: markup.includes("muscle-card") && markup.includes("progress-bar")
   });
 `);
 
-assert(coachCopiedPlanEmptyStateAndAudit.hasEmptyCopyMessage, "Expected Coach to explain how to unlock next-plan preview before copying.");
+assert.strictEqual(coachCopiedPlanEmptyStateAndAudit.hasEmptyCopyMessage, false, "Expected the next-plan preview empty state to be removed from Coach.");
+assert.strictEqual(coachCopiedPlanEmptyStateAndAudit.hasCoachNotes, false, "Expected Coach notes to be removed from Coach.");
 assert(coachCopiedPlanEmptyStateAndAudit.auditOpen, "Expected Coach muscle set audit to render open by default.");
 assert(coachCopiedPlanEmptyStateAndAudit.auditHasProgress, "Expected Coach muscle audit to include progress bars.");
 

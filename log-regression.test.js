@@ -197,9 +197,9 @@ assert(!appCode.includes('selectedExercise: "Push-up"'), "Expected Log startup n
 assert(!appCode.includes('showBanner("Unsaved draft restored."'), "Expected startup draft recovery not to show a top banner.");
 assert(appCode.includes("notifyMetricSaved"), "Expected metrics saves to use a dedicated bottom-only notification helper.");
 assert(!stylesCode.includes(".mobile-quick-toggle"), "Expected floating quick action button styling to be removed.");
-assert(indexCode.includes("v=1.5.72"), "Expected index shell references to use bumped app version.");
+assert(indexCode.includes("v=1.5.73"), "Expected index shell references to use bumped app version.");
 assert(!indexCode.includes('id="app" class="app-content" aria-live'), "Expected broad app aria-live to be removed in favor of targeted live regions.");
-assert(serviceWorkerCode.includes("trainwise-cache-v94"), "Expected service worker cache version bump.");
+assert(serviceWorkerCode.includes("trainwise-cache-v95"), "Expected service worker cache version bump.");
 assert(appCode.includes("data-settings-panel"), "Expected Settings panels to preserve open state with stable panel ids.");
 assert(appCode.includes('forceSettingsPanelOpen("supabase-sync")'), "Expected Supabase actions to keep the Supabase panel open after rendering.");
 
@@ -2150,6 +2150,7 @@ const collapsibleLongScreens = runScenario(`
 
 assert(collapsibleLongScreens.coach.includes("today-plan-card") && collapsibleLongScreens.coach.includes("<summary><span>Today's Plan</span>"), "Expected Coach Today's Plan to be collapsible.");
 assert(!collapsibleLongScreens.coach.includes("Why this?"), "Expected Coach Why this section to be removed.");
+assert(!collapsibleLongScreens.coach.includes("Coach notes") && !collapsibleLongScreens.coach.includes("Next plan preview"), "Expected Coach notes and next-plan preview sections to be removed.");
 assert(collapsibleLongScreens.trends.includes("muscle-trends-panel") && collapsibleLongScreens.trends.includes("<summary><span>Muscle trends</span>"), "Expected Muscle trends to be collapsible.");
 assert(collapsibleLongScreens.trends.includes("exercise-performance-panel") && collapsibleLongScreens.trends.includes("<summary><span>Exercise performance</span>"), "Expected Exercise performance to be collapsible.");
 assert(collapsibleLongScreens.trends.includes("health-trends-panel") && collapsibleLongScreens.trends.includes("<summary><span>Health trends</span>"), "Expected Health trends to be collapsible.");

@@ -3,7 +3,7 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 3;
 const STORES = ["workouts", "metrics", "settings", "syncQueue"];
-const APP_VERSION = "1.5.72";
+const APP_VERSION = "1.5.73";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 const DRAFT_RECOVERY_KEY = "trainwise-draft-recovery-v1";
 const DATED_STRENGTH_DRAFTS_KEY = "trainwise-strength-drafts-by-date-v1";
@@ -7388,7 +7388,6 @@ function renderCoach() {
   if (state.weeklyMuscleDetail?.returnTab === "coach") return weeklyMuscleDetailScreen();
   const timeframeMinutes = selectedCoachTimeframeMinutes();
   const todayPlan = buildTodayPlan(timeframeMinutes);
-  const recs = recommendations(todayPlan);
   return `
     <section class="hero">
       <div>
@@ -7401,15 +7400,10 @@ function renderCoach() {
     ${renderCoachTimeframeSelector()}
     ${renderCoachGrowthModeSelector()}
     ${renderCoachTargetSelector()}
-    ${renderCopiedCoachPlan()}
     ${renderTodayPlan(todayPlan)}
     <details class="section chart-panel collapsible-panel muscle-audit-panel" open>
       <summary><span>Muscle set audit</span><small>10 set floor, 12-20 growth zone</small></summary>
       ${muscleProgressMarkup(coachMuscleSetStats())}
-    </details>
-    <details class="section chart-panel collapsible-panel coach-notes-panel">
-      <summary><span>Coach notes</span><small>secondary checks</small></summary>
-      ${recs.map((rec) => `<div class="coach-card ${rec.tone}"><strong>${escapeHtml(rec.title)}</strong><p>${escapeHtml(rec.body)}</p></div>`).join("")}
     </details>
     `}
   `;
