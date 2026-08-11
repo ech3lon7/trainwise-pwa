@@ -2101,6 +2101,40 @@ assert(weeklyDistributionIndicators.includes("coach-week-muscle-status below-min
 assert(weeklyDistributionIndicators.includes("coach-week-muscle-status below-upper") && weeklyDistributionIndicators.includes('aria-label="Below 20 planned sets"'), "Expected orange weekly indicator for projected totals from 10 through under 20 sets.");
 assert(weeklyDistributionIndicators.includes("coach-week-muscle-status upper-met") && weeklyDistributionIndicators.includes('aria-label="20 planned sets reached"'), "Expected green weekly indicator at 20 or more projected sets.");
 
+const weeklySetBudgetAllocation = runScenario(`
+  ${resetAndHelpers}
+  var actual = { chest: 0, back: 7.5, shoulders: 7.5, biceps: 8.5, triceps: 5, quads: 4, hamstrings: 0, glutes: 0, calves: 0, abs: 6.5 };
+  var stats = muscleGroups.map((muscle) => ({ ...muscle, sets: actual[muscle.id] }));
+  var setup = normalizeCoachWeeklyPlan({
+    priorities: ["chest", "back", "biceps", "triceps"],
+    targets: Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, 20]))
+  });
+  coachWeeklySetBudgets(setup, stats, 100);
+`);
+
+assert(["chest", "back", "shoulders", "biceps", "triceps", "quads", "hamstrings", "glutes", "calves", "abs"].every((id) => weeklySetBudgetAllocation.setBudgets[id] >= 10), "Expected the weekly allocator to protect every feasible 10-set floor first.");
+assert(["chest", "back", "biceps", "triceps"].every((id) => weeklySetBudgetAllocation.setBudgets[id] >= 19), `Expected remaining capacity to be balanced across selected priorities, got ${JSON.stringify(weeklySetBudgetAllocation.setBudgets)}.`);
+assert(["shoulders", "quads", "hamstrings", "glutes", "calves", "abs"].every((id) => weeklySetBudgetAllocation.setBudgets[id] === 10), "Expected non-priority growth to wait while selected priority targets still need reserved capacity.");
+assert.strictEqual(weeklySetBudgetAllocation.remainingCapacity, 0, "Expected the allocator to account for all estimated remaining capacity.");
+
+const weeklySameSessionPriorityFill = runScenario(`
+  ${resetAndHelpers}
+  state.settings.customExercises = [
+    { id: "chest-a", name: "Chest A", primaryMuscles: ["chest"], secondaryMuscles: [], equipment: "machine", reps: "8-15", rest: "60 sec", cue: "Train.", userCreated: true },
+    { id: "chest-b", name: "Chest B", primaryMuscles: ["chest"], secondaryMuscles: [], equipment: "machine", reps: "8-15", rest: "60 sec", cue: "Train.", userCreated: true },
+    { id: "chest-c", name: "Chest C", primaryMuscles: ["chest"], secondaryMuscles: [], equipment: "machine", reps: "8-15", rest: "60 sec", cue: "Train.", userCreated: true }
+  ];
+  state.workouts = muscleGroups.map((muscle) => makeWorkout(muscle, 2, 10, { exercise: "Previous " + muscle.label, exerciseId: "previous-" + muscle.id }));
+  var plan = buildCoachWeeklyPlan(normalizeCoachWeeklyPlan({ days: [5], averageMinutes: 60, priorities: ["chest"], targets: { chest: 20 } }));
+  var session = plan.sessions.find((item) => item.status === "planned");
+  ({ projected: plan.projected.chest, allocated: plan.setBudgets.chest, chestItems: session.items.filter((item) => item.muscle.id === "chest").length, totalItems: session.items.length });
+`);
+
+assert.strictEqual(weeklySameSessionPriorityFill.allocated, 20, "Expected the weekly allocator to reserve Chest through its selected target.");
+assert.strictEqual(weeklySameSessionPriorityFill.projected, 20, `Expected same-date priority work to continue beyond the floor, got ${weeklySameSessionPriorityFill.projected}.`);
+assert(weeklySameSessionPriorityFill.chestItems > 1, "Expected recovery spacing to allow multiple Chest exercises within the same workout date.");
+assert(weeklySameSessionPriorityFill.totalItems <= 6, `Expected same-session priority fill to preserve the six-exercise cap, got ${weeklySameSessionPriorityFill.totalItems}.`);
+
 const weeklyPreferenceSync = runScenario(`
   ${resetAndHelpers}
   state.settings.coachWeeklyPlan = normalizeCoachWeeklyPlan({ days: [1, 3, 5], averageMinutes: 50, priorities: ["chest"], targets: { chest: 22 } });

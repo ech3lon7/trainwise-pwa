@@ -3,7 +3,7 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 3;
 const STORES = ["workouts", "metrics", "settings", "syncQueue"];
-const APP_VERSION = "1.5.75";
+const APP_VERSION = "1.5.76";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 const DRAFT_RECOVERY_KEY = "trainwise-draft-recovery-v1";
 const DATED_STRENGTH_DRAFTS_KEY = "trainwise-strength-drafts-by-date-v1";
@@ -4382,6 +4382,36 @@ function coachWeeklyCapacity(setup, plannedDates) {
   return { totalMinutes, estimatedSetCapacity };
 }
 
+function coachWeeklySetBudgets(setup, actualStats, estimatedSetCapacity, eligibleMuscleIds = new Set(muscleGroups.map((muscle) => muscle.id))) {
+  const actual = Object.fromEntries(actualStats.map((stat) => [stat.id, Number(stat.sets) || 0]));
+  const setBudgets = Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, actual[muscle.id] || 0]));
+  let remainingCapacity = Math.max(0, Number(estimatedSetCapacity) || 0);
+  const allocateToward = (muscles, ceilingFor) => {
+    while (remainingCapacity > 0) {
+      const candidates = muscles
+        .filter((muscle) => eligibleMuscleIds.has(muscle.id))
+        .map((muscle) => ({ muscle, ceiling: Math.max(setBudgets[muscle.id], Number(ceilingFor(muscle)) || 0) }))
+        .filter(({ muscle, ceiling }) => setBudgets[muscle.id] < ceiling)
+        .sort((a, b) => (
+          (setBudgets[a.muscle.id] / Math.max(a.ceiling, 1)) - (setBudgets[b.muscle.id] / Math.max(b.ceiling, 1))
+          || (b.ceiling - setBudgets[b.muscle.id]) - (a.ceiling - setBudgets[a.muscle.id])
+          || muscleGroups.findIndex((muscle) => muscle.id === a.muscle.id) - muscleGroups.findIndex((muscle) => muscle.id === b.muscle.id)
+        ));
+      const candidate = candidates[0];
+      if (!candidate) break;
+      const increment = Math.min(1, remainingCapacity, candidate.ceiling - setBudgets[candidate.muscle.id]);
+      if (increment <= 0) break;
+      setBudgets[candidate.muscle.id] += increment;
+      remainingCapacity -= increment;
+    }
+  };
+
+  allocateToward(muscleGroups, () => HYPERTROPHY.minimumSets);
+  allocateToward(muscleGroups.filter((muscle) => setup.priorities.includes(muscle.id)), (muscle) => setup.targets[muscle.id]);
+  allocateToward(muscleGroups.filter((muscle) => !setup.priorities.includes(muscle.id)), (muscle) => setup.targets[muscle.id]);
+  return { setBudgets, remainingCapacity, allocatedCapacity: Math.max(0, (Number(estimatedSetCapacity) || 0) - remainingCapacity) };
+}
+
 function coachWeeklyAttainment(setup, projected = {}) {
   const results = muscleGroups.map((muscle) => {
     const planned = Number(projected[muscle.id] || 0);
@@ -4419,6 +4449,13 @@ function buildCoachWeeklyPlan(setupInput = selectedCoachWeeklyPlan()) {
   const actualStats = muscleSetStats(coachWeeklyWorkouts());
   const projected = Object.fromEntries(actualStats.map((stat) => [stat.id, stat.sets]));
   const lastDirect = Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, latestDirectMuscleDate(muscle.id)]));
+  const capacity = coachWeeklyCapacity(setup, futureDates);
+  const eligibleMuscleIds = new Set(muscleGroups.filter((muscle) => (
+    hasPrimaryExerciseForMuscle(muscle.id)
+    && futureDates.some(({ date }) => !lastDirect[muscle.id] || daysBetween(lastDirect[muscle.id], date) >= 2)
+  )).map((muscle) => muscle.id));
+  const budgetAllocation = coachWeeklySetBudgets(setup, actualStats, capacity.estimatedSetCapacity, eligibleMuscleIds);
+  const setBudgets = budgetAllocation.setBudgets;
   const plannedDirectDates = Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, []]));
   const plannedExerciseUses = new Map();
   const sessions = selectedDates.map((selected) => {
@@ -4432,22 +4469,23 @@ function buildCoachWeeklyPlan(setupInput = selectedCoachWeeklyPlan()) {
 
   const recoveryClearForDate = (muscleId, date) => {
     const actualClear = !lastDirect[muscleId] || daysBetween(lastDirect[muscleId], date) >= 2;
-    const plannedClear = plannedDirectDates[muscleId].every((plannedDate) => Math.abs(daysBetween(plannedDate, date)) >= 2);
+    const plannedClear = plannedDirectDates[muscleId].every((plannedDate) => plannedDate === date || Math.abs(daysBetween(plannedDate, date)) >= 2);
     return actualClear && plannedClear;
   };
 
   const candidateForPhase = (muscle, phase) => {
     const current = Number(projected[muscle.id] || 0);
     const target = Number(setup.targets[muscle.id] || HYPERTROPHY.minimumSets);
-    const gap = Math.max(0, target - current);
-    const floorGap = Math.max(0, HYPERTROPHY.minimumSets - current);
+    const budget = Math.max(current, Number(setBudgets[muscle.id]) || current);
+    const gap = Math.max(0, budget - current);
+    const floorGap = Math.max(0, Math.min(HYPERTROPHY.minimumSets, budget) - current);
     const priority = setup.priorities.includes(muscle.id);
     const phaseEligible = phase === "floor"
       ? floorGap > 0
       : phase === "priority"
         ? priority && floorGap <= 0 && gap > 0
         : !priority && floorGap <= 0 && gap > 0;
-    return { ...muscle, current, target, gap, floorGap, priority, phaseEligible };
+    return { ...muscle, current, target, budget, gap, floorGap, priority, phaseEligible };
   };
 
   const addWeeklyPhaseItem = (session, phase) => {
@@ -4516,9 +4554,8 @@ function buildCoachWeeklyPlan(setupInput = selectedCoachWeeklyPlan()) {
     delete session.usedExercises;
   });
 
-  reconcileCoachSecondaryStimulus(sessions, projected, setup.targets);
+  reconcileCoachSecondaryStimulus(sessions, projected, setBudgets);
 
-  const capacity = coachWeeklyCapacity(setup, futureDates);
   const remainingSets = muscleGroups.reduce((sum, muscle) => sum + Math.max(0, setup.targets[muscle.id] - (actualStats.find((stat) => stat.id === muscle.id)?.sets || 0)), 0);
   const missing = muscleGroups.filter((muscle) => setup.targets[muscle.id] > (projected[muscle.id] || 0) && !hasPrimaryExerciseForMuscle(muscle.id));
   const attainment = coachWeeklyAttainment(setup, projected);
@@ -4540,10 +4577,12 @@ function buildCoachWeeklyPlan(setupInput = selectedCoachWeeklyPlan()) {
     sessions,
     actualStats,
     projected,
+    setBudgets,
     missing,
     attainment,
     capacity: {
       ...capacity,
+      allocatedSetCapacity: budgetAllocation.allocatedCapacity,
       requestedSets: remainingSets,
       fits: capacityFits,
       message: missing.length
@@ -4575,6 +4614,7 @@ function compactCoachWeeklyPlanSnapshot(plan) {
     })),
     actualSets: Object.fromEntries(plan.actualStats.map((stat) => [stat.id, stat.sets])),
     projected: clonePlain(plan.projected),
+    setBudgets: clonePlain(plan.setBudgets || {}),
     missingIds: plan.missing.map((muscle) => muscle.id),
     capacity: clonePlain(plan.capacity),
     attainment: clonePlain(plan.attainment)
@@ -4626,6 +4666,7 @@ function displayedCoachWeeklyPlan(setupInput = selectedCoachWeeklyPlan()) {
     sessions,
     actualStats: muscleGroups.map((muscle) => ({ ...muscle, sets: Number(snapshot.actualSets?.[muscle.id]) || 0 })),
     projected: clonePlain(snapshot.projected || {}),
+    setBudgets: clonePlain(snapshot.setBudgets || snapshot.projected || {}),
     missing: (snapshot.missingIds || []).map((id) => muscleGroups.find((muscle) => muscle.id === id)).filter(Boolean),
     capacity: clonePlain(snapshot.capacity || {}),
     attainment: clonePlain(snapshot.attainment || {}),
@@ -7328,6 +7369,7 @@ function renderCoachWeekDistribution(plan) {
       ${muscleGroups.map((muscle) => {
         const current = plan.actualStats.find((stat) => stat.id === muscle.id)?.sets || 0;
         const projected = plan.projected[muscle.id] || current;
+        const allocated = plan.setBudgets?.[muscle.id] ?? projected;
         const target = plan.setup.targets[muscle.id] || HYPERTROPHY.minimumSets;
         const width = Math.min(100, (projected / Math.max(target, 1)) * 100);
         const status = projected < HYPERTROPHY.minimumSets
@@ -7337,7 +7379,7 @@ function renderCoachWeekDistribution(plan) {
             : { tone: "upper-met", label: "20 planned sets reached" };
         return `
           <div class="coach-week-muscle ${plan.setup.priorities.includes(muscle.id) ? "is-priority" : ""}">
-            <div><span class="coach-week-muscle-name"><strong>${escapeHtml(muscle.label)}</strong><span class="coach-week-muscle-status ${status.tone}" role="img" aria-label="${escapeHtml(status.label)}" title="${escapeHtml(status.label)}"></span></span><span>${fmt(current, 1)} now / ${fmt(projected, 1)} planned / ${fmt(target)} target</span></div>
+            <div><span class="coach-week-muscle-name"><strong>${escapeHtml(muscle.label)}</strong><span class="coach-week-muscle-status ${status.tone}" role="img" aria-label="${escapeHtml(status.label)}" title="${escapeHtml(status.label)}"></span></span><span>${fmt(current, 1)} now / ${fmt(projected, 1)} planned / ${fmt(allocated, 1)} allocated / ${fmt(target)} target</span></div>
             <div class="progress-track"><span style="width:${width}%"></span></div>
           </div>
         `;
@@ -8720,6 +8762,7 @@ function coachDebugWeeklyPlan() {
     capacity: clonePlain(plan.capacity),
     attainment: clonePlain(plan.attainment),
     actualSets: Object.fromEntries(plan.actualStats.map((stat) => [stat.id, stat.sets])),
+    setBudgets: clonePlain(plan.setBudgets || {}),
     projectedSets: clonePlain(plan.projected),
     sessions: plan.sessions.map((session) => ({
       date: session.date,
