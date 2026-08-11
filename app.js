@@ -3,7 +3,7 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 3;
 const STORES = ["workouts", "metrics", "settings", "syncQueue"];
-const APP_VERSION = "1.5.74";
+const APP_VERSION = "1.5.75";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 const DRAFT_RECOVERY_KEY = "trainwise-draft-recovery-v1";
 const DATED_STRENGTH_DRAFTS_KEY = "trainwise-strength-drafts-by-date-v1";
@@ -7330,9 +7330,14 @@ function renderCoachWeekDistribution(plan) {
         const projected = plan.projected[muscle.id] || current;
         const target = plan.setup.targets[muscle.id] || HYPERTROPHY.minimumSets;
         const width = Math.min(100, (projected / Math.max(target, 1)) * 100);
+        const status = projected < HYPERTROPHY.minimumSets
+          ? { tone: "below-minimum", label: "Below 10-set minimum" }
+          : projected < HYPERTROPHY.growthHigh
+            ? { tone: "below-upper", label: "Below 20 planned sets" }
+            : { tone: "upper-met", label: "20 planned sets reached" };
         return `
           <div class="coach-week-muscle ${plan.setup.priorities.includes(muscle.id) ? "is-priority" : ""}">
-            <div><strong>${escapeHtml(muscle.label)}</strong><span>${fmt(current, 1)} now / ${fmt(projected, 1)} planned / ${fmt(target)} target</span></div>
+            <div><span class="coach-week-muscle-name"><strong>${escapeHtml(muscle.label)}</strong><span class="coach-week-muscle-status ${status.tone}" role="img" aria-label="${escapeHtml(status.label)}" title="${escapeHtml(status.label)}"></span></span><span>${fmt(current, 1)} now / ${fmt(projected, 1)} planned / ${fmt(target)} target</span></div>
             <div class="progress-track"><span style="width:${width}%"></span></div>
           </div>
         `;

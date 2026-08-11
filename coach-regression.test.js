@@ -2088,6 +2088,19 @@ const todayHardExerciseCap = runScenario(`
 assert(todayHardExerciseCap.count <= 6, `Expected Today to cap at six exercises even at 1 hour+, got ${todayHardExerciseCap.count}.`);
 assert(todayHardExerciseCap.total <= 78, `Expected Today to remain inside the 75-minute tolerance, got ${todayHardExerciseCap.total}.`);
 
+const weeklyDistributionIndicators = runScenario(`
+  ${resetAndHelpers}
+  renderCoachWeekDistribution({
+    actualStats: muscleGroups.map((muscle) => ({ id: muscle.id, sets: muscle.id === "chest" ? 8 : muscle.id === "back" ? 12 : 20 })),
+    projected: Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, muscle.id === "chest" ? 8 : muscle.id === "back" ? 12 : 20])),
+    setup: { priorities: [], targets: Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, 20])) }
+  });
+`);
+
+assert(weeklyDistributionIndicators.includes("coach-week-muscle-status below-minimum") && weeklyDistributionIndicators.includes('aria-label="Below 10-set minimum"'), "Expected red weekly indicator for projected totals below 10 sets.");
+assert(weeklyDistributionIndicators.includes("coach-week-muscle-status below-upper") && weeklyDistributionIndicators.includes('aria-label="Below 20 planned sets"'), "Expected orange weekly indicator for projected totals from 10 through under 20 sets.");
+assert(weeklyDistributionIndicators.includes("coach-week-muscle-status upper-met") && weeklyDistributionIndicators.includes('aria-label="20 planned sets reached"'), "Expected green weekly indicator at 20 or more projected sets.");
+
 const weeklyPreferenceSync = runScenario(`
   ${resetAndHelpers}
   state.settings.coachWeeklyPlan = normalizeCoachWeeklyPlan({ days: [1, 3, 5], averageMinutes: 50, priorities: ["chest"], targets: { chest: 22 } });

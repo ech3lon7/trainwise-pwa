@@ -4118,6 +4118,34 @@ textarea {
   text-align: right;
 }
 
+.coach-week-muscle .coach-week-muscle-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: inherit;
+  font-size: inherit;
+  text-align: left;
+}
+
+.coach-week-muscle .coach-week-muscle-status {
+  width: 8px;
+  height: 8px;
+  flex: 0 0 8px;
+  border-radius: 50%;
+  background: var(--coral);
+  box-shadow: 0 0 0 2px rgba(255, 107, 95, 0.12);
+}
+
+.coach-week-muscle .coach-week-muscle-status.below-upper {
+  background: #f0a84b;
+  box-shadow: 0 0 0 2px rgba(240, 168, 75, 0.12);
+}
+
+.coach-week-muscle .coach-week-muscle-status.upper-met {
+  background: var(--green);
+  box-shadow: 0 0 0 2px rgba(53, 213, 140, 0.12);
+}
+
 .coach-week-muscle.is-priority strong {
   color: var(--gold);
 }
