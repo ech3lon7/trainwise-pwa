@@ -1160,10 +1160,6 @@ textarea {
   line-height: 1.45;
 }
 
-.coach-notes-panel .coach-card + .coach-card {
-  margin-top: 8px;
-}
-
 .coach-action h3 {
   margin-top: 8px;
 }
@@ -1218,8 +1214,7 @@ textarea {
   font-weight: 800;
 }
 
-.today-plan-list,
-.coach-why-list {
+.today-plan-list {
   display: grid;
   gap: 8px;
 }
@@ -1235,8 +1230,7 @@ textarea {
   background: rgba(255, 255, 255, 0.045);
 }
 
-.today-plan-item span,
-.coach-why-list span {
+.today-plan-item span {
   color: var(--muted);
   font-size: 12px;
   line-height: 1.35;
@@ -1276,30 +1270,6 @@ textarea {
 
 .today-plan-summary span {
   overflow-wrap: anywhere;
-}
-
-.coach-why-card {
-  border-color: rgba(155, 140, 255, 0.18);
-}
-
-.coach-why-list span {
-  display: block;
-  padding: 10px;
-  border-radius: 8px;
-  background: rgba(255, 255, 255, 0.045);
-}
-
-.coach-why-section {
-  display: grid;
-  gap: 6px;
-}
-
-.coach-why-section h4 {
-  margin: 2px 0 0;
-  color: var(--muted);
-  font-size: 11px;
-  letter-spacing: 0;
-  text-transform: uppercase;
 }
 
 .coach-notes-header {
@@ -2199,6 +2169,11 @@ textarea {
 .load-direction-indicator.down {
   color: var(--coral);
   background: rgba(255, 107, 95, 0.12);
+}
+
+.load-direction-indicator.neutral {
+  color: var(--muted);
+  background: rgba(255, 255, 255, 0.06);
 }
 
 .record-trophy:focus-visible {
@@ -4022,5 +3997,194 @@ textarea {
 
   .coverage-detail-list {
     padding: 0 12px 12px;
+  }
+}
+.coach-view-selector {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  width: 100%;
+  margin-bottom: 16px;
+}
+
+.coach-weekday-grid {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.choice-chip {
+  min-width: 0;
+}
+
+.choice-chip input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.choice-chip span {
+  display: grid;
+  min-height: 44px;
+  place-items: center;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.choice-chip input:checked + span {
+  border-color: var(--green);
+  background: rgba(52, 211, 153, 0.12);
+  color: var(--green);
+}
+
+.coach-week-target-grid,
+.coach-week-distribution,
+.coach-week-days,
+.coach-week-day-items {
+  display: grid;
+  gap: 8px;
+}
+
+.coach-week-target-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.coach-week-target-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 72px;
+  align-items: center;
+  gap: 8px;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
+.coach-week-target-row label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.coach-week-target-row input[type="checkbox"] {
+  width: 20px;
+  min-width: 20px;
+  height: 20px;
+  min-height: 20px;
+  margin: 0;
+}
+
+.coach-week-target-row label span {
+  min-width: 0;
+  overflow-wrap: normal;
+  word-break: normal;
+}
+
+.coach-week-target-row input[type="number"] {
+  min-width: 0;
+  text-align: center;
+}
+
+.coach-week-capacity {
+  border-left: 3px solid var(--green);
+}
+
+.coach-week-capacity.warn {
+  border-left-color: var(--gold);
+}
+
+.coach-week-capacity p {
+  margin: 4px 0 0;
+  color: var(--muted);
+}
+
+.coach-week-muscle {
+  display: grid;
+  gap: 6px;
+}
+
+.coach-week-muscle > div:first-child,
+.coach-week-day-items > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.coach-week-muscle span,
+.coach-week-day-items span {
+  color: var(--muted);
+  font-size: 0.78rem;
+  text-align: right;
+}
+
+.coach-week-muscle .coach-week-muscle-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: inherit;
+  font-size: inherit;
+  text-align: left;
+}
+
+.coach-week-muscle .coach-week-muscle-status {
+  width: 8px;
+  height: 8px;
+  flex: 0 0 8px;
+  border-radius: 50%;
+  background: var(--coral);
+  box-shadow: 0 0 0 2px rgba(255, 107, 95, 0.12);
+}
+
+.coach-week-muscle .coach-week-muscle-status.below-upper {
+  background: #f0a84b;
+  box-shadow: 0 0 0 2px rgba(240, 168, 75, 0.12);
+}
+
+.coach-week-muscle .coach-week-muscle-status.upper-met {
+  background: var(--green);
+  box-shadow: 0 0 0 2px rgba(53, 213, 140, 0.12);
+}
+
+.coach-week-muscle.is-priority strong {
+  color: var(--gold);
+}
+
+.coach-week-day {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+}
+
+.coach-week-day > summary {
+  padding: 14px;
+}
+
+.coach-week-day > summary > span {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.coach-week-day > summary small {
+  color: var(--muted);
+}
+
+.coach-week-day > :not(summary) {
+  margin: 0 14px 14px;
+}
+
+@media (max-width: 520px) {
+  .coach-weekday-grid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+
+  .coach-week-target-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .coach-week-muscle > div:first-child,
+  .coach-week-day-items > div {
+    align-items: flex-start;
   }
 }

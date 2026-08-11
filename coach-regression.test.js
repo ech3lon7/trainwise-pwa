@@ -747,16 +747,14 @@ const missingCoverage = runScenario(`
   state.settings.customExercises = state.settings.customExercises.filter((ex) => !ex.primaryMuscles.includes("back"));
   state.workouts = muscleGroups.map((muscle) => makeWorkout(muscle, 2, 2));
   var plan = buildTodayPlan(60);
-  var whyHtml = renderCoachWhy(plan);
   ({
     missing: plan.sessionPlan.missing.map((muscle) => muscle.label),
-    whyHasLibraryGap: whyHtml.includes("Library gaps"),
-    whyHasBack: whyHtml.includes("Back")
+    explanation: plan.explanation.missing.join(" ")
   });
 `);
 
 assert(missingCoverage.missing.includes("Back"), `Expected missing coverage to include Back, got ${missingCoverage.missing.join(", ")}`);
-assert(missingCoverage.whyHasLibraryGap && missingCoverage.whyHasBack, "Why this? should expose missing library coverage.");
+assert(missingCoverage.explanation.includes("Back"), "Expected Coach reasoning data to preserve missing Back coverage.");
 
 const targetedMuscles = runScenario(`
   ${resetAndHelpers}
@@ -864,11 +862,9 @@ const conversationalCoachBriefing = runScenario(`
   var chest = muscleGroups.find((muscle) => muscle.id === "chest");
   state.workouts = [makeWorkout(chest, 1, 3)];
   var plan = buildTodayPlan(60);
-  var whyMarkup = renderCoachWhy(plan);
   var todayAction = actionFromSessionPlan(plan);
   ({
     briefing: plan.briefing || [],
-    whyMarkup,
     todayBody: todayAction.body,
     skipped: plan.explanation.skipped.join(" "),
     recoverySummary: plan.explanation.recoverySummary || ""
@@ -877,7 +873,6 @@ const conversationalCoachBriefing = runScenario(`
 
 assert(conversationalCoachBriefing.briefing.length > 0, "Expected Coach to provide a short briefing summary.");
 assert(conversationalCoachBriefing.briefing[0].includes("Here's the play"), `Expected briefing to speak directly, got ${conversationalCoachBriefing.briefing.join(" ")}`);
-assert(conversationalCoachBriefing.whyMarkup.includes("Coach's read"), "Expected Why this? to render the briefing above detailed reasons.");
 assert(conversationalCoachBriefing.recoverySummary.includes("Chest") && conversationalCoachBriefing.recoverySummary.includes("2-day"), `Expected one aggregated recovery summary, got ${conversationalCoachBriefing.recoverySummary}`);
 assert(!/champ|boss/.test(conversationalCoachBriefing.skipped), `Expected routine skipped reasons not to spam nicknames, got ${conversationalCoachBriefing.skipped}`);
 assert(conversationalCoachBriefing.todayBody.includes("Here's the play"), `Expected Today action to reuse Coach briefing, got ${conversationalCoachBriefing.todayBody}`);
@@ -1419,8 +1414,8 @@ const nearOptimumTimeframe = runScenario(`
   });
 `);
 
-assert(withinCoachTimeWindow(nearOptimumTimeframe.total, 60), `Expected 18/20 muscles to still fill 1 hour with more muscle slots, got ${nearOptimumTimeframe.total}: ${nearOptimumTimeframe.detail}`);
-assert(nearOptimumTimeframe.itemCount <= 8, `Expected 18/20 1 hour plan to honor the 60-minute muscle cap, got ${nearOptimumTimeframe.itemCount}`);
+assert(nearOptimumTimeframe.total <= 63, `Expected 18/20 muscles to stay inside the 1 hour tolerance, got ${nearOptimumTimeframe.total}: ${nearOptimumTimeframe.detail}`);
+assert(nearOptimumTimeframe.itemCount <= 6, `Expected 18/20 1 hour plan to honor the hard six-exercise cap, got ${nearOptimumTimeframe.itemCount}`);
 
 const highVolumeTimeframe = runScenario(`
   ${resetAndHelpers}
@@ -1694,7 +1689,7 @@ const copiedPlanPreview = runScenario(`
 assert(copiedPlanPreview.copiedTitle, "Expected Coach copy to preserve a copied-plan snapshot.");
 assert(copiedPlanPreview.copiedItems > 0, "Expected copied-plan snapshot to keep plan items.");
 assert(copiedPlanPreview.workoutsUnchanged && copiedPlanPreview.workoutsStillUnchanged, "Expected next-plan preview to avoid writing simulated workouts.");
-assert(copiedPlanPreview.hasPreviewButton, "Expected copied Coach plan to expose a next-plan preview button.");
+assert.strictEqual(copiedPlanPreview.hasPreviewButton, false, "Expected the next-plan preview control to be removed from Coach.");
 assert(copiedPlanPreview.previewNotice.includes("only the next plan"), `Expected preview advisory, got ${copiedPlanPreview.previewNotice}`);
 
 const copiedPlanCompletionAwarePreview = runScenario(`
@@ -1750,12 +1745,14 @@ const coachCopiedPlanEmptyStateAndAudit = runScenario(`
   var markup = renderCoach();
   ({
     hasEmptyCopyMessage: markup.includes("Copy today's plan to preview the next one."),
+    hasCoachNotes: markup.includes("Coach notes"),
     auditOpen: markup.includes('muscle-audit-panel" open') || markup.includes("muscle-audit-panel' open"),
     auditHasProgress: markup.includes("muscle-card") && markup.includes("progress-bar")
   });
 `);
 
-assert(coachCopiedPlanEmptyStateAndAudit.hasEmptyCopyMessage, "Expected Coach to explain how to unlock next-plan preview before copying.");
+assert.strictEqual(coachCopiedPlanEmptyStateAndAudit.hasEmptyCopyMessage, false, "Expected the next-plan preview empty state to be removed from Coach.");
+assert.strictEqual(coachCopiedPlanEmptyStateAndAudit.hasCoachNotes, false, "Expected Coach notes to be removed from Coach.");
 assert(coachCopiedPlanEmptyStateAndAudit.auditOpen, "Expected Coach muscle set audit to render open by default.");
 assert(coachCopiedPlanEmptyStateAndAudit.auditHasProgress, "Expected Coach muscle audit to include progress bars.");
 
@@ -1873,5 +1870,445 @@ const copiedPlanSameDayRetention = runScenario(`
 assert(copiedPlanSameDayRetention.sameDayItems > 0, "Expected copied Coach plan to remain visible on the copied date.");
 assert.strictEqual(copiedPlanSameDayRetention.wrongDayVisible, false, "Expected copied Coach plan to hide when its copied date no longer matches today.");
 assert.strictEqual(copiedPlanSameDayRetention.storagePayload.copiedDate, "2026-06-17", "Expected copied Coach plan to persist with the same-day date key.");
+
+const highRepPerformanceTrack = runScenario(`
+  ${resetAndHelpers}
+  var exercise = normalizeExerciseDefinition({
+    id: "high-rep-raise",
+    name: "High Rep Raise",
+    primaryMuscles: ["shoulders"],
+    reps: "20-30",
+    loadingStyle: "high-rep",
+    loadIncrement: 0.5
+  });
+  state.settings.customExercises = [exercise];
+  var older = makeWorkout({ id: "shoulders" }, 4, 2, {
+      exercise: exercise.name,
+      exerciseId: exercise.id,
+      primaryMuscles: ["shoulders"]
+    });
+  Object.assign(older, { loadingStyle: "high-rep", setRows: [{ weight: 12.5, reps: 24, rir: 1 }, { weight: 12.5, reps: 22, rir: 1 }] });
+  var latest = makeWorkout({ id: "shoulders" }, 2, 2, {
+      exercise: exercise.name,
+      exerciseId: exercise.id,
+      primaryMuscles: ["shoulders"]
+    });
+  Object.assign(latest, { loadingStyle: "high-rep", setRows: [{ weight: 12.5, reps: 26, rir: 0 }, { weight: 12.5, reps: 23, rir: 0 }] });
+  var standard = makeWorkout({ id: "shoulders" }, 6, 1, {
+      exercise: exercise.name,
+      exerciseId: exercise.id,
+      primaryMuscles: ["shoulders"]
+    });
+  Object.assign(standard, { loadingStyle: "standard", setRows: [{ weight: 20, reps: 8, rir: 1 }] });
+  state.workouts = [older, latest, standard];
+  var signal = coachExercisePerformanceSignal(exercise);
+  ({ status: signal.status, historyCount: signal.history.length, target: progressionTargetForExercise(exercise.name)?.target || "" });
+`);
+
+assert.notStrictEqual(highRepPerformanceTrack.status, "isolated-failure", "Expected in-range high-rep work at 0 RIR not to be mislabeled as failure.");
+assert.strictEqual(highRepPerformanceTrack.historyCount, 2, "Expected high-rep performance comparisons to ignore standard-loading history.");
+assert(highRepPerformanceTrack.target.includes("12.5"), `Expected high-rep progression to preserve the configured half-pound load, got ${highRepPerformanceTrack.target}`);
+
+const standardToHighRepConversion = runScenario(`
+  ${resetAndHelpers}
+  state.settings.customExercises = [{
+    id: "conversion-curl", name: "Conversion Curl", primaryMuscles: ["biceps"], secondaryMuscles: [],
+    equipment: "cable", reps: "20-30", rest: "60 sec", loadingStyle: "high-rep", loadIncrement: 2.5, userCreated: true
+  }];
+  state.workouts = [{
+    id: "standard-curl", date: dateDaysAgo(3), exercise: "Conversion Curl", exerciseId: "conversion-curl",
+    primaryMuscles: ["biceps"], secondaryMuscles: [], loadingStyle: "standard",
+    setRows: [{ weight: 100, reps: 10, rir: 2, restSeconds: 60 }]
+  }];
+  var exercise = resolveExerciseMeta("Conversion Curl");
+  var progression = progressionTargetForExercise(exercise.name);
+  var planTarget = coachPlanTargetForExercise(exercise, coachExercisePerformanceSignal(exercise));
+  var rows = plannedSetRowsFromPreviousSession(exercise, 2, planTarget);
+  ({ progression, planTarget, rows });
+`);
+
+assert.strictEqual(standardToHighRepConversion.progression.styleConversion, true, "Expected a new high-rep track to use a converted standard baseline.");
+assert.strictEqual(standardToHighRepConversion.planTarget.kind, "style-conversion", "Expected Coach copy to identify a style conversion rather than ordinary progression.");
+assert.strictEqual(standardToHighRepConversion.rows[0].weight, 72.5, "Expected 100 x 10 at 2 RIR to convert conservatively to 72.5 lb for the high-rep midpoint.");
+assert.strictEqual(standardToHighRepConversion.rows[0].reps, 25, "Expected a 20-30 range conversion to target its 25-rep midpoint.");
+assert.strictEqual(standardToHighRepConversion.rows[0].rir, 2, "Expected the converted first-session target to use 2 RIR.");
+
+const highRepToStandardConversion = runScenario(`
+  ${resetAndHelpers}
+  state.settings.customExercises = [{
+    id: "conversion-curl", name: "Conversion Curl", primaryMuscles: ["biceps"], secondaryMuscles: [],
+    equipment: "cable", reps: "8-12", rest: "60 sec", loadingStyle: "standard", loadIncrement: 2.5, userCreated: true
+  }];
+  state.workouts = [{
+    id: "high-curl", date: dateDaysAgo(3), exercise: "Conversion Curl", exerciseId: "conversion-curl",
+    primaryMuscles: ["biceps"], secondaryMuscles: [], loadingStyle: "high-rep",
+    setRows: [{ weight: 72.5, reps: 25, rir: 2, restSeconds: 60 }]
+  }];
+  var exercise = resolveExerciseMeta("Conversion Curl");
+  var planTarget = coachPlanTargetForExercise(exercise, coachExercisePerformanceSignal(exercise));
+  var rows = plannedSetRowsFromPreviousSession(exercise, 1, planTarget);
+  ({ planTarget, row: rows[0] });
+`);
+
+assert.strictEqual(highRepToStandardConversion.planTarget.kind, "style-conversion", "Expected switching back to standard loading to convert the high-rep baseline.");
+assert.strictEqual(highRepToStandardConversion.row.weight, 97.5, "Expected the high-rep set to convert conservatively to the configured 2.5 lb increment.");
+assert.strictEqual(highRepToStandardConversion.row.reps, 10, "Expected an 8-12 standard range conversion to target its 10-rep midpoint.");
+
+const interruptedLoadingStylePhase = runScenario(`
+  ${resetAndHelpers}
+  state.settings.customExercises = [{
+    id: "phase-curl", name: "Phase Curl", primaryMuscles: ["biceps"], secondaryMuscles: [],
+    equipment: "cable", reps: "20-30", rest: "60 sec", loadingStyle: "high-rep", loadIncrement: 2.5, userCreated: true
+  }];
+  var exercise = resolveExerciseMeta("Phase Curl");
+  var olderHigh = makeWorkout({ id: "biceps" }, 6, 1, { id: "old-high", exercise: exercise.name, exerciseId: exercise.id });
+  Object.assign(olderHigh, { loadingStyle: "high-rep", setRows: [{ weight: 50, reps: 28, rir: 1 }] });
+  var interveningStandard = makeWorkout({ id: "biceps" }, 4, 1, { id: "middle-standard", exercise: exercise.name, exerciseId: exercise.id });
+  Object.assign(interveningStandard, { loadingStyle: "standard", setRows: [{ weight: 75, reps: 10, rir: 2 }] });
+  var latestHigh = makeWorkout({ id: "biceps" }, 2, 1, { id: "new-high", exercise: exercise.name, exerciseId: exercise.id });
+  Object.assign(latestHigh, { loadingStyle: "high-rep", setRows: [{ weight: 52.5, reps: 22, rir: 2 }] });
+  state.workouts = [olderHigh, interveningStandard, latestHigh];
+  var phase = exerciseLoadingStylePhase(exercise);
+  var signal = coachExercisePerformanceSignal(exercise);
+  ({ phaseIds: phase.history.map((workout) => workout.id), status: signal.status, historyCount: signal.history.length });
+`);
+
+assert.deepEqual(interruptedLoadingStylePhase.phaseIds, ["new-high"], "Expected the active high-rep phase to stop at the intervening standard workout.");
+assert.strictEqual(interruptedLoadingStylePhase.status, "neutral", "Expected the first workout in a new loading-style phase to establish a neutral baseline.");
+assert.strictEqual(interruptedLoadingStylePhase.historyCount, 1, "Expected old high-rep phases not to affect current progression or regression.");
+
+const returningStyleUsesTransition = runScenario(`
+  ${resetAndHelpers}
+  state.settings.customExercises = [{
+    id: "return-curl", name: "Return Curl", primaryMuscles: ["biceps"], secondaryMuscles: [],
+    equipment: "cable", reps: "20-30", rest: "60 sec", loadingStyle: "high-rep", loadIncrement: 2.5, userCreated: true
+  }];
+  var exercise = resolveExerciseMeta("Return Curl");
+  var oldHigh = makeWorkout({ id: "biceps" }, 8, 1, { id: "old-high", exercise: exercise.name, exerciseId: exercise.id });
+  Object.assign(oldHigh, { loadingStyle: "high-rep", setRows: [{ weight: 45, reps: 25, rir: 2 }] });
+  var latestStandard = makeWorkout({ id: "biceps" }, 2, 1, { id: "latest-standard", exercise: exercise.name, exerciseId: exercise.id });
+  Object.assign(latestStandard, { loadingStyle: "standard", setRows: [{ weight: 80, reps: 10, rir: 2 }] });
+  state.workouts = [oldHigh, latestStandard];
+  var progression = progressionTargetForExercise(exercise.name);
+  var signal = coachExercisePerformanceSignal(exercise);
+  ({ styleConversion: progression.styleConversion, sourceId: progression.latest.id, status: signal.status, historyCount: signal.history.length });
+`);
+
+assert.strictEqual(returningStyleUsesTransition.styleConversion, true, "Expected the latest opposite-style workout to create a new conversion baseline even when an older target-style phase exists.");
+assert.strictEqual(returningStyleUsesTransition.sourceId, "latest-standard", "Expected conversion to use the newest opposite-style performance.");
+assert.strictEqual(returningStyleUsesTransition.status, "neutral", "Expected no progression or regression verdict across a loading-style transition.");
+assert.strictEqual(returningStyleUsesTransition.historyCount, 0, "Expected previous high-rep phases to remain outside the new transition baseline.");
+
+const weeklyCoachPlan = runScenario(`
+  ${resetAndHelpers}
+  state.coachWeekDraft = null;
+  state.workouts = muscleGroups.map((muscle) => makeWorkout(muscle, 2, 10));
+  state.settings.coachWeeklyPlan = normalizeCoachWeeklyPlan({
+    days: [5, 0],
+    averageMinutes: 60,
+    priorities: ["biceps"],
+    targets: Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, muscle.id === "biceps" ? 24 : 10]))
+  });
+  var plan = buildCoachWeeklyPlan();
+  ({
+    priorityProjected: plan.projected.biceps,
+    priorityTarget: plan.setup.targets.biceps,
+    plannedDays: plan.sessions.filter((session) => session.status === "planned").length,
+    capacityMessage: plan.capacity.message,
+    markup: renderCoachWeek()
+  });
+`);
+
+assert(weeklyCoachPlan.priorityProjected > 10, `Expected weekly plan to add volume to priority Biceps, got ${weeklyCoachPlan.priorityProjected}`);
+assert.strictEqual(weeklyCoachPlan.priorityTarget, 24, "Expected numeric weekly target to remain attached to the priority muscle.");
+assert(weeklyCoachPlan.plannedDays > 0, "Expected the weekly planner to create remaining sessions.");
+assert(weeklyCoachPlan.markup.includes("Weekly distribution") && weeklyCoachPlan.markup.includes("Copy this day to Log"), "Expected weekly Coach distribution and day-copy controls.");
+
+const weeklyPriorityBeforeOptionalGrowth = runScenario(`
+  ${resetAndHelpers}
+  state.settings.customExercises = muscleGroups.map((muscle) => ({
+    id: "weekly-priority-" + muscle.id,
+    name: "Weekly Priority " + muscle.label,
+    primaryMuscles: [muscle.id],
+    secondaryMuscles: [],
+    equipment: "machine",
+    reps: "8-15",
+    rest: "60 sec",
+    cue: "Train.",
+    userCreated: true
+  }));
+  state.workouts = muscleGroups.map((muscle) => makeWorkout(muscle, 2, 10));
+  var setup = normalizeCoachWeeklyPlan({
+    days: [5, 0],
+    averageMinutes: 30,
+    priorities: ["chest"],
+    targets: Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, ["chest", "hamstrings"].includes(muscle.id) ? 20 : 10]))
+  });
+  var plan = buildCoachWeeklyPlan(setup);
+  ({
+    chestAdded: plan.projected.chest - 10,
+    hamstringsAdded: plan.projected.hamstrings - 10,
+    maxExercises: Math.max(...plan.sessions.map((session) => session.items.length))
+  });
+`);
+
+assert(weeklyPriorityBeforeOptionalGrowth.chestAdded >= weeklyPriorityBeforeOptionalGrowth.hamstringsAdded, `Expected priority Chest capacity before optional Hamstrings growth, got +${weeklyPriorityBeforeOptionalGrowth.chestAdded} Chest and +${weeklyPriorityBeforeOptionalGrowth.hamstringsAdded} Hamstrings.`);
+assert(weeklyPriorityBeforeOptionalGrowth.chestAdded > 0, "Expected priority Chest to receive remaining weekly capacity.");
+assert(weeklyPriorityBeforeOptionalGrowth.maxExercises <= 6, `Expected weekly sessions to cap at six exercises, got ${weeklyPriorityBeforeOptionalGrowth.maxExercises}.`);
+
+const weeklyFloorBeforePriorityGrowth = runScenario(`
+  ${resetAndHelpers}
+  state.settings.customExercises = muscleGroups.map((muscle) => ({
+    id: "weekly-floor-" + muscle.id,
+    name: "Weekly Floor " + muscle.label,
+    primaryMuscles: [muscle.id],
+    secondaryMuscles: [],
+    equipment: "machine",
+    reps: "8-15",
+    rest: "60 sec",
+    cue: "Train.",
+    userCreated: true
+  }));
+  state.workouts = muscleGroups.map((muscle) => makeWorkout(muscle, 2, muscle.id === "hamstrings" ? 6 : 10));
+  var plan = buildCoachWeeklyPlan(normalizeCoachWeeklyPlan({ days: [5], averageMinutes: 30, priorities: ["chest"], targets: { chest: 20, hamstrings: 10 } }));
+  ({ chest: plan.projected.chest, hamstrings: plan.projected.hamstrings, phases: plan.sessions.flatMap((session) => session.items.map((item) => item.phase)) });
+`);
+
+assert(weeklyFloorBeforePriorityGrowth.hamstrings >= 10, `Expected Hamstrings floor to be protected before Chest growth, got ${weeklyFloorBeforePriorityGrowth.hamstrings}.`);
+assert(weeklyFloorBeforePriorityGrowth.chest > 10, `Expected remaining capacity to reach priority Chest after the Hamstrings floor, got ${weeklyFloorBeforePriorityGrowth.chest}.`);
+assert(weeklyFloorBeforePriorityGrowth.phases.includes("floor") && weeklyFloorBeforePriorityGrowth.phases.includes("priority"), "Expected explicit floor and priority planning phases.");
+
+const todayHardExerciseCap = runScenario(`
+  ${resetAndHelpers}
+  state.workouts = muscleGroups.map((muscle) => makeWorkout(muscle, 2, 18));
+  var plan = buildTodayPlan(75).sessionPlan;
+  ({ count: plan.items.length, total: plan.totalMinutes });
+`);
+
+assert(todayHardExerciseCap.count <= 6, `Expected Today to cap at six exercises even at 1 hour+, got ${todayHardExerciseCap.count}.`);
+assert(todayHardExerciseCap.total <= 78, `Expected Today to remain inside the 75-minute tolerance, got ${todayHardExerciseCap.total}.`);
+
+const weeklyDistributionIndicators = runScenario(`
+  ${resetAndHelpers}
+  renderCoachWeekDistribution({
+    actualStats: muscleGroups.map((muscle) => ({ id: muscle.id, sets: muscle.id === "chest" ? 8 : muscle.id === "back" ? 12 : 20 })),
+    projected: Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, muscle.id === "chest" ? 8 : muscle.id === "back" ? 12 : 20])),
+    setup: { priorities: [], targets: Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, 20])) }
+  });
+`);
+
+assert(weeklyDistributionIndicators.includes("coach-week-muscle-status below-minimum") && weeklyDistributionIndicators.includes('aria-label="Below 10-set minimum"'), "Expected red weekly indicator for projected totals below 10 sets.");
+assert(weeklyDistributionIndicators.includes("coach-week-muscle-status below-upper") && weeklyDistributionIndicators.includes('aria-label="Below 20 planned sets"'), "Expected orange weekly indicator for projected totals from 10 through under 20 sets.");
+assert(weeklyDistributionIndicators.includes("coach-week-muscle-status upper-met") && weeklyDistributionIndicators.includes('aria-label="20 planned sets reached"'), "Expected green weekly indicator at 20 or more projected sets.");
+
+const weeklyPreferenceSync = runScenario(`
+  ${resetAndHelpers}
+  state.settings.coachWeeklyPlan = normalizeCoachWeeklyPlan({ days: [1, 3, 5], averageMinutes: 50, priorities: ["chest"], targets: { chest: 22 } });
+  safePreferenceValue("coachWeeklyPlan");
+`);
+
+assert.deepEqual(weeklyPreferenceSync.days, [1, 3, 5], "Expected weekly plan days to use safe preference sync.");
+assert.strictEqual(weeklyPreferenceSync.targets.chest, 22, "Expected weekly target settings to sync.");
+
+const weeklyCommittedPreferenceWins = runScenario(`
+  ${resetAndHelpers}
+  state.settings.coachWeeklyPlan = normalizeCoachWeeklyPlan({ days: [2, 4, 6], averageMinutes: 50, priorities: ["back"], targets: { back: 24 } });
+  state.coachWeekDraft = normalizeCoachWeeklyPlan({ days: [5], averageMinutes: 30, priorities: ["chest"], targets: { chest: 20 } });
+  var synced = safePreferenceValue("coachWeeklyPlan");
+  ({ days: synced.days, minutes: synced.averageMinutes, priorities: synced.priorities, backTarget: synced.targets.back });
+`);
+
+assert.deepEqual(weeklyCommittedPreferenceWins.days, [2, 4, 6], "Expected record sync to use the committed weekly setup, not a transient preview draft.");
+assert.strictEqual(weeklyCommittedPreferenceWins.minutes, 50, "Expected committed weekly duration to remain authoritative.");
+assert.deepEqual(weeklyCommittedPreferenceWins.priorities, ["back"], "Expected committed weekly priorities to remain authoritative.");
+assert.strictEqual(weeklyCommittedPreferenceWins.backTarget, 24, "Expected committed weekly targets to remain authoritative.");
+
+const weeklyDraftDoesNotOverrideCommittedPlan = runScenario(`
+  ${resetAndHelpers}
+  state.settings.coachWeeklyPlan = normalizeCoachWeeklyPlan({ days: [1, 3, 5, 6], averageMinutes: 60 });
+  state.coachWeekDraft = normalizeCoachWeeklyPlan({ days: [5, 6], averageMinutes: 40 });
+  var selected = selectedCoachWeeklyPlan();
+  ({ days: selected.days, averageMinutes: selected.averageMinutes, markup: renderCoachWeek() });
+`);
+
+assert.deepEqual(weeklyDraftDoesNotOverrideCommittedPlan.days, [1, 3, 5, 6], "Expected the displayed weekly plan to remain on committed days until Generate is clicked.");
+assert.strictEqual(weeklyDraftDoesNotOverrideCommittedPlan.averageMinutes, 60, "Expected the displayed weekly plan to remain on the committed duration until Generate is clicked.");
+assert(weeklyDraftDoesNotOverrideCommittedPlan.markup.includes("4 days - 60 min average"), "Expected pending form changes not to replace the committed weekly result.");
+
+const weeklySourceFingerprint = runScenario(`
+  ${resetAndHelpers}
+  var setup = normalizeCoachWeeklyPlan({ days: [5, 6], averageMinutes: 60, priorities: ["glutes"], targets: { glutes: 20 } });
+  var initial = coachWeeklySourceFingerprint(setup);
+  state.workouts = [makeWorkout(muscleGroups.find((muscle) => muscle.id === "glutes"), 2, 3)];
+  var workoutChanged = coachWeeklySourceFingerprint(setup);
+  state.settings.customExercises[0] = { ...state.settings.customExercises[0], loadingStyle: "high-rep", reps: "20-30", updatedAt: "2026-06-17T12:00:00.000Z" };
+  var styleChanged = coachWeeklySourceFingerprint(setup);
+  state.settings.customExercises[0] = { ...state.settings.customExercises[0], archivedAt: "2026-06-17T13:00:00.000Z" };
+  var archiveChanged = coachWeeklySourceFingerprint(setup);
+  ({ initial, workoutChanged, styleChanged, archiveChanged });
+`);
+
+assert.notStrictEqual(weeklySourceFingerprint.initial, weeklySourceFingerprint.workoutChanged, "Expected submitted workouts to stale the generated weekly source fingerprint.");
+assert.notStrictEqual(weeklySourceFingerprint.workoutChanged, weeklySourceFingerprint.styleChanged, "Expected loading-style changes to stale the generated weekly source fingerprint.");
+assert.notStrictEqual(weeklySourceFingerprint.styleChanged, weeklySourceFingerprint.archiveChanged, "Expected library archive changes to stale the generated weekly source fingerprint.");
+
+const weeklyGeneratedSnapshotStaysCommitted = runScenario(`
+  ${resetAndHelpers}
+  var setup = normalizeCoachWeeklyPlan({ days: [5, 0], averageMinutes: 60, priorities: ["biceps"], targets: { biceps: 20 } });
+  var generated = buildCoachWeeklyPlan(setup);
+  var committed = normalizeCoachWeeklyPlan({
+    ...setup,
+    sourceFingerprint: coachWeeklySourceFingerprint(setup),
+    generatedPlan: compactCoachWeeklyPlanSnapshot(generated)
+  });
+  state.settings.coachWeeklyPlan = committed;
+  var before = displayedCoachWeeklyPlan();
+  var beforeItems = before.sessions.flatMap((session) => session.items.map((item) => item.exercise.id + ":" + item.sets));
+  state.workouts.push(makeWorkout(muscleGroups.find((muscle) => muscle.id === "chest"), 0, 4, { id: "new-submitted-workout" }));
+  var after = displayedCoachWeeklyPlan();
+  var afterItems = after.sessions.flatMap((session) => session.items.map((item) => item.exercise.id + ":" + item.sets));
+  ({ beforeItems, afterItems, stale: after.stale });
+`);
+
+assert.deepEqual(weeklyGeneratedSnapshotStaysCommitted.afterItems, weeklyGeneratedSnapshotStaysCommitted.beforeItems, "Expected newly submitted work to leave the generated remaining-week items unchanged until Generate is clicked.");
+assert.strictEqual(weeklyGeneratedSnapshotStaysCommitted.stale, true, "Expected newly submitted work to mark the committed weekly plan as needing regeneration.");
+
+const archivedGeneratedExerciseIsBlocked = runScenario(`
+  ${resetAndHelpers}
+  state.settings.customExercises = [{ id: "weekly-curl", name: "Weekly Curl", primaryMuscles: ["biceps"], secondaryMuscles: [], equipment: "dumbbells", reps: "8-15", rest: "60 sec", cue: "Curl.", userCreated: true }];
+  var setup = normalizeCoachWeeklyPlan({ days: [5], averageMinutes: 40, priorities: ["biceps"], targets: { biceps: 20 } });
+  var generated = buildCoachWeeklyPlan(setup);
+  state.settings.coachWeeklyPlan = normalizeCoachWeeklyPlan({ ...setup, sourceFingerprint: coachWeeklySourceFingerprint(setup), generatedPlan: compactCoachWeeklyPlanSnapshot(generated) });
+  state.settings.customExercises[0] = { ...state.settings.customExercises[0], archivedAt: "2026-06-17T14:00:00.000Z", updatedAt: "2026-06-17T14:00:00.000Z" };
+  var displayed = displayedCoachWeeklyPlan();
+  ({ stale: displayed.stale, ids: displayed.sessions.flatMap((session) => session.items.map((item) => item.exercise.id)) });
+`);
+
+assert.strictEqual(archivedGeneratedExerciseIsBlocked.stale, true, "Expected archiving a generated exercise to mark the weekly plan stale.");
+assert(!archivedGeneratedExerciseIsBlocked.ids.includes("weekly-curl"), "Expected archived generated exercises to be removed from actionable weekly recommendations.");
+
+const weeklySecondaryStimulusBudget = runScenario(`
+  ${resetAndHelpers}
+  state.settings.customExercises = [
+    { id: "squat", name: "Squat", primaryMuscles: ["quads"], secondaryMuscles: ["glutes"], equipment: "barbell", reps: "8-15", rest: "120 sec", cue: "Squat.", userCreated: true },
+    { id: "hip-thrust", name: "Hip Thrust", primaryMuscles: ["glutes"], secondaryMuscles: [], equipment: "barbell", reps: "8-15", rest: "120 sec", cue: "Thrust.", userCreated: true }
+  ];
+  var glutes = muscleGroups.find((muscle) => muscle.id === "glutes");
+  var quads = muscleGroups.find((muscle) => muscle.id === "quads");
+  state.workouts = [
+    makeWorkout(glutes, 2, 15, { id: "glutes-current", exercise: "Hip Thrust", exerciseId: "hip-thrust" }),
+    makeWorkout(quads, 2, 10, { id: "quads-current", exercise: "Previous Quad Exercise", exerciseId: "previous-quads", secondaryMuscles: [] })
+  ];
+  state.settings.coachWeeklyPlan = normalizeCoachWeeklyPlan({
+    days: [5, 0],
+    averageMinutes: 60,
+    priorities: ["glutes"],
+    targets: Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, ["glutes", "quads"].includes(muscle.id) ? 20 : 10]))
+  });
+  var plan = buildCoachWeeklyPlan();
+  var planned = plan.sessions.flatMap((session) => session.items);
+  var directGluteSets = planned.filter((item) => item.muscle.id === "glutes").reduce((sum, item) => sum + item.sets, 0);
+  var squatSets = planned.filter((item) => item.exercise.id === "squat").reduce((sum, item) => sum + item.sets, 0);
+  ({ projectedGlutes: plan.projected.glutes, directGluteSets, squatSets, maxMinutes: Math.max(...plan.sessions.map((session) => session.totalMinutes)) });
+`);
+
+assert(weeklySecondaryStimulusBudget.squatSets > 0, "Expected the weekly plan to retain useful squat work.");
+assert(weeklySecondaryStimulusBudget.directGluteSets <= Math.ceil(5 - weeklySecondaryStimulusBudget.squatSets * 0.5), `Expected squat secondary credit to reduce direct glute work, got ${weeklySecondaryStimulusBudget.directGluteSets} direct and ${weeklySecondaryStimulusBudget.squatSets} squat sets.`);
+assert(weeklySecondaryStimulusBudget.projectedGlutes <= 20.5, `Expected weekly Glutes projection to stay near the 20-set target after secondary credit, got ${weeklySecondaryStimulusBudget.projectedGlutes}.`);
+assert(weeklySecondaryStimulusBudget.maxMinutes <= 63, `Expected every 60-minute weekly session to remain inside the 63-minute hard limit, got ${weeklySecondaryStimulusBudget.maxMinutes}.`);
+
+const todaySecondaryStimulusBudget = runScenario(`
+  ${resetAndHelpers}
+  state.settings.customExercises = muscleGroups.map((muscle) => ({
+    id: "today-" + muscle.id,
+    name: "Today " + muscle.label,
+    primaryMuscles: [muscle.id],
+    secondaryMuscles: muscle.id === "quads" ? ["glutes"] : [],
+    equipment: "machine",
+    reps: "8-15",
+    rest: "60 sec",
+    cue: "Train.",
+    userCreated: true
+  }));
+  state.coachTargetMuscles = ["glutes"];
+  state.coachGlobalGrowthMode = "medium";
+  state.workouts = muscleGroups.map((muscle) => makeWorkout(muscle, 2, muscle.id === "glutes" ? 15 : 10, {
+    exercise: "Previous " + muscle.label,
+    exerciseId: "previous-" + muscle.id,
+    secondaryMuscles: []
+  }));
+  var plan = buildTodayPlan(60).sessionPlan;
+  var currentGlutes = muscleSetStats().find((stat) => stat.id === "glutes").sets;
+  var plannedCredits = plan.items.reduce((sum, item) => sum + (coachExerciseStimulusCredits(item.exercise, item.sets).glutes || 0), 0);
+  ({ projectedGlutes: currentGlutes + plannedCredits, totalMinutes: plan.totalMinutes, ids: plan.items.map((item) => item.exercise.id) });
+`);
+
+assert(todaySecondaryStimulusBudget.ids.includes("today-quads"), "Expected Today to retain useful Quad work with secondary Glute stimulus.");
+assert(todaySecondaryStimulusBudget.projectedGlutes <= 20.5, `Expected Today to reduce redundant direct Glute work after secondary credit, got ${todaySecondaryStimulusBudget.projectedGlutes}.`);
+assert(todaySecondaryStimulusBudget.totalMinutes <= 63, `Expected the 60-minute Today plan to remain inside the 63-minute hard limit, got ${todaySecondaryStimulusBudget.totalMinutes}.`);
+
+const archivedExerciseSafety = runScenario(`
+  ${resetAndHelpers}
+  state.settings.customExercises = [
+    { id: "active-curl", name: "Active Curl", primaryMuscles: ["biceps"], secondaryMuscles: [], equipment: "dumbbells", reps: "8-15", rest: "60 sec", cue: "Curl.", userCreated: true },
+    { id: "archived-curl", name: "Archived Curl", primaryMuscles: ["biceps"], secondaryMuscles: [], equipment: "dumbbells", reps: "8-15", rest: "60 sec", cue: "Curl.", userCreated: true, archivedAt: "2026-06-16T12:00:00.000Z" }
+  ];
+  state.settings.coachWeeklyPlan = normalizeCoachWeeklyPlan({ days: [5], averageMinutes: 40, priorities: ["biceps"], targets: { biceps: 20 } });
+  var week = buildCoachWeeklyPlan();
+  var today = buildTodayPlan(40);
+  ({
+    weekIds: week.sessions.flatMap((session) => session.items.map((item) => item.exercise.id)),
+    todayIds: today.sessionPlan.items.map((item) => item.exercise.id),
+    activeArchived: isActiveCoachExercise({ id: "archived-curl" })
+  });
+`);
+
+assert(!archivedExerciseSafety.weekIds.includes("archived-curl"), "Expected regenerated Week plans to exclude archived exercises.");
+assert(!archivedExerciseSafety.todayIds.includes("archived-curl"), "Expected Today plans to exclude archived exercises.");
+assert.strictEqual(archivedExerciseSafety.activeArchived, false, "Expected the final Coach exercise guard to reject archived definitions.");
+
+const weeklyAttainmentWarning = runScenario(`
+  ${resetAndHelpers}
+  state.coachWeekDraft = null;
+  state.workouts = muscleGroups.map((muscle) => makeWorkout(muscle, 2, 10));
+  state.settings.coachWeeklyPlan = normalizeCoachWeeklyPlan({
+    days: [3, 4],
+    averageMinutes: 60,
+    priorities: ["biceps"],
+    targets: Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, muscle.id === "biceps" ? 30 : 10]))
+  });
+  var plan = buildCoachWeeklyPlan();
+  ({
+    fits: plan.capacity.fits,
+    estimatedCapacity: plan.capacity.estimatedSetCapacity,
+    requestedSets: plan.capacity.requestedSets,
+    targetMet: plan.attainment.targetMet,
+    priorityMet: plan.attainment.priorityMet,
+    priorityTotal: plan.attainment.priorityTotal,
+    message: plan.capacity.message,
+    markup: renderCoachWeek()
+  });
+`);
+
+assert(weeklyAttainmentWarning.requestedSets <= weeklyAttainmentWarning.estimatedCapacity, "Expected this scenario to expose why rough capacity alone is insufficient.");
+assert.strictEqual(weeklyAttainmentWarning.fits, false, "Expected weekly capacity status to follow the scheduled projection, not only rough minute capacity.");
+assert(weeklyAttainmentWarning.targetMet < 10, "Expected adjacent remaining days to leave at least one defined target unmet.");
+assert(weeklyAttainmentWarning.priorityMet < weeklyAttainmentWarning.priorityTotal, "Expected unmet priority targets to be reported explicitly.");
+assert(weeklyAttainmentWarning.message.includes("Floors planned:") && weeklyAttainmentWarning.message.includes("Priority targets planned:"), "Expected weekly status to report floor and priority-target attainability.");
+assert(weeklyAttainmentWarning.markup.includes("Some weekly targets cannot be planned"), "Expected Coach Week UI to clearly warn when the generated schedule misses targets.");
+
+const coachPlanDirections = runScenario(`
+  ({
+    up: coachPlanDirectionIndicator({ kind: "progression", tone: "up", label: "Add a rep", detail: "1-3 RIR", message: "Progressing" }),
+    down: coachPlanDirectionIndicator({ kind: "reset", tone: "warn", label: "Reset load", detail: "1-2 RIR", message: "Regressing" }),
+    transition: coachPlanDirectionIndicator({ kind: "style-conversion", tone: "flat", label: "High-rep baseline", detail: "1-3 RIR", message: "Establish baseline" })
+  });
+`);
+
+assert(coachPlanDirections.up.includes("load-direction-indicator up") && coachPlanDirections.up.includes("\u2191"), "Expected progressing Coach exercises to show a green up direction.");
+assert(coachPlanDirections.down.includes("load-direction-indicator down") && coachPlanDirections.down.includes("\u2193"), "Expected regressing Coach exercises to show a red down direction.");
+assert(coachPlanDirections.transition.includes("load-direction-indicator neutral") && coachPlanDirections.transition.includes("\u2192"), "Expected loading-style transitions to show an honest hold/baseline direction instead of a false up/down verdict.");
+
+assert(!appCode.includes("if (coachWeekForm.isConnected) render();"), "Expected pending weekly form changes not to rerender and replace the committed plan before Generate.");
 
 console.log("coach regression tests passed");

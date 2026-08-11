@@ -94,6 +94,8 @@ const reset = `
   state.draftNotes = "";
   state.editingWorkoutId = null;
   state.workoutDraft = [];
+  state.draftDate = todayISO();
+  state.strengthDraftsByDate = {};
   state.dismissedRecordTrophies = new Set();
   state.weeklyMuscleDetail = null;
   state.returnStack = [];
@@ -195,9 +197,9 @@ assert(!appCode.includes('selectedExercise: "Push-up"'), "Expected Log startup n
 assert(!appCode.includes('showBanner("Unsaved draft restored."'), "Expected startup draft recovery not to show a top banner.");
 assert(appCode.includes("notifyMetricSaved"), "Expected metrics saves to use a dedicated bottom-only notification helper.");
 assert(!stylesCode.includes(".mobile-quick-toggle"), "Expected floating quick action button styling to be removed.");
-assert(indexCode.includes("v=1.5.65"), "Expected index shell references to use bumped app version.");
+assert(indexCode.includes("v=1.5.75"), "Expected index shell references to use bumped app version.");
 assert(!indexCode.includes('id="app" class="app-content" aria-live'), "Expected broad app aria-live to be removed in favor of targeted live regions.");
-assert(serviceWorkerCode.includes("trainwise-cache-v87"), "Expected service worker cache version bump.");
+assert(serviceWorkerCode.includes("trainwise-cache-v97"), "Expected service worker cache version bump.");
 assert(appCode.includes("data-settings-panel"), "Expected Settings panels to preserve open state with stable panel ids.");
 assert(appCode.includes('forceSettingsPanelOpen("supabase-sync")'), "Expected Supabase actions to keep the Supabase panel open after rendering.");
 
@@ -1356,12 +1358,12 @@ const todayShortcutPreservesDraft = runScenario(`
   });
 `);
 
-assert.strictEqual(todayShortcutPreservesDraft.applied, true, "Expected Today shortcut to handle meaningful strength drafts.");
-assert.strictEqual(todayShortcutPreservesDraft.date, runScenario("todayISO();"), "Expected Today shortcut to move the draft date to today.");
-assert.deepEqual(todayShortcutPreservesDraft.rows, [{ weight: 135, reps: 8, rir: 1, restSeconds: 120 }], "Expected Today shortcut to preserve visible strength rows.");
-assert.strictEqual(todayShortcutPreservesDraft.editingWorkoutId, null, "Expected Today shortcut to stay out of edit mode for unsaved drafts.");
-assert.strictEqual(todayShortcutPreservesDraft.draftEditingId, null, "Expected Today shortcut to preserve only unsaved draft rows.");
-assert.deepEqual(todayShortcutPreservesDraft.loadedIds, [], "Expected Today shortcut to clear loaded saved workout ids.");
+assert.strictEqual(todayShortcutPreservesDraft.applied, false, "Expected Today shortcut to use normal date-scoped loading instead of carrying a draft.");
+assert.strictEqual(todayShortcutPreservesDraft.date, "2026-06-10", "Expected the source draft to remain attached to its original date until date navigation saves it.");
+assert.deepEqual(todayShortcutPreservesDraft.rows, [{ weight: 135, reps: 8, rir: 1, restSeconds: 120 }], "Expected declining the shortcut not to mutate the source draft.");
+assert.strictEqual(todayShortcutPreservesDraft.editingWorkoutId, null, "Expected the unsaved source draft to remain out of edit mode.");
+assert.strictEqual(todayShortcutPreservesDraft.draftEditingId, null, "Expected source draft identity to remain unchanged.");
+assert.deepEqual(todayShortcutPreservesDraft.loadedIds, [], "Expected source loaded ids to remain unchanged.");
 
 const todayShortcutDoesNotCarrySavedLogs = runScenario(`
   ${reset}
@@ -2077,8 +2079,8 @@ const mobileQolMarkup = runScenario(`
 assert(!mobileQolMarkup.banner.includes("Draft saved locally."), "Expected draft-save message to stay out of the top app banner.");
 assert(mobileQolMarkup.banner.includes("Workout locked in."), "Expected normal app banner messages to remain supported.");
 assert.strictEqual(mobileQolMarkup.logNotice, "", "Expected draft-save overlay markup to stay absent.");
-assert(mobileQolMarkup.emptyLog.includes("Unsaved strength draft"), "Expected empty Log state to surface recoverable strength drafts inline.");
-assert(mobileQolMarkup.emptyLog.includes('data-action="restore-draft"'), "Expected empty Log state to include restore action.");
+assert(!mobileQolMarkup.emptyLog.includes("Unsaved strength draft"), "Expected a draft from another date not to bleed into the selected Log date.");
+assert(!mobileQolMarkup.emptyLog.includes('data-action="restore-draft"'), "Expected restore to stay scoped to the selected date.");
 assert.strictEqual(mobileQolMarkup.hiddenNotice, "", "Expected Log draft notice to stay hidden outside the Log tab.");
 assert(mobileQolMarkup.modal.includes("Review backup import"), "Expected import preview dialog.");
 assert(mobileQolMarkup.modal.includes("2</strong> workouts"), "Expected import preview workout count.");
@@ -2147,7 +2149,8 @@ const collapsibleLongScreens = runScenario(`
 `);
 
 assert(collapsibleLongScreens.coach.includes("today-plan-card") && collapsibleLongScreens.coach.includes("<summary><span>Today's Plan</span>"), "Expected Coach Today's Plan to be collapsible.");
-assert(collapsibleLongScreens.coach.includes("coach-why-card") && collapsibleLongScreens.coach.includes("<summary><span>Why this?</span>"), "Expected Coach Why this to be collapsible.");
+assert(!collapsibleLongScreens.coach.includes("Why this?"), "Expected Coach Why this section to be removed.");
+assert(!collapsibleLongScreens.coach.includes("Coach notes") && !collapsibleLongScreens.coach.includes("Next plan preview"), "Expected Coach notes and next-plan preview sections to be removed.");
 assert(collapsibleLongScreens.trends.includes("muscle-trends-panel") && collapsibleLongScreens.trends.includes("<summary><span>Muscle trends</span>"), "Expected Muscle trends to be collapsible.");
 assert(collapsibleLongScreens.trends.includes("exercise-performance-panel") && collapsibleLongScreens.trends.includes("<summary><span>Exercise performance</span>"), "Expected Exercise performance to be collapsible.");
 assert(collapsibleLongScreens.trends.includes("health-trends-panel") && collapsibleLongScreens.trends.includes("<summary><span>Health trends</span>"), "Expected Health trends to be collapsible.");
@@ -2254,6 +2257,8 @@ const coachDebugReport = runScenario(`
     app: report.app,
     notBackup: report.notBackup,
     hasCoachPlan: Boolean(report.coach.todayPlan),
+    hasWeeklyPlan: Boolean(report.coach.weeklyPlan?.setup && Array.isArray(report.coach.weeklyPlan?.sessions)),
+    hasWeeklyCapacity: Number.isFinite(report.coach.weeklyPlan?.capacity?.estimatedSetCapacity),
     hasMuscleAudit: report.coach.muscleAudit.length > 0,
     modeKeys: Object.keys(report.coach.modeComparison || {}),
     modeItemCounts: Object.fromEntries(Object.entries(report.coach.modeComparison || {}).map(([mode, plan]) => [mode, plan.items.length])),
@@ -2270,6 +2275,8 @@ const coachDebugReport = runScenario(`
 assert.strictEqual(coachDebugReport.app, "TrainWise Coach Debug Report", `Expected Coach debug report app label, got ${coachDebugReport.app}`);
 assert.strictEqual(coachDebugReport.notBackup, true, "Expected Coach debug report to mark itself as non-backup.");
 assert(coachDebugReport.hasCoachPlan, "Expected Coach debug report to include today's plan.");
+assert(coachDebugReport.hasWeeklyPlan, "Expected Coach debug report to include the committed weekly setup and generated sessions.");
+assert(coachDebugReport.hasWeeklyCapacity, "Expected Coach debug report to include weekly capacity diagnostics.");
 assert(coachDebugReport.hasMuscleAudit, "Expected Coach debug report to include muscle audit.");
 assert.deepEqual(coachDebugReport.modeKeys, ["soft", "medium", "aggressive"], `Expected Coach debug report to compare all three modes, got ${coachDebugReport.modeKeys.join(", ")}`);
 assert(Object.values(coachDebugReport.modeItemCounts).every((count) => Number.isFinite(count)), `Expected every mode comparison to include item counts, got ${JSON.stringify(coachDebugReport.modeItemCounts)}`);
@@ -2453,5 +2460,106 @@ const invalidScrollFallsBack = runScenario(`
 `);
 
 assert.deepEqual(invalidScrollFallsBack, [0, 0], `Expected invalid saved scroll positions to fall back to top, got ${invalidScrollFallsBack.join(", ")}`);
+
+const dateScopedStrengthDrafts = runScenario(`
+  ${reset}
+  var storage = {};
+  localStorage.getItem = (key) => storage[key] || null;
+  localStorage.setItem = (key, value) => { storage[key] = value; };
+  localStorage.removeItem = (key) => { delete storage[key]; };
+  state.draftDate = "2026-06-22";
+  state.workoutDraft = [defaultDraftExercise("Bench Press")];
+  state.workoutDraft[0].notes = "Monday draft";
+  state.workoutDraft[0].setRows[0].weight = 102.5;
+  saveStrengthDraftForDate(state.draftDate);
+  clearWorkoutDraft("2026-06-23");
+  loadWorkoutDateDraft("2026-06-23");
+  var tuesdayCount = state.workoutDraft.length;
+  loadWorkoutDateDraft("2026-06-22");
+  ({ tuesdayCount, mondayWeight: state.workoutDraft[0].setRows[0].weight, mondayNote: state.workoutDraft[0].notes });
+`);
+
+assert.strictEqual(dateScopedStrengthDrafts.tuesdayCount, 0, "Expected a draft on Monday not to appear on Tuesday.");
+assert.strictEqual(dateScopedStrengthDrafts.mondayWeight, 102.5, "Expected half-pound draft weights to survive date-scoped recovery.");
+assert.strictEqual(dateScopedStrengthDrafts.mondayNote, "Monday draft", "Expected returning to the original date to restore only that date's draft.");
+
+const dateNavigationPreservesSourceKey = runScenario(`
+  ${reset}
+  state.activeTab = "log";
+  state.logMode = "strength";
+  state.draftDate = "2026-06-22";
+  var originalReadDraftFromForm = readDraftFromForm;
+  var originalSaveStrengthDraftForDate = saveStrengthDraftForDate;
+  var originalSaveDraftRecovery = saveDraftRecovery;
+  var savedUnderDate = "";
+  readDraftFromForm = () => { state.draftDate = "2026-06-23"; };
+  saveStrengthDraftForDate = (date) => { savedUnderDate = date; };
+  saveDraftRecovery = () => true;
+  preserveVisibleDraft("date-change");
+  var result = { savedUnderDate, retainedDate: state.draftDate };
+  readDraftFromForm = originalReadDraftFromForm;
+  saveStrengthDraftForDate = originalSaveStrengthDraftForDate;
+  saveDraftRecovery = originalSaveDraftRecovery;
+  result;
+`);
+
+assert.strictEqual(dateNavigationPreservesSourceKey.savedUnderDate, "2026-06-22", "Expected date navigation to save the visible workout under its source date.");
+assert.strictEqual(dateNavigationPreservesSourceKey.retainedDate, "2026-06-22", "Expected reading the destination date input not to relabel the visible workout.");
+
+const exerciseLoadingPreferences = runScenario(`
+  ${reset}
+  validateExerciseFormInput({
+    name: "Light Cable Raise",
+    primaryMuscle: "shoulders",
+    secondaryMuscles: [],
+    equipment: "cable",
+    reps: "20-30",
+    rest: "60 sec",
+    progressionMode: "normal",
+    loadingStyle: "high-rep",
+    loadIncrement: "0.5",
+    cue: "Keep it clean."
+  });
+`);
+
+assert.strictEqual(exerciseLoadingPreferences.ok, true, "Expected high-rep exercise settings to validate.");
+assert.strictEqual(exerciseLoadingPreferences.exercise.loadingStyle, "high-rep", "Expected loading style to be stored on the exercise.");
+assert.strictEqual(exerciseLoadingPreferences.exercise.loadIncrement, 0.5, "Expected configured half-pound load increments to remain exact.");
+
+const loadingStyleRepRangeCoherence = runScenario(`
+  ${reset}
+  var normalizedHigh = normalizeExerciseDefinition({ id: "high", name: "High", primaryMuscles: ["biceps"], loadingStyle: "high-rep", reps: "8-15" });
+  var normalizedStandard = normalizeExerciseDefinition({ id: "standard", name: "Standard", primaryMuscles: ["biceps"], loadingStyle: "standard", reps: "20-30" });
+  var invalidHigh = validateExerciseFormInput({ name: "Invalid High", primaryMuscle: "biceps", reps: "8-15", rest: "60 sec", loadingStyle: "high-rep" });
+  var invalidStandard = validateExerciseFormInput({ name: "Invalid Standard", primaryMuscle: "biceps", reps: "20-30", rest: "60 sec", loadingStyle: "standard" });
+  var automatic = validateExerciseFormInput({ name: "Automatic", primaryMuscle: "biceps", reps: "20-30", rest: "60 sec", loadingStyle: "auto" });
+  ({ highReps: normalizedHigh.reps, standardReps: normalizedStandard.reps, invalidHigh, invalidStandard, automatic });
+`);
+
+assert.strictEqual(loadingStyleRepRangeCoherence.highReps, "20-30", "Expected existing High-rep + 8-15 definitions to normalize to 20-30.");
+assert.strictEqual(loadingStyleRepRangeCoherence.standardReps, "8-15", "Expected existing Standard + 20-30 definitions to normalize to 8-15.");
+assert.strictEqual(loadingStyleRepRangeCoherence.invalidHigh.ok, false, "Expected explicit High-rep exercises to reject a standard rep range.");
+assert.strictEqual(loadingStyleRepRangeCoherence.invalidStandard.ok, false, "Expected explicit Standard exercises to reject a high-rep-only range.");
+assert.strictEqual(loadingStyleRepRangeCoherence.automatic.ok, true, "Expected Auto loading style to preserve a manually entered high-rep range.");
+assert(appCode.includes('repsInput.value = "20-30"') && appCode.includes('repsInput.value = "8-15"'), "Expected loading-style selection to update the exercise rep range immediately.");
+
+const coachSubstitutionProvenance = runScenario(`
+  ${reset}
+  var draft = {
+    draftId: "coach-draft",
+    exercise: "Bench Press",
+    source: "coach",
+    sourceExercise: "Bench Press",
+    coachCopiedRows: [{ weight: 100, reps: 10, rir: 2, restSeconds: 120 }],
+    coachCopiedDirtyRows: [],
+    coachCopiedPlanId: "plan-1",
+    setRows: [{ weight: 100, reps: 10, rir: 2, restSeconds: 120 }]
+  };
+  clearCoachCopiedDraftMarkers(draft);
+  ({ source: draft.source, hasCopiedRows: Object.prototype.hasOwnProperty.call(draft, "coachCopiedRows") });
+`);
+
+assert.strictEqual(coachSubstitutionProvenance.source, "coach-modified", "Expected edits to a Coach draft to retain honest Coach-modified provenance.");
+assert.strictEqual(coachSubstitutionProvenance.hasCopiedRows, false, "Expected edited Coach-copy highlighting metadata to clear.");
 
 console.log("log regression tests passed");

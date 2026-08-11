@@ -3,13 +3,14 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 3;
 const STORES = ["workouts", "metrics", "settings", "syncQueue"];
-const APP_VERSION = "1.5.65";
+const APP_VERSION = "1.5.75";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 const DRAFT_RECOVERY_KEY = "trainwise-draft-recovery-v1";
+const DATED_STRENGTH_DRAFTS_KEY = "trainwise-strength-drafts-by-date-v1";
 const COPIED_COACH_PLAN_KEY = "trainwise-copied-coach-plan-v1";
 const SYNC_BOOTSTRAP_VERSION = 1;
 const SYNC_POLL_MS = 60000;
-const SYNC_SAFE_PREFERENCES = ["hypertrophyProfile", "nutritionGoal", "maintenanceProfile", "dashboardWidgets", "dashboardWidgetOrder"];
+const SYNC_SAFE_PREFERENCES = ["hypertrophyProfile", "nutritionGoal", "maintenanceProfile", "dashboardWidgets", "dashboardWidgetOrder", "coachWeeklyPlan"];
 const COLLAPSE_ANIMATION_MS = 360;
 const COLLAPSE_REVEAL_MS = 1600;
 const COLLAPSIBLE_SELECTOR = "details.collapsible-panel, details.coverage-row, details.inline-disclosure";
@@ -32,6 +33,7 @@ let lastUiCueAt = 0;
 const MAX_PENDING_UI_CUES = 3;
 const SESSION_LIMIT_MINUTES = 60;
 const COACH_TIME_TOLERANCE_MINUTES = 3;
+const COACH_MAX_EXERCISES_PER_SESSION = 6;
 const COACH_TIMEFRAME_OPTIONS = [
   { label: "30 min", minutes: 30 },
   { label: "40 min", minutes: 40 },
@@ -58,6 +60,21 @@ const PROGRESSION_MODE_OPTIONS = [
   { id: "normal", label: "Normal", hint: "Load can progress normally" },
   { id: "small-jumps", label: "Small jumps only", hint: "Use the smallest load jump available" },
   { id: "rep-first", label: "Rep-first / load-limited", hint: "Add reps or control before load" }
+];
+const LOADING_STYLE_OPTIONS = [
+  { id: "auto", label: "Coach chooses", hint: "Use the configured range and let Coach adapt the prescription" },
+  { id: "standard", label: "Standard", hint: "Conventional hypertrophy loading" },
+  { id: "high-rep", label: "High-rep", hint: "Lighter loading with reps progressed first" }
+];
+const LOAD_INCREMENT_OPTIONS = [0, 0.5, 1, 2.5, 5, 10];
+const COACH_WEEKDAY_OPTIONS = [
+  { day: 1, short: "Mon", label: "Monday" },
+  { day: 2, short: "Tue", label: "Tuesday" },
+  { day: 3, short: "Wed", label: "Wednesday" },
+  { day: 4, short: "Thu", label: "Thursday" },
+  { day: 5, short: "Fri", label: "Friday" },
+  { day: 6, short: "Sat", label: "Saturday" },
+  { day: 0, short: "Sun", label: "Sunday" }
 ];
 const NUTRITION_MEALS = [
   { id: "breakfast", label: "Breakfast" },
@@ -192,6 +209,7 @@ const state = {
   openExerciseMenu: null,
   logHistoryExercise: "",
   workoutDraft: [],
+  strengthDraftsByDate: {},
   loadedWorkoutDateIds: [],
   historyMode: "records",
   historyExercise: "",
@@ -201,6 +219,8 @@ const state = {
   historyDate: "",
   weeklyMuscleDetail: null,
   returnStack: [],
+  coachView: "today",
+  coachWeekDraft: null,
   coachTimeframeMinutes: SESSION_LIMIT_MINUTES,
   coachGlobalGrowthMode: "medium",
   coachTargetMuscles: [],
@@ -269,6 +289,10 @@ function parseLocalDate(value) {
 function fmt(num, digits = 0) {
   if (!Number.isFinite(num)) return "--";
   return new Intl.NumberFormat(undefined, { maximumFractionDigits: digits }).format(num);
+}
+
+function fmtLoad(num) {
+  return fmt(Number(num), 2);
 }
 
 function formatShortDate(value) {
@@ -899,6 +923,7 @@ function safePreferenceValue(key) {
   if (key === "maintenanceProfile") return selectedMaintenanceProfile();
   if (key === "dashboardWidgets") return selectedDashboardWidgets();
   if (key === "dashboardWidgetOrder") return dashboardWidgetOrder();
+  if (key === "coachWeeklyPlan") return normalizeCoachWeeklyPlan(state.settings.coachWeeklyPlan || {});
   return undefined;
 }
 
@@ -975,6 +1000,44 @@ function progressionModeLabel(value) {
   return PROGRESSION_MODE_OPTIONS.find((option) => option.id === normalizeProgressionMode(value))?.label || "Normal";
 }
 
+function normalizeLoadingStyle(value) {
+  const style = String(value || "auto").trim();
+  return LOADING_STYLE_OPTIONS.some((option) => option.id === style) ? style : "auto";
+}
+
+function loadingStyleLabel(value) {
+  return LOADING_STYLE_OPTIONS.find((option) => option.id === normalizeLoadingStyle(value))?.label || "Coach chooses";
+}
+
+function normalizeLoadIncrement(value) {
+  const increment = Number(value);
+  return Number.isFinite(increment) && increment >= 0 && increment <= 100 ? Math.round(increment * 100) / 100 : 0;
+}
+
+function effectiveLoadIncrement(exercise = {}, weight = 0) {
+  const configured = normalizeLoadIncrement(exercise.loadIncrement);
+  return configured > 0 ? configured : Number(weight) >= 50 ? 5 : 2.5;
+}
+
+function effectiveLoadingStyle(exercise = {}) {
+  const style = normalizeLoadingStyle(exercise.loadingStyle);
+  if (style !== "auto") return style;
+  return parseRepRange(exercise.reps).low >= 15 ? "high-rep" : "standard";
+}
+
+function repRangeForLoadingStyle(reps, loadingStyle) {
+  const normalized = normalizeRepRangeInput(reps) || "8-15";
+  const style = normalizeLoadingStyle(loadingStyle);
+  const range = parseRepRange(normalized);
+  if (style === "high-rep" && range.low < 15) return "20-30";
+  if (style === "standard" && range.low >= 15) return "8-15";
+  return normalized;
+}
+
+function workoutLoadingStyle(workout = {}) {
+  return normalizeLoadingStyle(workout.loadingStyle) === "high-rep" ? "high-rep" : "standard";
+}
+
 function normalizeExerciseDefinition(exercise) {
   const name = String(exercise?.name || "").trim();
   if (!name) return null;
@@ -984,15 +1047,18 @@ function normalizeExerciseDefinition(exercise) {
     .filter((muscle) => !primaryMuscles.includes(muscle));
   const id = String(exercise.id || `user-${normalizeName(name)}`).trim();
 
+  const loadingStyle = normalizeLoadingStyle(exercise.loadingStyle);
   const normalized = {
     id,
     name,
     primaryMuscles,
     secondaryMuscles,
     equipment: String(exercise.equipment || "custom").trim() || "custom",
-    reps: String(exercise.reps || "8-15").trim() || "8-15",
+    reps: repRangeForLoadingStyle(exercise.reps, loadingStyle),
     rest: String(exercise.rest || "60-120 sec").trim() || "60-120 sec",
     progressionMode: normalizeProgressionMode(exercise.progressionMode),
+    loadingStyle,
+    loadIncrement: normalizeLoadIncrement(exercise.loadIncrement),
     cue: String(exercise.cue || "Custom exercise. Keep form strict and progress gradually.").trim(),
     userCreated: true,
     createdAt: exercise.createdAt || new Date().toISOString(),
@@ -1062,8 +1128,16 @@ function resolveExerciseMeta(name, fallbackMuscle = "chest") {
     equipment: "custom",
     reps: "8-15",
     rest: "60-120 sec",
+    loadingStyle: "auto",
+    loadIncrement: 2.5,
+    progressionMode: "normal",
     cue: "Custom exercise. Keep form strict and progress gradually."
   };
+}
+
+function isActiveCoachExercise(exercise) {
+  const exerciseId = String(exercise?.id || "");
+  return Boolean(exerciseId && exerciseDatabase().some((candidate) => candidate.id === exerciseId));
 }
 
 function exerciseIdentity(exerciseOrName, fallbackMuscle = "chest") {
@@ -1074,7 +1148,10 @@ function exerciseIdentity(exerciseOrName, fallbackMuscle = "chest") {
       primaryMuscles: exerciseOrName.primaryMuscles || [],
       secondaryMuscles: exerciseOrName.secondaryMuscles || [],
       reps: exerciseOrName.reps || "8-15",
-      rest: exerciseOrName.rest || "60-120 sec"
+      rest: exerciseOrName.rest || "60-120 sec",
+      loadingStyle: normalizeLoadingStyle(exerciseOrName.loadingStyle),
+      loadIncrement: normalizeLoadIncrement(exerciseOrName.loadIncrement),
+      progressionMode: normalizeProgressionMode(exerciseOrName.progressionMode)
     };
   }
   const meta = resolveExerciseMeta(exerciseOrName, fallbackMuscle);
@@ -1084,7 +1161,10 @@ function exerciseIdentity(exerciseOrName, fallbackMuscle = "chest") {
     primaryMuscles: meta.primaryMuscles || [],
     secondaryMuscles: meta.secondaryMuscles || [],
     reps: meta.reps || "8-15",
-    rest: meta.rest || "60-120 sec"
+    rest: meta.rest || "60-120 sec",
+    loadingStyle: normalizeLoadingStyle(meta.loadingStyle),
+    loadIncrement: normalizeLoadIncrement(meta.loadIncrement),
+    progressionMode: normalizeProgressionMode(meta.progressionMode)
   };
 }
 
@@ -1163,8 +1243,11 @@ function workoutMeta(entry) {
       primaryMuscles: entry.primaryMuscles,
       secondaryMuscles: Array.isArray(entry.secondaryMuscles) ? entry.secondaryMuscles : [],
       equipment: entry.equipment || "custom",
-      reps: "8-15",
-      rest: "60-120 sec"
+      reps: entry.repRange || entry.reps || "8-15",
+      rest: entry.restRange || entry.rest || "60-120 sec",
+      loadingStyle: normalizeLoadingStyle(entry.loadingStyle),
+      loadIncrement: normalizeLoadIncrement(entry.loadIncrement),
+      progressionMode: normalizeProgressionMode(entry.progressionMode)
     };
   }
   return resolveExerciseMeta(entry.exercise, entry.targetMuscle);
@@ -1231,6 +1314,7 @@ function isCoachCopiedDraftUntouched(draft = {}) {
 }
 
 function clearCoachCopiedDraftMarkers(draft = {}) {
+  if (draft.source === "coach") draft.source = "coach-modified";
   delete draft.coachCopiedRows;
   delete draft.coachCopiedDirtyRows;
   delete draft.coachCopiedPlanId;
@@ -1242,6 +1326,7 @@ function markCoachCopiedRowDirty(draftId, index) {
   const rowIndex = Number(index);
   if (!Number.isFinite(rowIndex)) return;
   draft.coachCopiedDirtyRows = [...new Set([...(draft.coachCopiedDirtyRows || []), rowIndex])];
+  draft.source = "coach-modified";
 }
 
 function clampRirValue(value) {
@@ -1602,6 +1687,8 @@ function exerciseFormValuesFromInput(data = {}) {
     reps: String(formDataValue(data, "reps") || "").trim(),
     rest: String(formDataValue(data, "rest") || "").trim(),
     progressionMode: normalizeProgressionMode(formDataValue(data, "progressionMode")),
+    loadingStyle: normalizeLoadingStyle(formDataValue(data, "loadingStyle")),
+    loadIncrement: normalizeLoadIncrement(formDataValue(data, "loadIncrement")),
     cue: String(formDataValue(data, "cue") || "").trim()
   };
 }
@@ -1618,6 +1705,11 @@ function validateExerciseFormInput(data = {}, editingId = state.editingExerciseI
   if (duplicate) errors.name = "That custom exercise already exists.";
   const reps = normalizeRepRangeInput(values.reps);
   if (!reps) errors.reps = "Use a rep target like 10 or 8-15.";
+  if (reps && values.loadingStyle !== "auto" && repRangeForLoadingStyle(reps, values.loadingStyle) !== reps) {
+    errors.reps = values.loadingStyle === "high-rep"
+      ? "High-rep exercises need a range starting at 15 or higher, such as 20-30."
+      : "Standard exercises need a range starting below 15, such as 8-15.";
+  }
   const rest = normalizeRestRangeInput(values.rest);
   if (!rest) errors.rest = "Use rest like 60 sec, 90-120 sec, or 1:30.";
   const secondaryMuscles = uniqueMuscles(values.secondaryMuscles).filter((muscle) => muscle !== primaryMuscle);
@@ -1635,6 +1727,8 @@ function validateExerciseFormInput(data = {}, editingId = state.editingExerciseI
       reps,
       rest,
       progressionMode: normalizeProgressionMode(values.progressionMode),
+      loadingStyle: normalizeLoadingStyle(values.loadingStyle),
+      loadIncrement: normalizeLoadIncrement(values.loadIncrement),
       cue: values.cue || "Custom exercise. Keep form strict and progress gradually."
     }
   };
@@ -1642,6 +1736,20 @@ function validateExerciseFormInput(data = {}, editingId = state.editingExerciseI
 
 function exerciseHistoryEntries(exerciseName, newestFirst = true) {
   return exerciseHistoryForIdentity(exerciseName, state.workouts, newestFirst);
+}
+
+function exerciseLoadingStylePhase(exercise, workouts = state.workouts) {
+  const targetStyle = effectiveLoadingStyle(exercise);
+  const allHistory = exerciseHistoryForDefinition(exercise, workouts);
+  const transitionSource = allHistory[0] && workoutLoadingStyle(allHistory[0]) !== targetStyle ? allHistory[0] : null;
+  const history = [];
+  if (!transitionSource) {
+    for (const workout of allHistory) {
+      if (workoutLoadingStyle(workout) !== targetStyle) break;
+      history.push(workout);
+    }
+  }
+  return { targetStyle, history, transitionSource, allHistory };
 }
 
 function exerciseStats(exerciseName) {
@@ -1667,8 +1775,7 @@ function exerciseStats(exerciseName) {
   };
 }
 
-function progressiveOverloadIndicator(exerciseName) {
-  const entries = exerciseHistoryEntries(exerciseName);
+function progressiveOverloadIndicator(exerciseName, entries = exerciseHistoryEntries(exerciseName)) {
   if (entries.length < 2) return { symbol: "-", tone: "flat", label: "Need another session" };
   const latest = e1rm(entries[0]);
   const previous = e1rm(entries[1]);
@@ -1677,25 +1784,62 @@ function progressiveOverloadIndicator(exerciseName) {
   return { symbol: "=", tone: "flat", label: "e1RM steady" };
 }
 
+function convertSetRowToLoadingStyle(row, exercise, sourceStyle, targetStyle = effectiveLoadingStyle(exercise)) {
+  const source = normalizeSetRows([row])[0];
+  if (!source || sourceStyle === targetStyle || source.weight <= 0 || source.reps <= 0) return source;
+  const range = parseRepRange(exercise.reps);
+  const targetReps = Math.round((range.low + range.high) / 2);
+  const targetRir = 2;
+  const estimatedMaxReps = source.reps + Math.max(0, Number(source.rir) || 0);
+  const estimatedOneRepMax = source.weight * (1 + estimatedMaxReps / 30);
+  const estimatedLoad = estimatedOneRepMax / (1 + (targetReps + targetRir) / 30);
+  const increment = effectiveLoadIncrement(exercise, estimatedLoad);
+  const convertedWeight = Math.max(increment, Math.floor((estimatedLoad + Number.EPSILON) / increment) * increment);
+  return { ...source, weight: convertedWeight, reps: targetReps, rir: targetRir };
+}
+
 function progressionTargetForExercise(exerciseName) {
-  const latest = exerciseHistoryEntries(exerciseName)[0];
-  if (!latest) return null;
+  const meta = resolveExerciseMeta(exerciseName);
+  const phase = exerciseLoadingStylePhase(meta);
+  const loadingStyle = phase.targetStyle;
+  const history = phase.history;
+  const latest = history[0] || null;
+  if (!latest) {
+    const source = phase.transitionSource;
+    const sourceTop = source ? bestSet(source) : null;
+    const sourceStyle = source ? workoutLoadingStyle(source) : loadingStyle;
+    if (!sourceTop || sourceStyle === loadingStyle) return null;
+    const converted = convertSetRowToLoadingStyle(sourceTop, meta, sourceStyle, loadingStyle);
+    if (!converted) return null;
+    return {
+      exercise: exerciseName,
+      latest: source,
+      top: sourceTop,
+      indicator: { symbol: "=", tone: "flat", label: `${loadingStyleLabel(loadingStyle)} baseline` },
+      increaseLoad: false,
+      progressionMode: normalizeProgressionMode(meta.progressionMode),
+      styleConversion: true,
+      sourceLoadingStyle: sourceStyle,
+      targetLoadingStyle: loadingStyle,
+      target: `${fmtLoad(converted.weight)} lb x ${fmt(converted.reps)}`,
+      body: `Based on your latest ${loadingStyleLabel(sourceStyle).toLowerCase()} set, start the ${loadingStyleLabel(loadingStyle).toLowerCase()} track around ${fmtLoad(converted.weight)} lb x ${fmt(converted.reps)} at ${fmt(converted.rir)} RIR. Treat this as a first-session estimate, then Coach will use your submitted ${loadingStyleLabel(loadingStyle).toLowerCase()} history.`
+    };
+  }
   const top = bestSet(latest);
   if (!top) return null;
-  const meta = resolveExerciseMeta(exerciseName);
   const range = parseRepRange(meta.reps);
   const workingRows = setRowsFromWorkout(latest).filter((row) => row.weight > 0 && row.reps > 0);
   const estimatedCapacity = top.reps + Math.max(0, Number(top.rir) || 0);
   const backoffSetsHeldRange = workingRows.length > 0 && workingRows.every((row) => row.reps >= range.low);
   const increaseLoad = estimatedCapacity >= range.high && backoffSetsHeldRange;
   const nextRep = Math.min(range.high, top.reps + 1);
-  const loadStep = top.weight >= 50 ? 5 : 2.5;
-  const indicator = progressiveOverloadIndicator(exerciseName);
+  const loadStep = effectiveLoadIncrement(meta, top.weight);
+  const indicator = progressiveOverloadIndicator(exerciseName, history.filter((workout) => workoutLoadingStyle(workout) === loadingStyle));
   const progressionMode = normalizeProgressionMode(meta.progressionMode);
   const constrainedLoad = increaseLoad && progressionMode !== "normal";
   const target = increaseLoad && progressionMode === "normal"
-    ? `${fmt(top.weight + loadStep, 1)} lb x ${fmt(range.low)}-${fmt(Math.max(range.low, Math.min(range.high, top.reps - 2)))}`
-    : `${fmt(top.weight, 1)} lb x ${fmt(nextRep)}-${fmt(range.high)}`;
+    ? `${fmtLoad(top.weight + loadStep)} lb x ${fmt(range.low)}-${fmt(Math.max(range.low, Math.min(range.high, top.reps - 2)))}`
+    : `${fmtLoad(top.weight)} lb x ${fmt(nextRep)}-${fmt(range.high)}`;
   const modeCue = constrainedLoad
     ? progressionMode === "small-jumps"
       ? " Since this movement is marked small-jumps only, use the smallest practical load jump only if it is available; otherwise own the top reps first."
@@ -1709,7 +1853,7 @@ function progressionTargetForExercise(exerciseName) {
     increaseLoad: increaseLoad && progressionMode === "normal",
     progressionMode,
     target,
-    body: `Last time you hit ${fmt(top.weight, 1)} lb x ${fmt(top.reps)} on ${exerciseName}. I'm setting ${target} as the next target - keep ${HYPERTROPHY.idealRirMin}-${HYPERTROPHY.idealRirMax} clean reps in reserve.${modeCue}`
+    body: `Last time you hit ${fmtLoad(top.weight)} lb x ${fmt(top.reps)} on ${exerciseName}. I'm setting ${target} as the next target - keep ${HYPERTROPHY.idealRirMin}-${HYPERTROPHY.idealRirMax} clean reps in reserve.${loadingStyle === "high-rep" ? " This is a high-rep track, so rep quality comes before a load jump." : ""}${modeCue}`
   };
 }
 
@@ -2346,6 +2490,79 @@ function exerciseFormDraftFromForm(form = document.getElementById("exercise-form
   return hasInput ? values : null;
 }
 
+function readStrengthDraftsByDate() {
+  try {
+    const raw = safeLocalStorageGet(DATED_STRENGTH_DRAFTS_KEY);
+    if (!raw) return state.strengthDraftsByDate && typeof state.strengthDraftsByDate === "object" ? state.strengthDraftsByDate : {};
+    const stored = JSON.parse(raw);
+    return stored && typeof stored === "object" && !Array.isArray(stored) ? stored : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeStrengthDraftsByDate(drafts = state.strengthDraftsByDate) {
+  const next = drafts && typeof drafts === "object" ? drafts : {};
+  state.strengthDraftsByDate = next;
+  if (Object.keys(next).length) safeLocalStorageSet(DATED_STRENGTH_DRAFTS_KEY, JSON.stringify(next));
+  else safeLocalStorageRemove(DATED_STRENGTH_DRAFTS_KEY);
+}
+
+function normalizeRecoveredStrengthDraft(saved) {
+  if (!saved?.workoutDraft?.length) return null;
+  return {
+    date: saved.date || todayISO(),
+    selectedExercise: saved.selectedExercise || "",
+    draftTargetMuscle: saved.draftTargetMuscle || "chest",
+    workoutDraft: saved.workoutDraft.map((draft) => ({
+      ...draft,
+      draftId: draft.draftId || uid(),
+      setRows: normalizeSetRows(draft.setRows)
+    }))
+  };
+}
+
+function saveStrengthDraftForDate(date = state.draftDate) {
+  const key = date || todayISO();
+  const drafts = { ...readStrengthDraftsByDate() };
+  if (key === state.draftDate && hasMeaningfulStrengthDraft()) {
+    drafts[key] = {
+      date: key,
+      selectedExercise: state.selectedExercise,
+      draftTargetMuscle: state.draftTargetMuscle,
+      workoutDraft: clonePlain(state.workoutDraft)
+    };
+  } else if (key === state.draftDate) {
+    delete drafts[key];
+  }
+  writeStrengthDraftsByDate(drafts);
+  return drafts[key] || null;
+}
+
+function strengthDraftForDate(date = state.draftDate) {
+  return normalizeRecoveredStrengthDraft(readStrengthDraftsByDate()[date || todayISO()]);
+}
+
+function clearStrengthDraftForDate(date = state.draftDate) {
+  const key = date || todayISO();
+  const drafts = { ...readStrengthDraftsByDate() };
+  delete drafts[key];
+  writeStrengthDraftsByDate(drafts);
+}
+
+function applyRecoveredStrengthDraft(saved) {
+  const recovered = normalizeRecoveredStrengthDraft(saved);
+  if (!recovered) return false;
+  state.draftDate = recovered.date;
+  state.selectedExercise = recovered.selectedExercise;
+  state.draftTargetMuscle = recovered.draftTargetMuscle;
+  state.workoutDraft = recovered.workoutDraft;
+  state.editingWorkoutId = null;
+  state.loadedWorkoutDateIds = [];
+  syncLegacyDraftFromFirst();
+  return true;
+}
+
 function draftRecoveryPayload(reason = "draft") {
   return {
     version: APP_VERSION,
@@ -2365,7 +2582,9 @@ function draftRecoveryPayload(reason = "draft") {
 }
 
 function saveDraftRecovery(reason = "draft") {
+  saveStrengthDraftForDate(state.draftDate);
   const payload = draftRecoveryPayload(reason);
+  payload.strength = null;
   if (!payload.strength && !payload.metric && !payload.exercise) {
     safeLocalStorageRemove(DRAFT_RECOVERY_KEY);
     return false;
@@ -2379,17 +2598,11 @@ function clearDraftRecovery() {
 }
 
 function savedStrengthDraftRecovery() {
-  let recovery = null;
-  try {
-    recovery = JSON.parse(safeLocalStorageGet(DRAFT_RECOVERY_KEY) || "null");
-  } catch {
-    recovery = null;
-  }
-  if (!recovery?.strength?.workoutDraft?.length) return null;
-  return recovery.strength;
+  return strengthDraftForDate(state.draftDate || todayISO());
 }
 
 function clearDraftRecoveryScope(scope) {
+  if (scope === "strength") clearStrengthDraftForDate(state.draftDate);
   let recovery = null;
   try {
     recovery = JSON.parse(safeLocalStorageGet(DRAFT_RECOVERY_KEY) || "null");
@@ -2419,15 +2632,12 @@ function restoreDraftRecovery(payload = null) {
   }
   if (!recovery || typeof recovery !== "object") return false;
   if (recovery.strength?.workoutDraft?.length) {
-    state.draftDate = recovery.strength.date || todayISO();
-    state.selectedExercise = recovery.strength.selectedExercise || state.selectedExercise;
-    state.draftTargetMuscle = recovery.strength.draftTargetMuscle || state.draftTargetMuscle;
-    state.workoutDraft = recovery.strength.workoutDraft.map((draft) => ({
-      ...draft,
-      draftId: draft.draftId || uid(),
-      setRows: normalizeSetRows(draft.setRows)
-    }));
-    syncLegacyDraftFromFirst();
+    const legacy = normalizeRecoveredStrengthDraft(recovery.strength);
+    const drafts = { ...readStrengthDraftsByDate(), [legacy.date]: legacy };
+    writeStrengthDraftsByDate(drafts);
+    if (legacy.date === (state.draftDate || todayISO())) applyRecoveredStrengthDraft(legacy);
+    recovery.strength = null;
+    safeLocalStorageSet(DRAFT_RECOVERY_KEY, JSON.stringify(recovery));
   }
   if (recovery.metric?.data) {
     state.metricFormDraft = recovery.metric;
@@ -2448,7 +2658,12 @@ function loadMetricDateDraft(date = todayISO()) {
 
 function preserveVisibleDraft(reason = "navigation") {
   const active = state.activeTab;
-  if (active === "log" && state.logMode === "strength") readDraftFromForm();
+  if (active === "log" && state.logMode === "strength") {
+    const sourceDate = state.draftDate;
+    readDraftFromForm();
+    state.draftDate = sourceDate;
+    saveStrengthDraftForDate(sourceDate);
+  }
   if (active === "log" && state.logMode === "metrics") state.metricFormDraft = metricDraftFromForm();
   if (active === "exercises") state.exerciseFormDraft = exerciseFormDraftFromForm() || state.exerciseFormDraft;
   saveDraftRecovery(reason);
@@ -2479,6 +2694,11 @@ function coachPendingWorkoutEntries() {
       primaryMuscles: [...meta.primaryMuscles],
       secondaryMuscles: [...meta.secondaryMuscles],
       equipment: meta.equipment,
+      repRange: meta.reps,
+      restRange: meta.rest,
+      loadingStyle: effectiveLoadingStyle(meta),
+      loadIncrement: normalizeLoadIncrement(meta.loadIncrement),
+      progressionMode: normalizeProgressionMode(meta.progressionMode),
       setRows,
       sets: setRows.length,
       reps: best?.reps || 1,
@@ -2531,7 +2751,7 @@ function comparableRepDrop(current, previous) {
   }, 0);
 }
 
-function exerciseProgressEvidence(current, priorHistory = []) {
+function exerciseProgressEvidence(current, priorHistory = [], options = {}) {
   const rows = setRowsFromWorkout(current).filter((row) => row.weight > 0 && row.reps > 0);
   const priorRows = priorHistory.flatMap((workout) => setRowsFromWorkout(workout)).filter((row) => row.weight > 0 && row.reps > 0);
   const latestE1rm = e1rm(current);
@@ -2552,8 +2772,8 @@ function exerciseProgressEvidence(current, priorHistory = []) {
   const e1rmImproved = priorBestE1rm > 0 && latestE1rm > priorBestE1rm * 1.01;
   const topSetPr = priorTopSetScore > 0 && latestTopSet && latestTopSet.score > priorTopSetScore * 1.005;
   const reasons = [];
-  if (topSetPr) reasons.push("top set PR");
-  if (e1rmImproved) reasons.push("estimated 1RM improved");
+  if (topSetPr && options.loadingStyle !== "high-rep") reasons.push("top set PR");
+  if (e1rmImproved && options.loadingStyle !== "high-rep") reasons.push("estimated 1RM improved");
   if (repPrRows.length) reasons.push("rep PR at matched load");
   if (weightPrRows.length) reasons.push("new 8+ rep load PR");
   return {
@@ -2578,6 +2798,10 @@ function exerciseUnderperformed(current, previous, options = {}) {
   const missedRange = setRowsFromWorkout(current).some((row) => row.reps > 0 && row.reps < range.low);
   const broadRepRegression = repDrops >= 3;
   const failureRir = (averageRir(current) ?? HYPERTROPHY.idealRirMin) <= 0;
+  if (options.loadingStyle === "high-rep") {
+    if (options.progressEvidence?.progressed) return false;
+    return missedRange || (broadRepRegression && failureRir);
+  }
   if (options.progressEvidence?.progressed) {
     return failureRir && broadRepRegression && e1rmDrop;
   }
@@ -2629,7 +2853,9 @@ function coachPerformanceMessage(exercise, status, detail = "") {
 }
 
 function coachExercisePerformanceSignal(exercise, workouts = coachWorkoutEntries()) {
-  const history = exerciseHistoryForDefinition(exercise, workouts);
+  const phase = exerciseLoadingStylePhase(exercise, workouts);
+  const loadingStyle = phase.targetStyle;
+  const history = phase.history;
   if (history.length < 2) {
     return {
       status: "neutral",
@@ -2637,12 +2863,13 @@ function coachExercisePerformanceSignal(exercise, workouts = coachWorkoutEntries
       history,
       latest: history[0] || null,
       previous: null,
+      transitionSource: phase.transitionSource,
       message: ""
     };
   }
   const latest = history[0];
   const previous = history[1];
-  const latestProgress = exerciseProgressEvidence(latest, history.slice(1));
+  const latestProgress = exerciseProgressEvidence(latest, history.slice(1), { loadingStyle });
   if (latestProgress.progressed) {
     return {
       status: "progressing",
@@ -2654,10 +2881,10 @@ function coachExercisePerformanceSignal(exercise, workouts = coachWorkoutEntries
       message: coachPerformanceMessage(exercise, "progressing", latestProgress.reasons.join(", "))
     };
   }
-  const performanceOptions = { progressEvidence: latestProgress, repRange: exercise.reps };
+  const performanceOptions = { progressEvidence: latestProgress, repRange: exercise.reps, loadingStyle };
   const latestUnder = exerciseUnderperformed(latest, previous, performanceOptions);
-  const previousProgress = history.length >= 3 ? exerciseProgressEvidence(previous, history.slice(2)) : null;
-  const previousUnder = history.length >= 3 && exerciseUnderperformed(previous, history[2], { progressEvidence: previousProgress, repRange: exercise.reps });
+  const previousProgress = history.length >= 3 ? exerciseProgressEvidence(previous, history.slice(2), { loadingStyle }) : null;
+  const previousUnder = history.length >= 3 && exerciseUnderperformed(previous, history[2], { progressEvidence: previousProgress, repRange: exercise.reps, loadingStyle });
   if (latestUnder && previousUnder) {
     return {
       status: "repeated-failure",
@@ -2682,7 +2909,7 @@ function coachExercisePerformanceSignal(exercise, workouts = coachWorkoutEntries
   }
   const latestE1rm = e1rm(latest);
   const previousE1rm = e1rm(previous);
-  if (latestE1rm > previousE1rm * 1.01) {
+  if (loadingStyle !== "high-rep" && latestE1rm > previousE1rm * 1.01) {
     return {
       status: "progressing",
       tone: "good",
@@ -2694,7 +2921,7 @@ function coachExercisePerformanceSignal(exercise, workouts = coachWorkoutEntries
     };
   }
   const repDrops = comparableRepDrop(latest, previous);
-  if (repDrops > 0 || (previousE1rm > 0 && latestE1rm < previousE1rm)) {
+  if (repDrops > 0 || (loadingStyle !== "high-rep" && previousE1rm > 0 && latestE1rm < previousE1rm)) {
     return {
       status: "minor-dip",
       tone: "",
@@ -2727,9 +2954,9 @@ function coachExercisePerformanceSignal(exercise, workouts = coachWorkoutEntries
   };
 }
 
-function roundLoadTarget(weight) {
+function roundLoadTarget(weight, exercise = null) {
   if (!Number.isFinite(weight) || weight <= 0) return 0;
-  const step = weight >= 50 ? 5 : 2.5;
+  const step = effectiveLoadIncrement(exercise || {}, weight);
   return Math.max(step, Math.round(weight / step) * step);
 }
 
@@ -2747,7 +2974,7 @@ function coachPlanTargetForExercise(exercise, signal = coachExercisePerformanceS
     };
   }
   if (signal.status === "repeated-failure") {
-    const targetWeight = roundLoadTarget(top.weight * 0.9);
+    const targetWeight = roundLoadTarget(top.weight * 0.9, exercise);
     return {
       kind: "deload",
       label: `Deload target ${fmt(targetWeight, 1)} lb`,
@@ -2759,7 +2986,7 @@ function coachPlanTargetForExercise(exercise, signal = coachExercisePerformanceS
     };
   }
   if (signal.status === "isolated-failure") {
-    const targetWeight = roundLoadTarget(top.weight * 0.95);
+    const targetWeight = roundLoadTarget(top.weight * 0.95, exercise);
     return {
       kind: "reset",
       label: `Reset target ${fmt(targetWeight, 1)} lb`,
@@ -2773,7 +3000,7 @@ function coachPlanTargetForExercise(exercise, signal = coachExercisePerformanceS
   const progression = progressionTargetForExercise(exercise.name);
   if (progression) {
     return {
-      kind: "progression",
+      kind: progression.styleConversion ? "style-conversion" : "progression",
       label: `Target ${progression.target}`,
       detail: `${HYPERTROPHY.idealRirMin}-${HYPERTROPHY.idealRirMax} RIR`,
       tone: progression.indicator.tone,
@@ -2812,17 +3039,19 @@ function logLoadDirectionForExercise(exercise, options = {}) {
       message: signal.message || `${exercise.name} dipped last session; reduce load and rebuild with controlled reps.`
     };
   }
+  const progression = progressionTargetForExercise(exercise.name);
+  const hasHistory = Boolean(signal.latest || signal.transitionSource || progression?.latest);
   return {
     direction: "neutral",
-    symbol: "",
+    symbol: hasHistory ? "\u2192" : "",
     label: "Coach recommends holding workload",
-    message: signal.message || ""
+    message: signal.message || progression?.body || "Coach does not have enough comparable evidence to call this progression or regression yet."
   };
 }
 
 function logLoadDirectionIndicator(exercise, draft = {}) {
   const direction = logLoadDirectionForExercise(exercise, { excludeId: draft.editingWorkoutId });
-  if (direction.direction === "neutral") return "";
+  if (!direction.symbol) return "";
   return `
     <button class="load-direction-indicator ${direction.direction}" type="button" data-action="show-load-direction" data-message="${escapeHtml(direction.message)}" aria-label="${escapeHtml(direction.label)}" title="${escapeHtml(direction.message || direction.label)}">
       ${escapeHtml(direction.symbol)}
@@ -2914,7 +3143,7 @@ function scoreExerciseForMuscle(exercise, muscleId, options = {}) {
   const history = memory.history;
   const last = history[0] || null;
   const daysSince = memory.daysSince;
-  const usageScore = Math.min(12, history.length * 2);
+  const familiarityScore = history.length ? 2 : 0;
   const recencyPenalty = daysSince === null ? 0 : Math.max(0, 12 - daysSince);
   const weeklyUsePenalty = Math.max(0, memory.weeklyUses - 1) * 9;
   const customScore = exercise.userCreated ? 3 : 0;
@@ -2934,32 +3163,44 @@ function scoreExerciseForMuscle(exercise, muscleId, options = {}) {
     if (recentE1rm > priorE1rm) progressionScore = 3;
     else if (recentE1rm === priorE1rm && prior3.length) progressionScore = 1;
   }
-  return usageScore + customScore + selectedScore + specificityScore + targetScore + effortScore + progressionScore - recencyPenalty - weeklyUsePenalty - performancePenalty;
+  return familiarityScore + customScore + selectedScore + specificityScore + targetScore + effortScore + progressionScore - recencyPenalty - weeklyUsePenalty - performancePenalty;
 }
 
-function chooseExerciseForMuscle(muscleId, usedExerciseIds = new Set(), options = {}) {
+function coachExerciseCandidates(muscleId, usedExerciseIds = new Set(), options = {}) {
   const workouts = options.workouts || coachWorkoutEntries();
   const candidates = exerciseDatabase()
     .filter((exercise) => exercise.primaryMuscles.includes(muscleId) && !usedExerciseIds.has(exercise.id));
-  if (!candidates.length) return null;
-  const scored = candidates
+  if (!candidates.length) return [];
+  const memories = candidates.map((exercise) => coachExerciseMemory(exercise, workouts));
+  const maxWeeklyUses = Math.max(0, ...memories.map((memory) => memory.weeklyUses));
+  const maxLifetimeUses = Math.max(0, ...memories.map((memory) => memory.history.length));
+  return candidates
     .map((exercise) => {
-      const memory = coachExerciseMemory(exercise, workouts);
+      const memory = memories.find((item) => item.exercise.id === exercise.id);
       const signal = coachExercisePerformanceSignal(exercise, workouts);
+      const weeklyFairnessBonus = Math.max(0, maxWeeklyUses - memory.weeklyUses) * 6;
+      const lifetimeFairnessBonus = Math.min(6, Math.max(0, maxLifetimeUses - memory.history.length));
+      const baseScore = scoreExerciseForMuscle(exercise, muscleId, { workouts });
       return {
         exercise,
         memory,
         signal,
-        score: scoreExerciseForMuscle(exercise, muscleId, { workouts })
+        baseScore,
+        weeklyFairnessBonus,
+        lifetimeFairnessBonus,
+        score: baseScore + weeklyFairnessBonus + lifetimeFairnessBonus,
+        eligible: !(signal.status === "repeated-failure" && memory.daysSince !== null && memory.daysSince < COACH_FAILURE_ROTATION_DAYS)
+          && !memory.recentlyUsed
+          && !memory.usedThisWeekTooOften
       };
     })
     .sort((a, b) => b.score - a.score);
-  const alternatives = scored.filter((item) => {
-    const repeatedFailure = item.signal.status === "repeated-failure" && item.memory.daysSince !== null && item.memory.daysSince < COACH_FAILURE_ROTATION_DAYS;
-    const tooRecent = item.memory.recentlyUsed;
-    const overWeeklyCap = item.memory.usedThisWeekTooOften;
-    return !repeatedFailure && !tooRecent && !overWeeklyCap;
-  });
+}
+
+function chooseExerciseForMuscle(muscleId, usedExerciseIds = new Set(), options = {}) {
+  const scored = coachExerciseCandidates(muscleId, usedExerciseIds, options);
+  if (!scored.length) return null;
+  const alternatives = scored.filter((item) => item.eligible);
   return (alternatives[0] || scored[0]).exercise;
 }
 
@@ -3228,7 +3469,7 @@ function coachTimeframeSelectionLabel(minutes = selectedCoachTimeframeMinutes())
 
 function sessionPlanCaps(limitMinutes, restart = false) {
   const limit = Math.min(75, Math.max(30, Number(limitMinutes) || SESSION_LIMIT_MINUTES));
-  const maxItems = limit <= 30 ? 4 : limit <= 40 ? 5 : limit <= 50 ? 6 : limit <= 60 ? 8 : 10;
+  const maxItems = Math.min(COACH_MAX_EXERCISES_PER_SESSION, limit <= 30 ? 4 : limit <= 40 ? 5 : 6);
   if (restart) {
     return {
       maxItems,
@@ -3328,6 +3569,57 @@ function targetReserveSetCount(target, growthMode, limitMinutes = selectedCoachT
   const timed = limitMinutes <= 40 ? Math.min(base, 2) : limitMinutes >= 75 && mode === "aggressive" ? 5 : base;
   const highVolumeRoom = Math.max(0, Math.floor(HYPERTROPHY.highVolumeFillMax - target.sets));
   return Math.min(timed, highVolumeRoom);
+}
+
+function coachExerciseStimulusCredits(exercise, sets = 1) {
+  const count = Number(sets) || 0;
+  const credits = {};
+  uniqueMuscles(exercise?.primaryMuscles || []).forEach((muscleId) => {
+    credits[muscleId] = (credits[muscleId] || 0) + count;
+  });
+  uniqueMuscles(exercise?.secondaryMuscles || [])
+    .filter((muscleId) => !uniqueMuscles(exercise?.primaryMuscles || []).includes(muscleId))
+    .forEach((muscleId) => {
+      credits[muscleId] = (credits[muscleId] || 0) + count * 0.5;
+    });
+  return credits;
+}
+
+function applyCoachStimulusCredits(projected, exercise, sets = 1) {
+  Object.entries(coachExerciseStimulusCredits(exercise, sets)).forEach(([muscleId, credit]) => {
+    projected[muscleId] = Math.max(0, (Number(projected[muscleId]) || 0) + credit);
+  });
+}
+
+function reconcileCoachSecondaryStimulus(sessions, projected, targets) {
+  const plannedSessions = Array.isArray(sessions) ? sessions : [];
+  muscleGroups.forEach((muscle) => {
+    const target = Math.max(HYPERTROPHY.minimumSets, Number(targets?.[muscle.id]) || HYPERTROPHY.minimumSets);
+    while ((projected[muscle.id] || 0) - target >= 1) {
+      const candidates = plannedSessions.flatMap((session) => session.items.map((item) => ({ session, item })))
+        .filter(({ item }) => item.muscle.id === muscle.id && item.sets > 0)
+        .sort((a, b) => (
+          a.item.exercise.secondaryMuscles.length - b.item.exercise.secondaryMuscles.length
+          || b.item.sets - a.item.sets
+        ));
+      const candidate = candidates.find(({ item }) => {
+        const credits = coachExerciseStimulusCredits(item.exercise, 1);
+        return Object.entries(credits).every(([muscleId, credit]) => (
+          muscleId === muscle.id || (projected[muscleId] || 0) - credit >= (Number(targets?.[muscleId]) || HYPERTROPHY.minimumSets)
+        ));
+      });
+      if (!candidate) break;
+      candidate.item.sets -= 1;
+      applyCoachStimulusCredits(projected, candidate.item.exercise, -1);
+      if (candidate.item.sets > 0) {
+        candidate.item.minutes = plannedExerciseMinutes(candidate.item);
+      } else {
+        candidate.session.items.splice(candidate.session.items.indexOf(candidate.item), 1);
+      }
+      candidate.session.totalMinutes = candidate.session.items.reduce((sum, item) => sum + item.minutes, 0);
+    }
+  });
+  return projected;
 }
 
 function mediumComparisonGrowthModes(growthModes = {}) {
@@ -3462,7 +3754,7 @@ function buildSessionPlan(limitMinutes = SESSION_LIMIT_MINUTES, options = {}) {
       .filter((exercise) => exercise.primaryMuscles.includes(target.id) && !usedExercises.has(exercise.id))
       .map((exercise) => ({ exercise, signal: coachExercisePerformanceSignal(exercise, coachWorkouts) }));
     const exercise = chooseExerciseForMuscle(target.id, usedExercises, { workouts: coachWorkouts });
-    if (!exercise) {
+    if (!exercise || !isActiveCoachExercise(exercise)) {
       if (trackMissing && !missingIds.has(target.id)) {
         missing.push(target);
         missingIds.add(target.id);
@@ -3778,6 +4070,19 @@ function buildSessionPlan(limitMinutes = SESSION_LIMIT_MINUTES, options = {}) {
     addSetsToExisting({ allowHighVolume: !restart });
   }
 
+  const projected = Object.fromEntries(allStats.map((stat) => [stat.id, stat.sets]));
+  items.forEach((item) => applyCoachStimulusCredits(projected, item.exercise, item.sets));
+  const session = { items, totalMinutes };
+  const targets = Object.fromEntries(allStats.map((target) => [
+    target.id,
+    planSetCeilingForTarget(target, allowsHighVolumeTarget(target), growthModeFor(target.id))
+  ]));
+  items.filter((item) => item.phase === "target-extra").forEach((item) => {
+    targets[item.muscle.id] = Math.max(targets[item.muscle.id], item.muscle.sets + item.sets);
+  });
+  reconcileCoachSecondaryStimulus([session], projected, targets);
+  totalMinutes = session.totalMinutes;
+
   let shortfallReason = sessionShortfallReason({ totalMinutes, cappedLimit, targetFloor, allStats, items, missing });
   if (conservativeSoftPlan && totalMinutes < targetFloor) {
     shortfallReason = `Estimated ${totalMinutes}/${cappedLimit} min because Soft keeps volume conservative while weekly floor gaps are spread across multiple muscles.`;
@@ -3979,6 +4284,353 @@ function coachBriefingSummary(plan) {
 
 function attachCoachBriefing(plan) {
   return { ...plan, briefing: coachBriefingSummary(plan) };
+}
+
+function normalizeCoachWeeklyPlan(value = {}) {
+  const validMuscles = new Set(muscleGroups.map((muscle) => muscle.id));
+  const days = Array.isArray(value.days)
+    ? [...new Set(value.days.map(Number).filter((day) => COACH_WEEKDAY_OPTIONS.some((option) => option.day === day)))]
+    : [1, 3, 5, 6];
+  const priorities = Array.isArray(value.priorities)
+    ? value.priorities.filter((id, index, items) => validMuscles.has(id) && items.indexOf(id) === index)
+    : [];
+  const targets = Object.fromEntries(muscleGroups.map((muscle) => {
+    const requested = Number(value.targets?.[muscle.id]);
+    const fallback = priorities.includes(muscle.id) ? 20 : HYPERTROPHY.minimumSets;
+    return [muscle.id, Math.min(30, Math.max(HYPERTROPHY.minimumSets, Number.isFinite(requested) ? requested : fallback))];
+  }));
+  return {
+    days: days.length ? days : [1, 3, 5],
+    averageMinutes: Math.min(75, Math.max(30, Number(value.averageMinutes) || 60)),
+    priorities,
+    targets,
+    generatedAt: String(value.generatedAt || ""),
+    sourceFingerprint: String(value.sourceFingerprint || ""),
+    generatedPlan: value.generatedPlan && typeof value.generatedPlan === "object" ? clonePlain(value.generatedPlan) : null
+  };
+}
+
+function selectedCoachWeeklyPlan() {
+  return normalizeCoachWeeklyPlan(state.settings.coachWeeklyPlan || {});
+}
+
+function coachWeeklySourceFingerprint(setupInput = selectedCoachWeeklyPlan()) {
+  const setup = normalizeCoachWeeklyPlan(setupInput);
+  const source = JSON.stringify(canonicalSyncValue({
+    setup: {
+      days: setup.days,
+      averageMinutes: setup.averageMinutes,
+      priorities: setup.priorities,
+      targets: setup.targets
+    },
+    workouts: coachWeeklyWorkouts().map((workout) => ({
+      id: workout.id,
+      date: workout.date,
+      exerciseId: workout.exerciseId || "",
+      exercise: workout.exercise || "",
+      loadingStyle: workout.loadingStyle || "",
+      primaryMuscles: workoutMeta(workout).primaryMuscles,
+      secondaryMuscles: workoutMeta(workout).secondaryMuscles,
+      setRows: setRowsFromWorkout(workout).map((row) => ({ weight: row.weight, reps: row.reps, rir: row.rir, restSeconds: row.restSeconds })),
+      updatedAt: workout.updatedAt || workout.createdAt || ""
+    })),
+    exercises: getCustomExercises({ includeArchived: true }).map((exercise) => ({
+      id: exercise.id,
+      archivedAt: exercise.archivedAt || "",
+      primaryMuscles: exercise.primaryMuscles,
+      secondaryMuscles: exercise.secondaryMuscles,
+      loadingStyle: effectiveLoadingStyle(exercise),
+      reps: exercise.reps,
+      rest: exercise.rest,
+      progressionMode: exercise.progressionMode,
+      loadIncrement: exercise.loadIncrement
+    })),
+    hiddenExercises: getHiddenExercises()
+  }));
+  let hash = 2166136261;
+  for (let index = 0; index < source.length; index += 1) {
+    hash ^= source.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(36);
+}
+
+function coachWeeklyPlanFromForm(form) {
+  const data = new FormData(form);
+  return normalizeCoachWeeklyPlan({
+    days: data.getAll("days").map(Number),
+    averageMinutes: Number(data.get("averageMinutes")),
+    priorities: data.getAll("priorities").map(String),
+    targets: Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, Number(data.get(`target-${muscle.id}`))])),
+    generatedAt: state.settings.coachWeeklyPlan?.generatedAt || ""
+  });
+}
+
+function coachWeekDate(day, weekStart = currentTrainingWeekStart()) {
+  const date = new Date(weekStart);
+  date.setDate(date.getDate() + (Number(day) === 0 ? 6 : Number(day) - 1));
+  return isoFromLocalDate(date);
+}
+
+function latestDirectMuscleDate(muscleId, workouts = state.workouts) {
+  return workoutsNewestFirst(workouts).find((workout) => workoutMeta(workout).primaryMuscles.includes(muscleId))?.date || "";
+}
+
+function coachWeeklyCapacity(setup, plannedDates) {
+  const totalMinutes = setup.averageMinutes * plannedDates.length;
+  const estimatedSetCapacity = plannedDates.length * Math.max(6, Math.floor((setup.averageMinutes - 4) / 2.2));
+  return { totalMinutes, estimatedSetCapacity };
+}
+
+function coachWeeklyAttainment(setup, projected = {}) {
+  const results = muscleGroups.map((muscle) => {
+    const planned = Number(projected[muscle.id] || 0);
+    const target = Number(setup.targets[muscle.id] || HYPERTROPHY.minimumSets);
+    return {
+      id: muscle.id,
+      label: muscle.label,
+      planned,
+      target,
+      floorMet: planned >= HYPERTROPHY.minimumSets,
+      targetMet: planned >= target,
+      priority: setup.priorities.includes(muscle.id)
+    };
+  });
+  return {
+    results,
+    floorMet: results.filter((item) => item.floorMet).length,
+    targetMet: results.filter((item) => item.targetMet).length,
+    priorityMet: results.filter((item) => item.priority && item.targetMet).length,
+    priorityTotal: results.filter((item) => item.priority).length,
+    unmet: results.filter((item) => !item.targetMet),
+    floorUnmet: results.filter((item) => !item.floorMet),
+    priorityUnmet: results.filter((item) => item.priority && !item.targetMet)
+  };
+}
+
+function buildCoachWeeklyPlan(setupInput = selectedCoachWeeklyPlan()) {
+  const setup = normalizeCoachWeeklyPlan(setupInput);
+  const weekStart = currentTrainingWeekStart();
+  const selectedDates = setup.days
+    .map((day) => ({ day, date: coachWeekDate(day, weekStart), option: COACH_WEEKDAY_OPTIONS.find((option) => option.day === day) }))
+    .sort((a, b) => a.date.localeCompare(b.date));
+  const submittedByDate = new Map(selectedDates.map(({ date }) => [date, workoutsForDate(date)]));
+  const futureDates = selectedDates.filter(({ date }) => date >= todayISO() && !(submittedByDate.get(date) || []).length);
+  const actualStats = muscleSetStats(coachWeeklyWorkouts());
+  const projected = Object.fromEntries(actualStats.map((stat) => [stat.id, stat.sets]));
+  const lastDirect = Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, latestDirectMuscleDate(muscle.id)]));
+  const plannedDirectDates = Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, []]));
+  const plannedExerciseUses = new Map();
+  const sessions = selectedDates.map((selected) => {
+    const submitted = submittedByDate.get(selected.date) || [];
+    if (submitted.length || selected.date < todayISO()) {
+      return { ...selected, status: submitted.length ? "completed" : "past", items: [], submitted, totalMinutes: 0 };
+    }
+    return { ...selected, status: "planned", items: [], submitted: [], totalMinutes: 0, usedExercises: new Set() };
+  });
+  const plannedSessions = sessions.filter((session) => session.status === "planned");
+
+  const recoveryClearForDate = (muscleId, date) => {
+    const actualClear = !lastDirect[muscleId] || daysBetween(lastDirect[muscleId], date) >= 2;
+    const plannedClear = plannedDirectDates[muscleId].every((plannedDate) => Math.abs(daysBetween(plannedDate, date)) >= 2);
+    return actualClear && plannedClear;
+  };
+
+  const candidateForPhase = (muscle, phase) => {
+    const current = Number(projected[muscle.id] || 0);
+    const target = Number(setup.targets[muscle.id] || HYPERTROPHY.minimumSets);
+    const gap = Math.max(0, target - current);
+    const floorGap = Math.max(0, HYPERTROPHY.minimumSets - current);
+    const priority = setup.priorities.includes(muscle.id);
+    const phaseEligible = phase === "floor"
+      ? floorGap > 0
+      : phase === "priority"
+        ? priority && floorGap <= 0 && gap > 0
+        : !priority && floorGap <= 0 && gap > 0;
+    return { ...muscle, current, target, gap, floorGap, priority, phaseEligible };
+  };
+
+  const addWeeklyPhaseItem = (session, phase) => {
+    if (session.items.length >= COACH_MAX_EXERCISES_PER_SESSION) return false;
+    const candidates = muscleGroups
+      .map((muscle) => candidateForPhase(muscle, phase))
+      .filter((muscle) => (
+        muscle.phaseEligible
+        && recoveryClearForDate(muscle.id, session.date)
+        && hasPrimaryExerciseForMuscle(muscle.id)
+      ))
+      .sort((a, b) => (
+        (phase === "floor" ? Number(b.priority) - Number(a.priority) : 0)
+        || (phase === "floor" ? b.floorGap - a.floorGap : b.gap - a.gap)
+        || a.current - b.current
+      ));
+    const muscle = candidates.find((candidate) => session.items.at(-1)?.muscle.id !== candidate.id) || candidates[0];
+    if (!muscle) return false;
+    const exerciseCandidates = coachExerciseCandidates(muscle.id, session.usedExercises)
+      .sort((a, b) => (plannedExerciseUses.get(a.exercise.id) || 0) - (plannedExerciseUses.get(b.exercise.id) || 0) || b.score - a.score);
+    const chosen = exerciseCandidates.find((candidate) => candidate.eligible) || exerciseCandidates[0];
+    if (!chosen || !isActiveCoachExercise(chosen.exercise)) return false;
+    let sets = Math.max(1, Math.min(4, Math.ceil(phase === "floor" ? muscle.floorGap : muscle.gap)));
+    let minutes = estimateExerciseMinutes(chosen.exercise, sets);
+    while (sets > 1 && session.totalMinutes + minutes > setup.averageMinutes + COACH_TIME_TOLERANCE_MINUTES) {
+      sets -= 1;
+      minutes = estimateExerciseMinutes(chosen.exercise, sets);
+    }
+    if (session.totalMinutes + minutes > setup.averageMinutes + COACH_TIME_TOLERANCE_MINUTES) return false;
+    const performanceSignal = coachExercisePerformanceSignal(chosen.exercise);
+    const growthMode = muscle.target > HYPERTROPHY.growthHigh ? "aggressive" : muscle.target > HYPERTROPHY.growthLow ? "medium" : "soft";
+    session.items.push({
+      muscle,
+      exercise: chosen.exercise,
+      sets,
+      minutes,
+      phase,
+      growthMode,
+      performanceSignal,
+      planTarget: coachPlanTargetForExercise(chosen.exercise, performanceSignal),
+      reason: phase === "floor"
+        ? `${muscle.label} has ${fmt(muscle.floorGap, 1)} sets left to reach the weekly floor.`
+        : phase === "priority"
+          ? `${muscle.label} is a selected priority with ${fmt(muscle.gap, 1)} sets left toward ${fmt(muscle.target)}.`
+          : `${muscle.label} receives remaining capacity after weekly floors and selected priorities.`
+    });
+    session.usedExercises.add(chosen.exercise.id);
+    plannedExerciseUses.set(chosen.exercise.id, (plannedExerciseUses.get(chosen.exercise.id) || 0) + 1);
+    applyCoachStimulusCredits(projected, chosen.exercise, sets);
+    chosen.exercise.primaryMuscles.forEach((id) => plannedDirectDates[id].push(session.date));
+    session.totalMinutes += minutes;
+    return true;
+  };
+
+  ["floor", "priority", "optional"].forEach((phase) => {
+    let changed = true;
+    while (changed) {
+      changed = false;
+      plannedSessions.forEach((session) => {
+        if (addWeeklyPhaseItem(session, phase)) changed = true;
+      });
+    }
+  });
+  plannedSessions.forEach((session) => {
+    session.items = orderCoachSessionItems(session.items);
+    delete session.usedExercises;
+  });
+
+  reconcileCoachSecondaryStimulus(sessions, projected, setup.targets);
+
+  const capacity = coachWeeklyCapacity(setup, futureDates);
+  const remainingSets = muscleGroups.reduce((sum, muscle) => sum + Math.max(0, setup.targets[muscle.id] - (actualStats.find((stat) => stat.id === muscle.id)?.sets || 0)), 0);
+  const missing = muscleGroups.filter((muscle) => setup.targets[muscle.id] > (projected[muscle.id] || 0) && !hasPrimaryExerciseForMuscle(muscle.id));
+  const attainment = coachWeeklyAttainment(setup, projected);
+  const priorityShortfalls = attainment.priorityUnmet.map((item) => {
+    const exercise = exerciseDatabase().find((candidate) => candidate.primaryMuscles.includes(item.id));
+    const eligibleDates = plannedSessions.filter((session) => recoveryClearForDate(item.id, session.date));
+    let limitation = "selected timeframe";
+    if (!exercise) limitation = "missing active exercise coverage";
+    else if (!eligibleDates.length) limitation = "recovery spacing";
+    else if (eligibleDates.every((session) => session.items.length >= COACH_MAX_EXERCISES_PER_SESSION)) limitation = "six-exercise session limit";
+    return { ...item, limitation };
+  });
+  const capacityFits = attainment.unmet.length === 0 && !missing.length;
+  const unmetSummary = attainment.unmet.slice(0, 4).map((item) => `${item.label} ${fmt(item.planned, 1)}/${fmt(item.target)}`).join(", ");
+  const unmetRemainder = Math.max(0, attainment.unmet.length - 4);
+  const attainmentSummary = `Floors planned: ${attainment.floorMet}/${muscleGroups.length}. Defined targets planned: ${attainment.targetMet}/${muscleGroups.length}.${attainment.priorityTotal ? ` Priority targets planned: ${attainment.priorityMet}/${attainment.priorityTotal}.` : ""}`;
+  return {
+    setup,
+    sessions,
+    actualStats,
+    projected,
+    missing,
+    attainment,
+    capacity: {
+      ...capacity,
+      requestedSets: remainingSets,
+      fits: capacityFits,
+      message: missing.length
+        ? `${attainmentSummary} Add primary exercises for ${missing.map((muscle) => muscle.label).join(", ")} before Coach can distribute those targets.`
+        : capacityFits
+        ? `${attainmentSummary} Coach can schedule every weekly floor and defined target across the remaining selected days.`
+        : `${attainmentSummary} Still short: ${unmetSummary}${unmetRemainder ? `, and ${unmetRemainder} more` : ""}.${priorityShortfalls.length ? ` Priority limits: ${priorityShortfalls.map((item) => `${item.label} - ${item.limitation}`).join("; ")}.` : ""} ${remainingSets > capacity.estimatedSetCapacity ? "The selected days do not provide enough estimated set capacity." : "The remaining day spacing, recovery rules, timeframe, or six-exercise limit prevent Coach from safely assigning every requested set."}`
+    }
+  };
+}
+
+function compactCoachWeeklyPlanSnapshot(plan) {
+  return {
+    sessions: plan.sessions.map((session) => ({
+      day: session.day,
+      date: session.date,
+      status: session.status,
+      totalMinutes: session.totalMinutes,
+      items: session.items.map((item) => ({
+        muscleId: item.muscle.id,
+        exerciseId: item.exercise.id,
+        sets: item.sets,
+        minutes: item.minutes,
+        phase: item.phase,
+        growthMode: item.growthMode,
+        planTarget: clonePlain(item.planTarget || null),
+        reason: item.reason || ""
+      }))
+    })),
+    actualSets: Object.fromEntries(plan.actualStats.map((stat) => [stat.id, stat.sets])),
+    projected: clonePlain(plan.projected),
+    missingIds: plan.missing.map((muscle) => muscle.id),
+    capacity: clonePlain(plan.capacity),
+    attainment: clonePlain(plan.attainment)
+  };
+}
+
+function displayedCoachWeeklyPlan(setupInput = selectedCoachWeeklyPlan()) {
+  const setup = normalizeCoachWeeklyPlan(setupInput);
+  const snapshot = setup.generatedPlan;
+  if (!snapshot?.sessions?.length) return { ...buildCoachWeeklyPlan(setup), stale: false };
+
+  const activeExercises = new Map(exerciseDatabase().map((exercise) => [exercise.id, exercise]));
+  let invalidExercise = false;
+  const sessions = snapshot.sessions.map((saved) => {
+    const submitted = workoutsForDate(saved.date);
+    const items = submitted.length ? [] : (saved.items || []).map((savedItem) => {
+      const exercise = activeExercises.get(savedItem.exerciseId);
+      const muscle = muscleGroups.find((candidate) => candidate.id === savedItem.muscleId);
+      if (!exercise || !muscle) {
+        invalidExercise = true;
+        return null;
+      }
+      return {
+        muscle,
+        exercise,
+        sets: Math.max(1, Number(savedItem.sets) || 1),
+        minutes: Math.max(0, Number(savedItem.minutes) || 0),
+        phase: savedItem.phase || "weekly-target",
+        growthMode: savedItem.growthMode || "medium",
+        performanceSignal: coachExercisePerformanceSignal(exercise),
+        planTarget: clonePlain(savedItem.planTarget || coachPlanTargetForExercise(exercise)),
+        reason: savedItem.reason || ""
+      };
+    }).filter(Boolean);
+    const status = submitted.length ? "completed" : saved.date < todayISO() ? "past" : saved.status;
+    return {
+      day: saved.day,
+      date: saved.date,
+      option: COACH_WEEKDAY_OPTIONS.find((option) => option.day === Number(saved.day)),
+      status,
+      items,
+      submitted,
+      totalMinutes: items.reduce((sum, item) => sum + item.minutes, 0)
+    };
+  });
+  const currentFingerprint = coachWeeklySourceFingerprint(setup);
+  return {
+    setup,
+    sessions,
+    actualStats: muscleGroups.map((muscle) => ({ ...muscle, sets: Number(snapshot.actualSets?.[muscle.id]) || 0 })),
+    projected: clonePlain(snapshot.projected || {}),
+    missing: (snapshot.missingIds || []).map((id) => muscleGroups.find((muscle) => muscle.id === id)).filter(Boolean),
+    capacity: clonePlain(snapshot.capacity || {}),
+    attainment: clonePlain(snapshot.attainment || {}),
+    stale: invalidExercise || !setup.sourceFingerprint || setup.sourceFingerprint !== currentFingerprint
+  };
 }
 
 function actionFromSessionPlan(plan) {
@@ -4689,7 +5341,8 @@ function defaultDraftExercise(exerciseName = state.selectedExercise) {
     exercise: fallback,
     targetMuscle: meta.primaryMuscles[0] || "chest",
     notes: "",
-    setRows: defaultSetRows()
+    setRows: defaultSetRows(),
+    source: "manual"
   };
 }
 
@@ -4753,6 +5406,10 @@ function readWorkoutDraftFromForm() {
       coachCopiedRows: existing.coachCopiedRows,
       coachCopiedDirtyRows: existing.coachCopiedDirtyRows,
       coachCopiedPlanId: existing.coachCopiedPlanId,
+      source: existing.source || "manual",
+      sourcePlanId: existing.sourcePlanId || "",
+      sourceExerciseId: existing.sourceExerciseId || "",
+      sourceExercise: existing.sourceExercise || "",
       order: index
     };
   });
@@ -4778,7 +5435,7 @@ function previousSetLabel(exercise, index, excludeId = state.editingWorkoutId) {
   const last = lastSessionForExercise(exercise, excludeId);
   if (!last) return "--";
   const row = setRowsFromWorkout(last)[index];
-  return row ? `${fmt(row.weight)} x ${fmt(row.reps)}` : "--";
+  return row ? `${fmtLoad(row.weight)} x ${fmt(row.reps)}` : "--";
 }
 
 function adjustedCoachPlanRow(row, exercise, planTarget = null) {
@@ -4787,7 +5444,7 @@ function adjustedCoachPlanRow(row, exercise, planTarget = null) {
   const meta = exerciseIdentity(exercise);
   const range = parseRepRange(meta.reps);
   if (["deload", "reset"].includes(planTarget.kind) && next.weight > 0) {
-    next.weight = roundLoadTarget(next.weight * (planTarget.loadMultiplier || 1));
+    next.weight = roundLoadTarget(next.weight * (planTarget.loadMultiplier || 1), meta);
     next.rir = 2;
     return next;
   }
@@ -4795,7 +5452,7 @@ function adjustedCoachPlanRow(row, exercise, planTarget = null) {
     if (next.reps < range.high) {
       next.reps += 1;
     } else if (next.weight > 0) {
-      next.weight = roundLoadTarget(next.weight + (next.weight >= 50 ? 5 : 2.5));
+      next.weight = roundLoadTarget(next.weight + effectiveLoadIncrement(meta, next.weight), meta);
       next.reps = range.low;
     }
     next.rir = next.rir ?? 2;
@@ -4805,17 +5462,21 @@ function adjustedCoachPlanRow(row, exercise, planTarget = null) {
 
 function plannedSetRowsFromPreviousSession(exercise, setCount, planTarget = null) {
   const count = Math.max(1, Math.round(parseNum(setCount)));
-  const last = lastSessionForExercise(exercise);
+  const phase = exerciseLoadingStylePhase(exercise);
+  const targetStyle = phase.targetStyle;
+  const last = phase.history[0] || phase.transitionSource || null;
   const previousRows = last ? setRowsFromWorkout(last) : [];
   if (!previousRows.length) return defaultSetRows(count);
+  const sourceStyle = workoutLoadingStyle(last);
   return Array.from({ length: count }, (_, index) => {
     const source = previousRows[index] || previousRows[previousRows.length - 1];
-    return adjustedCoachPlanRow({
+    const prepared = convertSetRowToLoadingStyle({
       weight: source.weight,
       reps: source.reps,
       rir: source.rir ?? 2,
       restSeconds: source.restSeconds ?? null
-    }, exercise, planTarget);
+    }, exercise, sourceStyle, targetStyle);
+    return adjustedCoachPlanRow(prepared, exercise, planTarget);
   });
 }
 
@@ -4964,7 +5625,11 @@ function coachDraftsFromPlan(plan, copiedPlanId = "") {
       setRows,
       coachCopiedRows: setRows.map(copiedRowSnapshot),
       coachCopiedDirtyRows: [],
-      coachCopiedPlanId: copiedPlanId
+      coachCopiedPlanId: copiedPlanId,
+      source: "coach",
+      sourcePlanId: copiedPlanId,
+      sourceExerciseId: item.exercise.id,
+      sourceExercise: item.exercise.name
     };
   });
 }
@@ -4975,7 +5640,9 @@ function copyCoachPlanToLog(plan = buildTodayPlan(selectedCoachTimeframeMinutes(
   state.copiedCoachPlan = snapshot;
   persistCopiedCoachPlan(state.copiedCoachPlan);
   state.previewNextCoachPlan = false;
-  state.workoutDraft = [...(Array.isArray(state.workoutDraft) ? state.workoutDraft : []), ...copiedDrafts];
+  saveStrengthDraftForDate(state.draftDate);
+  loadWorkoutDateDraft(todayISO());
+  state.workoutDraft = [...state.workoutDraft, ...copiedDrafts];
   state.templateQueue = copiedDrafts.map((draft) => ({
     exercise: draft.exercise,
     targetMuscle: draft.targetMuscle,
@@ -4988,6 +5655,7 @@ function copyCoachPlanToLog(plan = buildTodayPlan(selectedCoachTimeframeMinutes(
   state.editingWorkoutId = null;
   state.showTemplatePanel = false;
   syncLegacyDraftFromFirst();
+  saveStrengthDraftForDate(state.draftDate);
 }
 
 function clearCopiedCoachLogDrafts(planId = activeCopiedCoachPlan()?.id) {
@@ -5152,7 +5820,7 @@ function renderSetRows(draft = draftExerciseFromState()) {
         <span class="set-label-wrap"><strong>Set</strong>${setRecordTrophySlot(draft, row, index, recordStats)}</span>
       </td>
       <td class="prev-cell">${escapeHtml(previousLabel)}</td>
-      <td><input data-set-field="weight" type="number" inputmode="decimal" min="0" step="2.5" value="${escapeHtml(row.weight)}" aria-label="Set ${index + 1} weight"></td>
+      <td><input data-set-field="weight" type="number" inputmode="decimal" min="0" step="0.5" value="${escapeHtml(row.weight)}" aria-label="Set ${index + 1} weight"></td>
       <td><input data-set-field="reps" type="number" inputmode="numeric" min="1" step="1" value="${escapeHtml(row.reps)}" aria-label="Set ${index + 1} reps"></td>
       <td>
         <div class="rir-stepper" aria-label="Set ${index + 1} RIR">
@@ -5426,6 +6094,8 @@ function exerciseFormValues(editing = null) {
     reps: editing?.reps || "",
     rest: editing?.rest || "",
     progressionMode: normalizeProgressionMode(editing?.progressionMode),
+    loadingStyle: normalizeLoadingStyle(editing?.loadingStyle),
+    loadIncrement: normalizeLoadIncrement(editing?.loadIncrement),
     cue: editing?.cue || ""
   };
 }
@@ -5474,6 +6144,7 @@ function exerciseCard(exercise, editable = false) {
         ${exerciseMuscleBadges(exercise)}
         ${exerciseUsageMetaMarkup(exercise)}
         <p class="muted small">${escapeHtml(exercise.equipment || "custom")} - ${escapeHtml(exercise.reps || "8-15")} reps - ${escapeHtml(exercise.rest || "60-120 sec")}</p>
+        <p class="muted micro">${escapeHtml(loadingStyleLabel(exercise.loadingStyle))} - ${normalizeLoadIncrement(exercise.loadIncrement) ? `${escapeHtml(fmtLoad(normalizeLoadIncrement(exercise.loadIncrement)))} lb smallest jump` : "automatic 2.5 / 5 lb jumps"}</p>
         ${normalizeProgressionMode(exercise.progressionMode) === "normal" ? "" : `<p class="muted micro">${escapeHtml(progressionModeLabel(exercise.progressionMode))}</p>`}
         <p class="muted micro">${escapeHtml(exercise.cue || "Keep form strict and progress gradually.")}</p>
       </div>
@@ -5559,6 +6230,12 @@ function renderExercises() {
   const progressionOptions = PROGRESSION_MODE_OPTIONS.map((option) => `
     <option value="${option.id}" ${normalizeProgressionMode(values.progressionMode) === option.id ? "selected" : ""}>${escapeHtml(option.label)}</option>
   `).join("");
+  const loadingStyleOptions = LOADING_STYLE_OPTIONS.map((option) => `
+    <option value="${option.id}" ${normalizeLoadingStyle(values.loadingStyle) === option.id ? "selected" : ""}>${escapeHtml(option.label)}</option>
+  `).join("");
+  const loadIncrementOptions = LOAD_INCREMENT_OPTIONS.map((increment) => `
+    <option value="${increment}" ${normalizeLoadIncrement(values.loadIncrement) === increment ? "selected" : ""}>${increment ? `${escapeHtml(String(increment))} lb` : "Automatic (2.5 / 5 lb)"}</option>
+  `).join("");
   const visibleExercises = filteredExerciseList();
   const archivedExercises = filteredExerciseList({ includeArchived: true, archivedOnly: true, search: state.exerciseSearch, muscle: state.exerciseMuscleFilter, sort: "az" });
 
@@ -5608,6 +6285,14 @@ function renderExercises() {
           <div class="field">
             <label for="exercise-progression-mode">Progression</label>
             <select id="exercise-progression-mode" name="progressionMode">${progressionOptions}</select>
+          </div>
+          <div class="field">
+            <label for="exercise-loading-style">Loading style</label>
+            <select id="exercise-loading-style" name="loadingStyle">${loadingStyleOptions}</select>
+          </div>
+          <div class="field">
+            <label for="exercise-load-increment">Smallest load jump</label>
+            <select id="exercise-load-increment" name="loadIncrement">${loadIncrementOptions}</select>
           </div>
         </div>
         <div class="field">
@@ -6455,7 +7140,7 @@ function renderTodayPlan(plan) {
               <div>
                 <strong>${escapeHtml(item.exercise.name)}</strong>
                 <span>${escapeHtml(item.muscle.label)} - ${escapeHtml(item.exercise.reps)} reps - ${HYPERTROPHY.idealRirMin}-${HYPERTROPHY.idealRirMax} RIR</span>
-                ${item.planTarget ? `<span class="today-plan-target">${escapeHtml(item.planTarget.label)} - ${escapeHtml(item.planTarget.detail)}</span>` : ""}
+                ${item.planTarget ? `<span class="today-plan-target">${escapeHtml(item.planTarget.label)} - ${escapeHtml(item.planTarget.detail)} ${coachPlanDirectionIndicator(item.planTarget)}</span>` : ""}
                 <div class="mini-action-row">
                   <button class="ghost-mini" type="button" data-action="log-exercise" data-exercise="${escapeHtml(item.exercise.name)}">Log</button>
                   <button class="ghost-mini" type="button" data-action="open-exercise-trend" data-exercise="${escapeHtml(item.exercise.name)}">Trend</button>
@@ -6569,40 +7254,6 @@ function renderCoachTargetSelector() {
   `;
 }
 
-function renderCoachWhy(plan) {
-  const explanation = plan.explanation || {};
-  const briefing = plan.briefing || [];
-  const sections = [
-    { title: "Selected", items: explanation.selected || plan.why || [] },
-    { title: "Waiting", items: explanation.skipped || [] },
-    { title: "Library gaps", items: explanation.missing || [] },
-    { title: "Other checks", items: explanation.notes || plan.notes || [] }
-  ].filter((section) => section.items.length);
-  return `
-    <details class="section card coach-why-card collapsible-panel" open>
-      <summary><span>Why this?</span><small>readiness + gaps</small></summary>
-      ${briefing.length ? `
-        <div class="coach-why-list coach-briefing">
-          <div class="coach-why-section">
-            <h4>Coach's read</h4>
-            ${briefing.map((item) => `<span>${escapeHtml(item)}</span>`).join("")}
-          </div>
-        </div>
-      ` : ""}
-      ${sections.length ? `
-        <div class="coach-why-list">
-          ${sections.map((section) => `
-            <div class="coach-why-section">
-              <h4>${escapeHtml(section.title)}</h4>
-              ${section.items.map((item) => `<span>${escapeHtml(item)}</span>`).join("")}
-            </div>
-          `).join("")}
-        </div>
-      ` : `<div class="empty compact-empty">No priority issues right now.</div>`}
-    </details>
-  `;
-}
-
 function renderCopiedCoachPlan() {
   const copied = activeCopiedCoachPlan();
   if (!copied) {
@@ -6649,11 +7300,135 @@ function renderCopiedCoachPlan() {
   `;
 }
 
+function renderCoachViewSelector() {
+  return `
+    <div class="segment coach-view-selector" aria-label="Coach plan view">
+      <button type="button" class="${state.coachView !== "week" ? "is-active" : ""}" data-action="coach-view" data-view="today">Today</button>
+      <button type="button" class="${state.coachView === "week" ? "is-active" : ""}" data-action="coach-view" data-view="week">Week</button>
+    </div>
+  `;
+}
+
+function coachPlanDirectionIndicator(planTarget) {
+  if (!planTarget || planTarget.kind === "baseline") return "";
+  const direction = planTarget.tone === "up" ? "up" : (planTarget.tone === "down" || planTarget.tone === "warn") ? "down" : "neutral";
+  const symbol = direction === "up" ? "\u2191" : direction === "down" ? "\u2193" : "\u2192";
+  const label = direction === "up"
+    ? "Coach recommends raising workload"
+    : direction === "down"
+    ? "Coach recommends lowering workload"
+    : "Coach recommends holding workload while establishing a comparable baseline";
+  const message = planTarget.message || `${planTarget.label}. ${planTarget.detail}`;
+  return `<button class="load-direction-indicator ${direction}" type="button" data-action="show-load-direction" data-message="${escapeHtml(message)}" aria-label="${escapeHtml(label)}" title="${escapeHtml(message)}">${escapeHtml(symbol)}</button>`;
+}
+
+function renderCoachWeekDistribution(plan) {
+  return `
+    <div class="coach-week-distribution">
+      ${muscleGroups.map((muscle) => {
+        const current = plan.actualStats.find((stat) => stat.id === muscle.id)?.sets || 0;
+        const projected = plan.projected[muscle.id] || current;
+        const target = plan.setup.targets[muscle.id] || HYPERTROPHY.minimumSets;
+        const width = Math.min(100, (projected / Math.max(target, 1)) * 100);
+        const status = projected < HYPERTROPHY.minimumSets
+          ? { tone: "below-minimum", label: "Below 10-set minimum" }
+          : projected < HYPERTROPHY.growthHigh
+            ? { tone: "below-upper", label: "Below 20 planned sets" }
+            : { tone: "upper-met", label: "20 planned sets reached" };
+        return `
+          <div class="coach-week-muscle ${plan.setup.priorities.includes(muscle.id) ? "is-priority" : ""}">
+            <div><span class="coach-week-muscle-name"><strong>${escapeHtml(muscle.label)}</strong><span class="coach-week-muscle-status ${status.tone}" role="img" aria-label="${escapeHtml(status.label)}" title="${escapeHtml(status.label)}"></span></span><span>${fmt(current, 1)} now / ${fmt(projected, 1)} planned / ${fmt(target)} target</span></div>
+            <div class="progress-track"><span style="width:${width}%"></span></div>
+          </div>
+        `;
+      }).join("")}
+    </div>
+  `;
+}
+
+function renderCoachWeekDay(session) {
+  const submittedSets = session.submitted.reduce((sum, workout) => sum + setRowsFromWorkout(workout).length, 0);
+  const statusLabel = session.status === "completed" ? `${submittedSets} submitted sets` : session.status === "past" ? "No submitted workout" : `${session.totalMinutes} min planned`;
+  return `
+    <details class="coach-week-day collapsible-panel" ${session.status === "planned" ? "open" : ""}>
+      <summary><span>${escapeHtml(session.option?.label || session.date)} <small>${escapeHtml(formatShortDate(session.date))}</small></span><small>${escapeHtml(statusLabel)}</small></summary>
+      ${session.status === "completed" ? `
+        <div class="coach-week-day-items">${session.submitted.map((workout) => `<div><strong>${escapeHtml(workout.exercise)}</strong><span>${setRowsFromWorkout(workout).length} sets locked in</span></div>`).join("")}</div>
+      ` : session.status === "past" ? `<div class="empty compact-empty">No submitted workout on this selected day.</div>` : session.items.length ? `
+        <div class="coach-week-day-items">
+          ${session.items.map((item) => `<div><strong>${escapeHtml(item.exercise.name)}</strong><span>${escapeHtml(item.muscle.label)} - ${item.sets} sets - ${escapeHtml(item.planTarget?.label || item.exercise.reps)} ${coachPlanDirectionIndicator(item.planTarget)}</span></div>`).join("")}
+        </div>
+        <button class="primary-button" type="button" data-action="copy-coach-week-day" data-date="${escapeHtml(session.date)}">Copy this day to Log</button>
+      ` : `<div class="empty compact-empty">Recovery gaps or completed targets leave this day open.</div>`}
+    </details>
+  `;
+}
+
+function renderCoachWeek() {
+  const setup = selectedCoachWeeklyPlan();
+  const plan = displayedCoachWeeklyPlan(setup);
+  return `
+    <details class="section form-panel collapsible-panel coach-week-setup" open>
+      <summary><span>Build the week</span><small>${setup.days.length} days - ${setup.averageMinutes} min average</small></summary>
+      <form id="coach-week-form">
+        <div class="field"><label>Training days</label><div class="coach-weekday-grid">${COACH_WEEKDAY_OPTIONS.map((option) => `<label class="choice-chip"><input type="checkbox" name="days" value="${option.day}" ${setup.days.includes(option.day) ? "checked" : ""}><span>${option.short}</span></label>`).join("")}</div></div>
+        <div class="field"><label for="coach-week-minutes">Average workout time</label><select id="coach-week-minutes" name="averageMinutes">${COACH_TIMEFRAME_OPTIONS.map((option) => `<option value="${option.minutes}" ${setup.averageMinutes === option.minutes ? "selected" : ""}>${escapeHtml(option.label)}</option>`).join("")}</select></div>
+        <div class="field"><label>Priority muscles and weekly targets</label><div class="coach-week-target-grid">${muscleGroups.map((muscle) => `
+          <div class="coach-week-target-row">
+            <label><input type="checkbox" name="priorities" value="${muscle.id}" ${setup.priorities.includes(muscle.id) ? "checked" : ""}><span>${escapeHtml(muscle.label)}</span></label>
+            <input type="number" name="target-${muscle.id}" min="10" max="30" step="1" value="${setup.targets[muscle.id]}" aria-label="${escapeHtml(muscle.label)} weekly set target">
+          </div>`).join("")}</div></div>
+        <button class="primary-button" type="submit">Generate weekly plan</button>
+      </form>
+    </details>
+    ${plan.stale ? `<section class="section coach-week-capacity warn"><strong>Weekly plan needs regeneration</strong><p>Inputs, submitted workouts, loading styles, or the active exercise library changed. Generate again before copying a planned day.</p></section>` : ""}
+    <section class="section coach-week-capacity ${plan.capacity.fits ? "good" : "warn"}"><strong>${plan.capacity.fits ? "All weekly targets are planned" : "Some weekly targets cannot be planned"}</strong><p>${escapeHtml(plan.capacity.message)}</p></section>
+    <details class="section chart-panel collapsible-panel" open><summary><span>Weekly distribution</span><small>actual + planned credits</small></summary>${renderCoachWeekDistribution(plan)}</details>
+    <section class="section coach-week-days">${plan.sessions.map(renderCoachWeekDay).join("")}</section>
+  `;
+}
+
+async function saveCoachWeeklyPlan(form) {
+  const setup = normalizeCoachWeeklyPlan({
+    ...coachWeeklyPlanFromForm(form),
+    generatedAt: new Date().toISOString()
+  });
+  state.coachWeekDraft = null;
+  const sourceFingerprint = coachWeeklySourceFingerprint(setup);
+  const generatedPlan = buildCoachWeeklyPlan(setup);
+  const committed = normalizeCoachWeeklyPlan({
+    ...setup,
+    sourceFingerprint,
+    generatedPlan: compactCoachWeeklyPlanSnapshot(generatedPlan)
+  });
+  await saveSetting("coachWeeklyPlan", committed);
+  await queueSyncChange("preference", "coachWeeklyPlan", { value: committed });
+  scheduleRecordSync();
+  toast("Weekly plan regenerated from your current setup and submitted workouts.");
+  await render();
+}
+
+function copyCoachWeekDayToLog(date) {
+  const plan = displayedCoachWeeklyPlan();
+  if (plan.stale) throw new Error("Generate the weekly plan again before copying this day.");
+  const session = plan.sessions.find((item) => item.date === date && item.status === "planned");
+  if (!session?.items.length) throw new Error("That day has no planned exercises to copy.");
+  preserveVisibleDraft("coach-week-copy");
+  loadWorkoutDateDraft(date);
+  const copiedPlanId = `coach-week-${date}-${uid()}`;
+  const drafts = coachDraftsFromPlan({ sessionPlan: { items: session.items } }, copiedPlanId);
+  state.workoutDraft = [...state.workoutDraft, ...drafts];
+  state.activeTab = "log";
+  state.logMode = "strength";
+  state.draftDate = date;
+  syncLegacyDraftFromFirst();
+  saveStrengthDraftForDate(date);
+}
+
 function renderCoach() {
   if (state.weeklyMuscleDetail?.returnTab === "coach") return weeklyMuscleDetailScreen();
   const timeframeMinutes = selectedCoachTimeframeMinutes();
   const todayPlan = buildTodayPlan(timeframeMinutes);
-  const recs = recommendations(todayPlan);
   return `
     <section class="hero">
       <div>
@@ -6661,20 +7436,17 @@ function renderCoach() {
         <p class="hero-copy">Minimum-first coaching: 10 hard sets per muscle each Monday-start week, 2 touches, 1-3 RIR, enough protein, and gradual overload.</p>
       </div>
     </section>
+    ${renderCoachViewSelector()}
+    ${state.coachView === "week" ? renderCoachWeek() : `
     ${renderCoachTimeframeSelector()}
     ${renderCoachGrowthModeSelector()}
     ${renderCoachTargetSelector()}
-    ${renderCopiedCoachPlan()}
     ${renderTodayPlan(todayPlan)}
-    ${renderCoachWhy(todayPlan)}
     <details class="section chart-panel collapsible-panel muscle-audit-panel" open>
       <summary><span>Muscle set audit</span><small>10 set floor, 12-20 growth zone</small></summary>
       ${muscleProgressMarkup(coachMuscleSetStats())}
     </details>
-    <details class="section chart-panel collapsible-panel coach-notes-panel">
-      <summary><span>Coach notes</span><small>secondary checks</small></summary>
-      ${recs.map((rec) => `<div class="coach-card ${rec.tone}"><strong>${escapeHtml(rec.title)}</strong><p>${escapeHtml(rec.body)}</p></div>`).join("")}
-    </details>
+    `}
   `;
 }
 
@@ -7433,6 +8205,10 @@ async function saveWorkout(form) {
       weight: best?.weight || 0,
       rir: averageRir({ setRows }),
       notes: draft.notes.trim(),
+      source: draft.source || existing?.source || "manual",
+      sourcePlanId: draft.sourcePlanId || existing?.sourcePlanId || "",
+      sourceExerciseId: draft.sourceExerciseId || existing?.sourceExerciseId || "",
+      sourceExercise: draft.sourceExercise || existing?.sourceExercise || "",
       order: Number.isFinite(Number(draft.order)) ? Number(draft.order) : index,
       createdAt: existing?.createdAt || new Date().toISOString(),
       updatedAt: new Date().toISOString()
@@ -7461,7 +8237,11 @@ async function saveWorkout(form) {
     targetMuscle: entry.primaryMuscles[0] || "chest",
     notes: entry.notes || "",
     setRows: setRowsFromWorkout(entry),
-    order: entry.order
+    order: entry.order,
+    source: entry.source || "manual",
+    sourcePlanId: entry.sourcePlanId || "",
+    sourceExerciseId: entry.sourceExerciseId || "",
+    sourceExercise: entry.sourceExercise || ""
   }));
   state.loadedWorkoutDateIds = entries.map((entry) => entry.id).filter(Boolean);
   await loadState();
@@ -7639,6 +8419,7 @@ function exportSafeSettings() {
     customExercises: getCustomExercises({ includeArchived: true }),
     dashboardWidgets: selectedDashboardWidgets(),
     dashboardWidgetOrder: dashboardWidgetOrder(),
+    coachWeeklyPlan: selectedCoachWeeklyPlan(),
     lastBackupAt: new Date().toISOString(),
     lastCloudPushAt: String(state.settings.lastCloudPushAt || ""),
     lastCloudPullAt: String(state.settings.lastCloudPullAt || "")
@@ -7687,6 +8468,12 @@ function workoutDebugSummary(workout) {
     order: Number.isFinite(Number(workout.order)) ? Number(workout.order) : null,
     pendingDraft: Boolean(workout.pendingDraft),
     editingWorkoutId: workout.editingWorkoutId || null,
+    loadingStyle: workoutLoadingStyle(workout),
+    loadIncrement: normalizeLoadIncrement(workout.loadIncrement),
+    source: workout.source || "manual",
+    sourcePlanId: workout.sourcePlanId || "",
+    sourceExerciseId: workout.sourceExerciseId || "",
+    sourceExercise: workout.sourceExercise || "",
     notes: workout.notes || ""
   };
 }
@@ -7857,6 +8644,22 @@ function coachDebugLibraryCoverage() {
   }));
 }
 
+function coachDebugExerciseCandidates() {
+  return Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, coachExerciseCandidates(muscle.id).map((item) => ({
+    exerciseId: item.exercise.id,
+    exercise: item.exercise.name,
+    score: item.score,
+    baseScore: item.baseScore,
+    weeklyFairnessBonus: item.weeklyFairnessBonus,
+    lifetimeFairnessBonus: item.lifetimeFairnessBonus,
+    weeklyUses: item.memory.weeklyUses,
+    lifetimeUses: item.memory.history.length,
+    daysSince: item.memory.daysSince,
+    performanceStatus: item.signal.status,
+    eligible: item.eligible
+  }))]));
+}
+
 function recentDebugWorkouts(days = 120) {
   return workoutsNewestFirst(state.workouts.filter((entry) => !isSampleEntry(entry)))
     .filter((entry) => {
@@ -7909,6 +8712,32 @@ function recordsDebugSummary(records = allTimeRecords()) {
   };
 }
 
+function coachDebugWeeklyPlan() {
+  const plan = buildCoachWeeklyPlan(normalizeCoachWeeklyPlan(state.settings.coachWeeklyPlan || {}));
+  return {
+    setup: clonePlain(plan.setup),
+    remainingDates: plan.sessions.filter((session) => session.status === "planned").map((session) => session.date),
+    capacity: clonePlain(plan.capacity),
+    attainment: clonePlain(plan.attainment),
+    actualSets: Object.fromEntries(plan.actualStats.map((stat) => [stat.id, stat.sets])),
+    projectedSets: clonePlain(plan.projected),
+    sessions: plan.sessions.map((session) => ({
+      date: session.date,
+      status: session.status,
+      totalMinutes: session.totalMinutes,
+      submittedSets: session.submitted.reduce((sum, workout) => sum + setRowsFromWorkout(workout).length, 0),
+      items: session.items.map((item) => ({
+        exercise: item.exercise.name,
+        muscle: item.muscle.id,
+        sets: item.sets,
+        loadingStyle: effectiveLoadingStyle(item.exercise),
+        planTarget: item.planTarget?.label || "",
+        performanceStatus: item.performanceSignal?.status || "neutral"
+      }))
+    }))
+  };
+}
+
 function buildCoachDebugReport() {
   const planningContext = coachPlanningContext();
   const todayPlan = buildTodayPlan(selectedCoachTimeframeMinutes());
@@ -7950,9 +8779,11 @@ function buildCoachDebugReport() {
     coach: {
       todayPlan: coachDebugPlanSummary(todayPlan),
       copiedPlan: copiedPlan ? coachDebugPlanSummary(copiedPlan) : null,
+      weeklyPlan: coachDebugWeeklyPlan(),
       modeComparison: coachDebugModeComparison(),
       muscleAudit: coachDebugMuscleAudit(planningContext),
-      libraryCoverage: coachDebugLibraryCoverage()
+      libraryCoverage: coachDebugLibraryCoverage(),
+      exerciseCandidates: coachDebugExerciseCandidates()
     },
     records: recordsDebugSummary(),
     submitted: {
@@ -7967,6 +8798,10 @@ function buildCoachDebugReport() {
         editingWorkoutId: draft.editingWorkoutId || null,
         exercise: draft.exercise || "",
         targetMuscle: draft.targetMuscle || "",
+        source: draft.source || "manual",
+        sourcePlanId: draft.sourcePlanId || "",
+        sourceExerciseId: draft.sourceExerciseId || "",
+        sourceExercise: draft.sourceExercise || "",
         notes: draft.notes || "",
         setRows: normalizeSetRows(draft.setRows)
       }))
@@ -8048,12 +8883,21 @@ function normalizeBackupWorkout(entry) {
     primaryMuscles: primaryMuscles.length ? primaryMuscles : [...meta.primaryMuscles],
     secondaryMuscles,
     equipment: String(entry.equipment || meta.equipment || "custom"),
+    repRange: String(entry.repRange || meta.reps || "8-15"),
+    restRange: String(entry.restRange || entry.rest || meta.rest || "60-120 sec"),
+    loadingStyle: workoutLoadingStyle({ ...entry, loadingStyle: entry.loadingStyle || effectiveLoadingStyle(meta) }),
+    loadIncrement: normalizeLoadIncrement(entry.loadIncrement || meta.loadIncrement),
+    progressionMode: normalizeProgressionMode(entry.progressionMode || meta.progressionMode),
     setRows,
     sets: setRows.length,
     reps: best?.reps || 1,
     weight: best?.weight || 0,
     rir: averageRir({ setRows }),
     notes: String(entry.notes || "").trim(),
+    source: String(entry.source || "manual"),
+    sourcePlanId: String(entry.sourcePlanId || ""),
+    sourceExerciseId: String(entry.sourceExerciseId || ""),
+    sourceExercise: String(entry.sourceExercise || ""),
     order: Number.isFinite(Number(entry.order)) ? Number(entry.order) : undefined,
     createdAt: entry.createdAt || new Date().toISOString(),
     updatedAt: entry.updatedAt || entry.createdAt || new Date().toISOString()
@@ -8082,6 +8926,7 @@ function normalizeBackupSettings(settings = {}) {
     customExercises,
     dashboardWidgets: Array.isArray(settings.dashboardWidgets) ? settings.dashboardWidgets : [...DEFAULT_TODAY_WIDGETS],
     dashboardWidgetOrder: Array.isArray(settings.dashboardWidgetOrder) ? settings.dashboardWidgetOrder : [...DEFAULT_TODAY_WIDGETS],
+    coachWeeklyPlan: normalizeCoachWeeklyPlan(settings.coachWeeklyPlan || {}),
     lastBackupAt: String(settings.lastBackupAt || ""),
     lastCloudPushAt: String(settings.lastCloudPushAt || ""),
     lastCloudPullAt: String(settings.lastCloudPullAt || "")
@@ -8112,6 +8957,7 @@ async function importPayload(payload) {
   await saveSetting("customExercises", normalized.settings.customExercises);
   await saveSetting("dashboardWidgets", normalized.settings.dashboardWidgets);
   await saveSetting("dashboardWidgetOrder", normalized.settings.dashboardWidgetOrder);
+  await saveSetting("coachWeeklyPlan", normalized.settings.coachWeeklyPlan);
   await saveSetting("lastBackupAt", normalized.settings.lastBackupAt);
   await saveSetting("lastCloudPushAt", normalized.settings.lastCloudPushAt);
   await saveSetting("lastCloudPullAt", normalized.settings.lastCloudPullAt);
@@ -8738,7 +9584,11 @@ function editWorkout(id) {
     targetMuscle: meta.primaryMuscles[0] || "chest",
     notes: entry.notes || "",
     setRows: setRowsFromWorkout(entry),
-    order: entry.order
+    order: entry.order,
+    source: entry.source || "manual",
+    sourcePlanId: entry.sourcePlanId || "",
+    sourceExerciseId: entry.sourceExerciseId || "",
+    sourceExercise: entry.sourceExercise || ""
   }];
   state.logHistoryExercise = "";
 }
@@ -8755,7 +9605,11 @@ function workoutEntryToDraft(entry) {
     targetMuscle: entry.primaryMuscles?.[0] || "chest",
     notes: entry.notes || "",
     setRows: setRowsFromWorkout(entry),
-    order: entry.order
+    order: entry.order,
+    source: entry.source || "manual",
+    sourcePlanId: entry.sourcePlanId || "",
+    sourceExerciseId: entry.sourceExerciseId || "",
+    sourceExercise: entry.sourceExercise || ""
   };
 }
 
@@ -8817,6 +9671,11 @@ function clearWorkoutDraft(date = todayISO()) {
 
 function loadWorkoutDateDraft(date) {
   state.draftDate = date;
+  const savedDraft = strengthDraftForDate(date);
+  if (savedDraft) {
+    applyRecoveredStrengthDraft(savedDraft);
+    return;
+  }
   const entries = workoutsForDate(date);
   if (entries.length) {
     const first = entries[0];
@@ -8851,17 +9710,7 @@ async function applySharedDateInput(input) {
 }
 
 function applyStrengthTodayShortcut() {
-  if (state.logMode !== "strength") return false;
-  readDraftFromForm();
-  const hasSavedWorkoutDraft = (state.workoutDraft || []).some((draft) => draft.editingWorkoutId);
-  if (hasSavedWorkoutDraft || state.editingWorkoutId) return false;
-  const hasMeaningfulDraft = (state.workoutDraft || []).some((draft) => !draft.editingWorkoutId && draftHasMeaningfulWorkoutInput(draft));
-  if (!hasMeaningfulDraft) return false;
-  state.draftDate = todayISO();
-  state.loadedWorkoutDateIds = [];
-  syncLegacyDraftFromFirst();
-  saveDraftRecovery("date-today");
-  return true;
+  return false;
 }
 
 function applyLogModeSwitch(nextMode) {
@@ -8918,7 +9767,9 @@ async function handleAction(action, target) {
     },
     async "undo-last-action"() { await undoLastAction(); },
     async "restore-draft"() {
-      if (!restoreDraftRecovery()) throw new Error("No saved draft found.");
+      const savedStrength = strengthDraftForDate(state.draftDate || todayISO());
+      if (savedStrength) applyRecoveredStrengthDraft(savedStrength);
+      else if (!restoreDraftRecovery()) throw new Error("No saved draft found.");
       clearLogDraftNotice();
       toast("Draft restored.", { duration: 2000 });
       await render();
@@ -9093,6 +9944,15 @@ async function handleAction(action, target) {
         return;
       }
       state.historyDate = "";
+      await render({ animate: true });
+    },
+    async "coach-view"() {
+      state.coachView = target.dataset.view === "week" ? "week" : "today";
+      await render({ animate: true });
+    },
+    async "copy-coach-week-day"() {
+      copyCoachWeekDayToLog(target.dataset.date);
+      announce("Weekly Coach day added to Log.", { tone: "good", sound: "success", detail: "The planned exercises were appended without replacing another date's draft." });
       await render({ animate: true });
     },
     async "coach-timeframe"() {
@@ -9328,15 +10188,18 @@ async function handleAction(action, target) {
     async "log-exercise"() {
       await flashSelection(target);
       preserveVisibleDraft("log-exercise");
-      readDraftFromForm();
+      const exercise = target.dataset.exercise;
+      const date = todayISO();
+      loadWorkoutDateDraft(date);
       state.activeTab = "log";
       state.logMode = "strength";
       state.editingWorkoutId = null;
-      state.selectedExercise = target.dataset.exercise;
+      state.selectedExercise = exercise;
       state.draftTargetMuscle = resolveExerciseMeta(state.selectedExercise).primaryMuscles[0] || "chest";
       state.setRows = defaultSetRows();
       state.workoutDraft = [...(Array.isArray(state.workoutDraft) ? state.workoutDraft : []), defaultDraftExercise(state.selectedExercise)];
       syncLegacyDraftFromFirst();
+      saveStrengthDraftForDate(date);
       await render();
     },
     async "open-exercise-trend"() {
@@ -9768,6 +10631,11 @@ document.addEventListener("click", async (event) => {
 
 document.addEventListener("change", async (event) => {
   try {
+    const coachWeekForm = event.target.closest("#coach-week-form");
+    if (coachWeekForm) {
+      state.coachWeekDraft = coachWeeklyPlanFromForm(coachWeekForm);
+      return;
+    }
     if (event.target.matches("[data-sound-effects-enabled]")) {
       await saveSetting("soundEffectsEnabled", Boolean(event.target.checked));
       forceSettingsPanelOpen("sound-effects");
@@ -9788,6 +10656,9 @@ document.addEventListener("change", async (event) => {
         const meta = resolveExerciseMeta(draft.exercise, draft.targetMuscle);
         draft.targetMuscle = meta.primaryMuscles[0] || draft.targetMuscle || "chest";
         clearCoachCopiedDraftMarkers(draft);
+        if (draft.source === "coach-modified") {
+          draft.notes = `Modified from Coach suggestion${draft.sourceExercise ? ` (${draft.sourceExercise})` : ""}.`;
+        }
       }
       syncLegacyDraftFromFirst();
       saveDraftRecovery("strength-change");
@@ -9800,6 +10671,11 @@ document.addEventListener("change", async (event) => {
     }
     if (event.target.matches("#exercise-primary")) {
       syncSecondaryMuscleCheckboxes(event.target.closest("#exercise-form"));
+    }
+    if (event.target.matches("#exercise-loading-style")) {
+      const repsInput = event.target.closest("#exercise-form")?.querySelector("#exercise-reps");
+      if (repsInput && event.target.value === "high-rep") repsInput.value = "20-30";
+      if (repsInput && event.target.value === "standard") repsInput.value = "8-15";
     }
     if (event.target.closest("#exercise-form")) {
       state.exerciseFormDraft = exerciseFormDraftFromForm(event.target.closest("#exercise-form"));
@@ -9906,6 +10782,7 @@ document.addEventListener("pointermove", (event) => {
 document.addEventListener("pointerdown", (event) => {
   const handle = event.target.closest("[data-drag-handle]");
   if (handle) {
+    event.preventDefault();
     startExerciseDrag(handle, { clientY: event.clientY, pointerId: event.pointerId, pointerType: event.pointerType, inputType: "pointer" });
     return;
   }
@@ -9941,6 +10818,7 @@ document.addEventListener("pointercancel", async (event) => {
 });
 
 document.addEventListener("touchstart", (event) => {
+  if ("PointerEvent" in window) return;
   const handle = event.target.closest("[data-drag-handle]");
   if (handle) {
     event.preventDefault();
@@ -9950,6 +10828,7 @@ document.addEventListener("touchstart", (event) => {
 }, { passive: false });
 
 document.addEventListener("touchmove", (event) => {
+  if ("PointerEvent" in window) return;
   if (dragState.active) {
     event.preventDefault();
     const touch = event.touches[0];
@@ -9966,6 +10845,7 @@ document.addEventListener("touchmove", (event) => {
 }, { passive: false });
 
 document.addEventListener("touchend", async (event) => {
+  if ("PointerEvent" in window) return;
   try {
     await finishExerciseDrag({ clientY: dragState.currentY });
   } catch (error) {
@@ -9974,6 +10854,7 @@ document.addEventListener("touchend", async (event) => {
 });
 
 document.addEventListener("touchcancel", () => {
+  if ("PointerEvent" in window) return;
   clearTimeout(dragState.dragTimer);
   dragState.id = null;
   dragState.active = false;
@@ -10000,6 +10881,7 @@ if (window.addEventListener) {
 document.addEventListener("submit", async (event) => {
   event.preventDefault();
   try {
+    if (event.target.matches("#coach-week-form")) await saveCoachWeeklyPlan(event.target);
     if (event.target.matches("#exercise-form")) await saveExercise(event.target);
     if (event.target.matches("#strength-form")) await saveWorkout(event.target);
     if (event.target.matches("#metric-form")) await saveMetric(event.target);
