@@ -2331,6 +2331,59 @@ assert(weeklyAttainmentWarning.priorityMet < weeklyAttainmentWarning.priorityTot
 assert(weeklyAttainmentWarning.message.includes("Floors planned:") && weeklyAttainmentWarning.message.includes("Priority targets planned:"), "Expected weekly status to report floor and priority-target attainability.");
 assert(weeklyAttainmentWarning.markup.includes("Some weekly targets cannot be planned"), "Expected Coach Week UI to clearly warn when the generated schedule misses targets.");
 
+const weeklyAdjustmentAdvisor = runScenario(`
+  ${resetAndHelpers}
+  state.workouts = muscleGroups.map((muscle) => makeWorkout(muscle, 2, 10, { id: "floor-" + muscle.id }));
+  state.settings.customExercises = muscleGroups.flatMap((muscle) => [0, 1, 2].map((index) => ({
+    id: "advisor-" + muscle.id + "-" + index,
+    name: muscle.label + " Advisor " + index,
+    primaryMuscles: [muscle.id],
+    secondaryMuscles: [],
+    equipment: "machine",
+    reps: "8-15",
+    rest: "60 sec",
+    cue: "Train.",
+    userCreated: true
+  })));
+  var setup = normalizeCoachWeeklyPlan({
+    days: [3],
+    averageMinutes: 60,
+    priorities: ["chest", "back", "biceps", "triceps"],
+    targets: Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, ["chest", "back", "biceps", "triceps"].includes(muscle.id) ? 20 : 10]))
+  });
+  var plan = buildCoachWeeklyPlan(setup);
+  var options = coachWeeklyAdjustmentOptions(plan);
+  var focused = options.find((option) => option.id === "focused");
+  var balanced = options.find((option) => option.id === "balanced");
+  var capacity = options.find((option) => option.id === "capacity");
+  var beforeSettings = JSON.stringify(state.settings);
+  var preview = buildCoachWeeklyAdjustmentPreview(focused);
+  ({
+    fits: plan.capacity.fits,
+    optionIds: options.map((option) => option.id),
+    focusedPriorities: focused?.setup.priorities || [],
+    focusedAlternatives: focused?.alternatives?.length || 0,
+    focusedPriorityMet: focused?.attainment.priorityMet || 0,
+    focusedPriorityTotal: focused?.attainment.priorityTotal || 0,
+    balancedPriorities: balanced?.setup.priorities || [],
+    capacityChanged: Boolean(capacity && (capacity.setup.averageMinutes !== setup.averageMinutes || capacity.setup.days.length !== setup.days.length)),
+    previewSessions: preview?.sessions?.length || 0,
+    settingsUnchanged: beforeSettings === JSON.stringify(state.settings),
+    markup: renderCoachWeekAdjustmentAdvisor({ ...plan, adjustments: options })
+  });
+`);
+
+assert.strictEqual(weeklyAdjustmentAdvisor.fits, false, "Expected the advisor fixture to begin with an infeasible weekly request.");
+assert.deepEqual(weeklyAdjustmentAdvisor.optionIds, ["focused", "balanced", "capacity"], "Expected focused, balanced, and capacity alternatives.");
+assert(weeklyAdjustmentAdvisor.focusedPriorities.length > 0 && weeklyAdjustmentAdvisor.focusedPriorities.length < 4, "Expected focused completion to choose a feasible subset of the four priorities.");
+assert(weeklyAdjustmentAdvisor.focusedPriorityMet === weeklyAdjustmentAdvisor.focusedPriorityTotal, "Expected the focused option to complete every priority it retains.");
+assert(weeklyAdjustmentAdvisor.focusedAlternatives > 0, "Expected focused completion to expose other viable priority combinations.");
+assert.deepEqual(weeklyAdjustmentAdvisor.balancedPriorities, ["chest", "back", "biceps", "triceps"], "Expected balanced planning to retain every selected priority.");
+assert.strictEqual(weeklyAdjustmentAdvisor.capacityChanged, true, "Expected the capacity option to recommend a concrete day or duration change.");
+assert(weeklyAdjustmentAdvisor.previewSessions > 0, "Expected an adjustment preview to contain an exact weekly plan.");
+assert.strictEqual(weeklyAdjustmentAdvisor.settingsUnchanged, true, "Expected previewing an adjustment to leave settings untouched.");
+assert(weeklyAdjustmentAdvisor.markup.includes("Coach adjustment") && weeklyAdjustmentAdvisor.markup.includes("Preview plan"), "Expected the weekly UI to render the three-card adjustment advisor.");
+
 const coachPlanDirections = runScenario(`
   ({
     up: coachPlanDirectionIndicator({ kind: "progression", tone: "up", label: "Add a rep", detail: "1-3 RIR", message: "Progressing" }),

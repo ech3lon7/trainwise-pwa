@@ -3,7 +3,7 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 3;
 const STORES = ["workouts", "metrics", "settings", "syncQueue"];
-const APP_VERSION = "1.5.76";
+const APP_VERSION = "1.5.77";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 const DRAFT_RECOVERY_KEY = "trainwise-draft-recovery-v1";
 const DATED_STRENGTH_DRAFTS_KEY = "trainwise-strength-drafts-by-date-v1";
@@ -221,6 +221,7 @@ const state = {
   returnStack: [],
   coachView: "today",
   coachWeekDraft: null,
+  coachWeekAdjustmentPreview: "",
   coachTimeframeMinutes: SESSION_LIMIT_MINUTES,
   coachGlobalGrowthMode: "medium",
   coachTargetMuscles: [],
@@ -4594,7 +4595,211 @@ function buildCoachWeeklyPlan(setupInput = selectedCoachWeeklyPlan()) {
   };
 }
 
+function coachWeeklyPrioritySubsets(ids = []) {
+  const subsets = [];
+  const visit = (start, selected, size) => {
+    if (selected.length === size) {
+      subsets.push([...selected]);
+      return;
+    }
+    for (let index = start; index <= ids.length - (size - selected.length); index += 1) {
+      selected.push(ids[index]);
+      visit(index + 1, selected, size);
+      selected.pop();
+    }
+  };
+  for (let size = ids.length; size >= 1; size -= 1) visit(0, [], size);
+  return subsets;
+}
+
+function coachWeeklyAdjustmentOption(id, title, summary, setup, plan, extra = {}) {
+  return {
+    id,
+    title,
+    summary,
+    setup: normalizeCoachWeeklyPlan(setup),
+    projected: clonePlain(plan.projected),
+    attainment: clonePlain(plan.attainment),
+    capacity: clonePlain(plan.capacity),
+    remainingDates: plan.sessions.filter((session) => session.status === "planned").map((session) => session.date),
+    ...extra
+  };
+}
+
+function coachWeeklyAdjustmentOptions(planInput) {
+  const plan = planInput || buildCoachWeeklyPlan();
+  const setup = normalizeCoachWeeklyPlan(plan.setup);
+  if (plan.capacity.fits || !setup.priorities.length) return [];
+  const priorityIds = setup.priorities;
+  const focusedCandidates = [];
+  let focusedSize = 0;
+
+  for (const priorities of coachWeeklyPrioritySubsets(priorityIds)) {
+    if (focusedSize && priorities.length < focusedSize) break;
+    const targets = Object.fromEntries(muscleGroups.map((muscle) => [
+      muscle.id,
+      priorities.includes(muscle.id) ? setup.targets[muscle.id] : HYPERTROPHY.minimumSets
+    ]));
+    const candidateSetup = normalizeCoachWeeklyPlan({ ...setup, priorities, targets, generatedPlan: null, sourceFingerprint: "" });
+    const candidatePlan = buildCoachWeeklyPlan(candidateSetup);
+    if (candidatePlan.attainment.floorUnmet.length || candidatePlan.attainment.priorityMet !== priorities.length) continue;
+    focusedSize = priorities.length;
+    focusedCandidates.push({
+      key: `focused-${focusedCandidates.length}`,
+      setup: candidateSetup,
+      plan: candidatePlan,
+      labels: priorities.map((id) => muscleLabel(id))
+    });
+    if (focusedCandidates.length >= 3) break;
+  }
+
+  if (!focusedCandidates.length) {
+    const fallbackId = priorityIds
+      .map((id) => ({ id, ratio: (plan.projected[id] || 0) / Math.max(setup.targets[id] || HYPERTROPHY.minimumSets, 1) }))
+      .sort((a, b) => b.ratio - a.ratio)[0]?.id;
+    const priorities = fallbackId ? [fallbackId] : [];
+    const targets = Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, priorities.includes(muscle.id) ? setup.targets[muscle.id] : HYPERTROPHY.minimumSets]));
+    const candidateSetup = normalizeCoachWeeklyPlan({ ...setup, priorities, targets, generatedPlan: null, sourceFingerprint: "" });
+    focusedCandidates.push({ key: "focused-0", setup: candidateSetup, plan: buildCoachWeeklyPlan(candidateSetup), labels: priorities.map((id) => muscleLabel(id)) });
+  }
+
+  const focusedPrimary = focusedCandidates[0];
+  const focused = coachWeeklyAdjustmentOption(
+    "focused",
+    "Focused completion",
+    focusedPrimary.labels.length
+      ? `Protect every 10-set floor, then fully pursue ${focusedPrimary.labels.join(" and ")}.`
+      : "Protect the weekly floors with the available time.",
+    focusedPrimary.setup,
+    focusedPrimary.plan,
+    {
+      previewKey: focusedPrimary.key,
+      alternatives: focusedCandidates.map((candidate) => ({
+        key: candidate.key,
+        labels: candidate.labels,
+        setup: candidate.setup,
+        projected: clonePlain(candidate.plan.projected),
+        attainment: clonePlain(candidate.plan.attainment),
+        capacity: clonePlain(candidate.plan.capacity)
+      }))
+    }
+  );
+
+  const balancedTargets = Object.fromEntries(muscleGroups.map((muscle) => {
+    if (!priorityIds.includes(muscle.id)) return [muscle.id, HYPERTROPHY.minimumSets];
+    const achievable = Math.max(HYPERTROPHY.minimumSets, Math.floor(Number(plan.projected[muscle.id]) || 0));
+    return [muscle.id, Math.min(setup.targets[muscle.id], achievable)];
+  }));
+  const balancedSetup = normalizeCoachWeeklyPlan({ ...setup, targets: balancedTargets, generatedPlan: null, sourceFingerprint: "" });
+  const balancedPlan = buildCoachWeeklyPlan(balancedSetup);
+  const balanced = coachWeeklyAdjustmentOption(
+    "balanced",
+    "Balanced priorities",
+    "Protect every floor and spread the remaining capacity across all selected priorities.",
+    balancedSetup,
+    balancedPlan,
+    { previewKey: "balanced" }
+  );
+
+  const currentPriorityScore = priorityIds.reduce((sum, id) => sum + Math.min(1, (plan.projected[id] || 0) / Math.max(setup.targets[id], 1)), 0);
+  const availableExtraDays = COACH_WEEKDAY_OPTIONS
+    .filter((option) => {
+      const date = coachWeekDate(option.day);
+      return date >= todayISO() && !setup.days.includes(option.day) && !workoutsForDate(date).length;
+    })
+    .map((option) => option.day);
+  const daySubsets = [[]];
+  availableExtraDays.forEach((day) => daySubsets.push(...daySubsets.map((days) => [...days, day])));
+  const minuteOptions = [...new Set([setup.averageMinutes, ...COACH_TIMEFRAME_OPTIONS.map((option) => option.minutes).filter((minutes) => minutes > setup.averageMinutes)])];
+  const capacityCandidates = [];
+  daySubsets.forEach((extraDays) => minuteOptions.forEach((averageMinutes) => {
+    if (!extraDays.length && averageMinutes === setup.averageMinutes) return;
+    const candidateSetup = normalizeCoachWeeklyPlan({
+      ...setup,
+      days: [...setup.days, ...extraDays],
+      averageMinutes,
+      generatedPlan: null,
+      sourceFingerprint: ""
+    });
+    const candidatePlan = buildCoachWeeklyPlan(candidateSetup);
+    const priorityScore = priorityIds.reduce((sum, id) => sum + Math.min(1, (candidatePlan.projected[id] || 0) / Math.max(setup.targets[id], 1)), 0);
+    const improvement = priorityScore - currentPriorityScore;
+    if (improvement <= 0 && candidatePlan.attainment.floorMet <= plan.attainment.floorMet) return;
+    capacityCandidates.push({
+      setup: candidateSetup,
+      plan: candidatePlan,
+      priorityScore,
+      improvement,
+      changeCost: Math.max(0, candidateSetup.days.length * averageMinutes - setup.days.length * setup.averageMinutes),
+      changes: extraDays.length + Number(averageMinutes !== setup.averageMinutes)
+    });
+  }));
+  capacityCandidates.sort((a, b) => (
+    Number(b.plan.attainment.priorityMet === b.plan.attainment.priorityTotal) - Number(a.plan.attainment.priorityMet === a.plan.attainment.priorityTotal)
+    || b.plan.attainment.priorityMet - a.plan.attainment.priorityMet
+    || b.priorityScore - a.priorityScore
+    || b.plan.attainment.floorMet - a.plan.attainment.floorMet
+    || a.changeCost - b.changeCost
+    || a.changes - b.changes
+  ));
+  const capacityCandidate = capacityCandidates[0] || { setup, plan, improvement: 0 };
+  const addedDays = capacityCandidate.setup.days.filter((day) => !setup.days.includes(day)).map((day) => COACH_WEEKDAY_OPTIONS.find((option) => option.day === day)?.short).filter(Boolean);
+  const capacityChanges = [
+    addedDays.length ? `add ${addedDays.join(", ")}` : "",
+    capacityCandidate.setup.averageMinutes !== setup.averageMinutes ? `use ${capacityCandidate.setup.averageMinutes} min sessions` : ""
+  ].filter(Boolean);
+  const capacity = coachWeeklyAdjustmentOption(
+    "capacity",
+    "More capacity",
+    capacityChanges.length
+      ? `Keep every requested target and ${capacityChanges.join(" plus ")}.`
+      : "No remaining day or duration change can safely improve this request.",
+    capacityCandidate.setup,
+    capacityCandidate.plan,
+    { previewKey: "capacity", unavailable: !capacityChanges.length }
+  );
+
+  return [focused, balanced, capacity];
+}
+
+function coachWeeklyAdjustmentOptionByKey(options, key) {
+  if (String(key).startsWith("focused-")) {
+    const focused = options.find((option) => option.id === "focused");
+    const alternative = focused?.alternatives?.find((item) => item.key === key);
+    if (alternative) return { ...focused, ...alternative, id: "focused", previewKey: key, title: "Focused completion" };
+  }
+  return options.find((option) => option.previewKey === key || option.id === key) || null;
+}
+
+function buildCoachWeeklyAdjustmentPreview(option) {
+  return option?.setup ? buildCoachWeeklyPlan(option.setup) : null;
+}
+
+function compactCoachWeeklyAdjustments(options = []) {
+  return options.map((option) => ({
+    id: option.id,
+    previewKey: option.previewKey,
+    title: option.title,
+    summary: option.summary,
+    setup: normalizeCoachWeeklyPlan(option.setup),
+    projected: clonePlain(option.projected),
+    attainment: clonePlain(option.attainment),
+    capacity: clonePlain(option.capacity),
+    remainingDates: [...(option.remainingDates || [])],
+    unavailable: Boolean(option.unavailable),
+    alternatives: (option.alternatives || []).map((alternative) => ({
+      key: alternative.key,
+      labels: [...alternative.labels],
+      setup: normalizeCoachWeeklyPlan(alternative.setup),
+      projected: clonePlain(alternative.projected),
+      attainment: clonePlain(alternative.attainment),
+      capacity: clonePlain(alternative.capacity)
+    }))
+  }));
+}
+
 function compactCoachWeeklyPlanSnapshot(plan) {
+  const adjustments = plan.capacity.fits ? [] : coachWeeklyAdjustmentOptions(plan);
   return {
     sessions: plan.sessions.map((session) => ({
       day: session.day,
@@ -4617,7 +4822,8 @@ function compactCoachWeeklyPlanSnapshot(plan) {
     setBudgets: clonePlain(plan.setBudgets || {}),
     missingIds: plan.missing.map((muscle) => muscle.id),
     capacity: clonePlain(plan.capacity),
-    attainment: clonePlain(plan.attainment)
+    attainment: clonePlain(plan.attainment),
+    adjustments: compactCoachWeeklyAdjustments(adjustments)
   };
 }
 
@@ -4670,6 +4876,7 @@ function displayedCoachWeeklyPlan(setupInput = selectedCoachWeeklyPlan()) {
     missing: (snapshot.missingIds || []).map((id) => muscleGroups.find((muscle) => muscle.id === id)).filter(Boolean),
     capacity: clonePlain(snapshot.capacity || {}),
     attainment: clonePlain(snapshot.attainment || {}),
+    adjustments: clonePlain(snapshot.adjustments || []),
     stale: invalidExercise || !setup.sourceFingerprint || setup.sourceFingerprint !== currentFingerprint
   };
 }
@@ -7406,6 +7613,52 @@ function renderCoachWeekDay(session) {
   `;
 }
 
+function renderCoachWeekAdjustmentPreview(option) {
+  const preview = buildCoachWeeklyAdjustmentPreview(option);
+  if (!preview) return "";
+  const priorityRows = preview.attainment.results.filter((item) => item.priority);
+  return `
+    <div class="coach-week-adjustment-preview">
+      <div class="coach-week-adjustment-preview-head"><strong>${escapeHtml(option.title)} preview</strong><button class="ghost-mini" type="button" data-action="close-coach-week-adjustment">Close</button></div>
+      <p>${escapeHtml(option.summary)}</p>
+      <div class="coach-week-adjustment-facts">
+        <span><strong>${preview.sessions.filter((session) => session.status === "planned").length}</strong><small>days left</small></span>
+        <span><strong>${preview.setup.averageMinutes}</strong><small>min average</small></span>
+        <span><strong>${preview.attainment.floorMet}/${muscleGroups.length}</strong><small>floors</small></span>
+        <span><strong>${preview.attainment.priorityMet}/${preview.attainment.priorityTotal}</strong><small>priorities</small></span>
+      </div>
+      ${priorityRows.length ? `<div class="coach-week-adjustment-targets">${priorityRows.map((item) => `<span>${escapeHtml(item.label)} <strong>${fmt(item.planned, 1)}/${fmt(item.target)}</strong></span>`).join("")}</div>` : ""}
+      <div class="coach-week-adjustment-actions">
+        <button class="primary-button" type="button" data-action="apply-coach-week-adjustment" data-option-key="${escapeHtml(option.previewKey || option.id)}" ${option.unavailable ? "disabled" : ""}>Use this plan</button>
+      </div>
+    </div>
+  `;
+}
+
+function renderCoachWeekAdjustmentAdvisor(plan) {
+  if (plan.capacity.fits || plan.stale) return "";
+  const options = plan.adjustments?.length ? plan.adjustments : coachWeeklyAdjustmentOptions(plan);
+  if (!options.length) return "";
+  const preview = coachWeeklyAdjustmentOptionByKey(options, state.coachWeekAdjustmentPreview);
+  return `
+    <details class="section collapsible-panel coach-week-adjustment" open>
+      <summary><span>Coach adjustment</span><small>3 ways to make the week fit</small></summary>
+      <p class="coach-week-adjustment-intro">This request does not fit the remaining week as written. Pick the tradeoff that matches what matters most.</p>
+      <div class="coach-week-adjustment-grid">
+        ${options.map((option) => `
+          <article class="coach-week-adjustment-card">
+            <div><strong>${escapeHtml(option.title)}</strong><span>${option.attainment.priorityMet}/${option.attainment.priorityTotal} priority targets - ${option.attainment.floorMet}/${muscleGroups.length} floors</span></div>
+            <p>${escapeHtml(option.summary)}</p>
+            <button class="ghost-button" type="button" data-action="preview-coach-week-adjustment" data-option-key="${escapeHtml(option.previewKey || option.id)}" ${option.unavailable ? "disabled" : ""}>Preview plan</button>
+            ${option.id === "focused" && option.alternatives?.length > 1 ? `<div class="coach-week-adjustment-combinations">${option.alternatives.slice(1).map((alternative) => `<button class="ghost-mini" type="button" data-action="preview-coach-week-adjustment" data-option-key="${escapeHtml(alternative.key)}">${escapeHtml(alternative.labels.join(" + "))}</button>`).join("")}</div>` : ""}
+          </article>
+        `).join("")}
+      </div>
+      ${preview ? renderCoachWeekAdjustmentPreview(preview) : ""}
+    </details>
+  `;
+}
+
 function renderCoachWeek() {
   const setup = selectedCoachWeeklyPlan();
   const plan = displayedCoachWeeklyPlan(setup);
@@ -7425,17 +7678,16 @@ function renderCoachWeek() {
     </details>
     ${plan.stale ? `<section class="section coach-week-capacity warn"><strong>Weekly plan needs regeneration</strong><p>Inputs, submitted workouts, loading styles, or the active exercise library changed. Generate again before copying a planned day.</p></section>` : ""}
     <section class="section coach-week-capacity ${plan.capacity.fits ? "good" : "warn"}"><strong>${plan.capacity.fits ? "All weekly targets are planned" : "Some weekly targets cannot be planned"}</strong><p>${escapeHtml(plan.capacity.message)}</p></section>
+    ${renderCoachWeekAdjustmentAdvisor(plan)}
     <details class="section chart-panel collapsible-panel" open><summary><span>Weekly distribution</span><small>actual + planned credits</small></summary>${renderCoachWeekDistribution(plan)}</details>
     <section class="section coach-week-days">${plan.sessions.map(renderCoachWeekDay).join("")}</section>
   `;
 }
 
-async function saveCoachWeeklyPlan(form) {
-  const setup = normalizeCoachWeeklyPlan({
-    ...coachWeeklyPlanFromForm(form),
-    generatedAt: new Date().toISOString()
-  });
+async function commitCoachWeeklyPlan(setupInput, message) {
+  const setup = normalizeCoachWeeklyPlan({ ...setupInput, generatedAt: new Date().toISOString(), generatedPlan: null, sourceFingerprint: "" });
   state.coachWeekDraft = null;
+  state.coachWeekAdjustmentPreview = "";
   const sourceFingerprint = coachWeeklySourceFingerprint(setup);
   const generatedPlan = buildCoachWeeklyPlan(setup);
   const committed = normalizeCoachWeeklyPlan({
@@ -7446,8 +7698,15 @@ async function saveCoachWeeklyPlan(form) {
   await saveSetting("coachWeeklyPlan", committed);
   await queueSyncChange("preference", "coachWeeklyPlan", { value: committed });
   scheduleRecordSync();
-  toast("Weekly plan regenerated from your current setup and submitted workouts.");
+  toast(message);
   await render();
+}
+
+async function saveCoachWeeklyPlan(form) {
+  await commitCoachWeeklyPlan(
+    coachWeeklyPlanFromForm(form),
+    "Weekly plan regenerated from your current setup and submitted workouts."
+  );
 }
 
 function copyCoachWeekDayToLog(date) {
@@ -8756,6 +9015,7 @@ function recordsDebugSummary(records = allTimeRecords()) {
 
 function coachDebugWeeklyPlan() {
   const plan = buildCoachWeeklyPlan(normalizeCoachWeeklyPlan(state.settings.coachWeeklyPlan || {}));
+  const adjustments = coachWeeklyAdjustmentOptions(plan);
   return {
     setup: clonePlain(plan.setup),
     remainingDates: plan.sessions.filter((session) => session.status === "planned").map((session) => session.date),
@@ -8764,6 +9024,16 @@ function coachDebugWeeklyPlan() {
     actualSets: Object.fromEntries(plan.actualStats.map((stat) => [stat.id, stat.sets])),
     setBudgets: clonePlain(plan.setBudgets || {}),
     projectedSets: clonePlain(plan.projected),
+    adjustments: compactCoachWeeklyAdjustments(adjustments).map((option) => ({
+      id: option.id,
+      title: option.title,
+      summary: option.summary,
+      setup: clonePlain(option.setup),
+      projectedSets: clonePlain(option.projected),
+      attainment: clonePlain(option.attainment),
+      remainingDates: [...option.remainingDates],
+      alternatives: option.alternatives.map((alternative) => ({ key: alternative.key, labels: [...alternative.labels], setup: clonePlain(alternative.setup), projectedSets: clonePlain(alternative.projected) }))
+    })),
     sessions: plan.sessions.map((session) => ({
       date: session.date,
       status: session.status,
@@ -9991,7 +10261,27 @@ async function handleAction(action, target) {
     },
     async "coach-view"() {
       state.coachView = target.dataset.view === "week" ? "week" : "today";
+      state.coachWeekAdjustmentPreview = "";
       await render({ animate: true });
+    },
+    async "preview-coach-week-adjustment"() {
+      const plan = displayedCoachWeeklyPlan();
+      const options = plan.adjustments?.length ? plan.adjustments : coachWeeklyAdjustmentOptions(plan);
+      const option = coachWeeklyAdjustmentOptionByKey(options, target.dataset.optionKey);
+      if (!option || option.unavailable) throw new Error("That adjustment is not available for the remaining week.");
+      state.coachWeekAdjustmentPreview = option.previewKey || option.id;
+      await render({ animate: true });
+    },
+    async "close-coach-week-adjustment"() {
+      state.coachWeekAdjustmentPreview = "";
+      await render();
+    },
+    async "apply-coach-week-adjustment"() {
+      const plan = displayedCoachWeeklyPlan();
+      const options = plan.adjustments?.length ? plan.adjustments : coachWeeklyAdjustmentOptions(plan);
+      const option = coachWeeklyAdjustmentOptionByKey(options, target.dataset.optionKey);
+      if (!option || option.unavailable) throw new Error("That adjustment is not available for the remaining week.");
+      await commitCoachWeeklyPlan(option.setup, `${option.title} is now your weekly plan.`);
     },
     async "copy-coach-week-day"() {
       copyCoachWeekDayToLog(target.dataset.date);

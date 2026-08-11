@@ -4099,6 +4099,92 @@ textarea {
   color: var(--muted);
 }
 
+.coach-week-adjustment > :not(summary) {
+  margin-right: 14px;
+  margin-left: 14px;
+}
+
+.coach-week-adjustment-intro {
+  color: var(--muted);
+}
+
+.coach-week-adjustment-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.coach-week-adjustment-card,
+.coach-week-adjustment-preview {
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+}
+
+.coach-week-adjustment-card {
+  display: grid;
+  align-content: start;
+  gap: 10px;
+}
+
+.coach-week-adjustment-card > div:first-child,
+.coach-week-adjustment-preview-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.coach-week-adjustment-card span,
+.coach-week-adjustment-card p,
+.coach-week-adjustment-preview p,
+.coach-week-adjustment-facts small {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.coach-week-adjustment-card p,
+.coach-week-adjustment-preview p {
+  margin: 0;
+}
+
+.coach-week-adjustment-combinations,
+.coach-week-adjustment-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.coach-week-adjustment-preview {
+  margin-top: 10px;
+  margin-bottom: 14px;
+}
+
+.coach-week-adjustment-facts {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+  margin: 10px 0;
+}
+
+.coach-week-adjustment-facts span,
+.coach-week-adjustment-targets span {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  padding: 8px;
+  border-radius: 6px;
+  background: var(--panel-2);
+}
+
+.coach-week-adjustment-targets {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
 .coach-week-muscle {
   display: grid;
   gap: 6px;
@@ -4181,6 +4267,14 @@ textarea {
 
   .coach-week-target-grid {
     grid-template-columns: 1fr;
+  }
+
+  .coach-week-adjustment-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .coach-week-adjustment-facts {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .coach-week-muscle > div:first-child,
