@@ -3,7 +3,7 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 3;
 const STORES = ["workouts", "metrics", "settings", "syncQueue"];
-const APP_VERSION = "1.5.73";
+const APP_VERSION = "1.5.74";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 const DRAFT_RECOVERY_KEY = "trainwise-draft-recovery-v1";
 const DATED_STRENGTH_DRAFTS_KEY = "trainwise-strength-drafts-by-date-v1";
@@ -33,6 +33,7 @@ let lastUiCueAt = 0;
 const MAX_PENDING_UI_CUES = 3;
 const SESSION_LIMIT_MINUTES = 60;
 const COACH_TIME_TOLERANCE_MINUTES = 3;
+const COACH_MAX_EXERCISES_PER_SESSION = 6;
 const COACH_TIMEFRAME_OPTIONS = [
   { label: "30 min", minutes: 30 },
   { label: "40 min", minutes: 40 },
@@ -3468,7 +3469,7 @@ function coachTimeframeSelectionLabel(minutes = selectedCoachTimeframeMinutes())
 
 function sessionPlanCaps(limitMinutes, restart = false) {
   const limit = Math.min(75, Math.max(30, Number(limitMinutes) || SESSION_LIMIT_MINUTES));
-  const maxItems = limit <= 30 ? 4 : limit <= 40 ? 5 : limit <= 50 ? 6 : limit <= 60 ? 8 : 10;
+  const maxItems = Math.min(COACH_MAX_EXERCISES_PER_SESSION, limit <= 30 ? 4 : limit <= 40 ? 5 : 6);
   if (restart) {
     return {
       maxItems,
@@ -4418,76 +4419,102 @@ function buildCoachWeeklyPlan(setupInput = selectedCoachWeeklyPlan()) {
   const actualStats = muscleSetStats(coachWeeklyWorkouts());
   const projected = Object.fromEntries(actualStats.map((stat) => [stat.id, stat.sets]));
   const lastDirect = Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, latestDirectMuscleDate(muscle.id)]));
+  const plannedDirectDates = Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, []]));
   const plannedExerciseUses = new Map();
-  const sessions = [];
-
-  for (const selected of selectedDates) {
+  const sessions = selectedDates.map((selected) => {
     const submitted = submittedByDate.get(selected.date) || [];
     if (submitted.length || selected.date < todayISO()) {
-      sessions.push({ ...selected, status: submitted.length ? "completed" : "past", items: [], submitted, totalMinutes: 0 });
-      continue;
+      return { ...selected, status: submitted.length ? "completed" : "past", items: [], submitted, totalMinutes: 0 };
     }
-    const items = [];
-    const usedThisSession = new Set();
-    let totalMinutes = 0;
-    let attempts = 0;
-    while (attempts < 40) {
-      attempts += 1;
-      const candidates = muscleGroups.map((muscle) => {
-        const current = Number(projected[muscle.id] || 0);
-        const target = Number(setup.targets[muscle.id] || HYPERTROPHY.minimumSets);
-        const gap = Math.max(0, target - current);
-        const floorGap = Math.max(0, HYPERTROPHY.minimumSets - current);
-        const priority = setup.priorities.includes(muscle.id);
-        const recoveryClear = !lastDirect[muscle.id] || daysBetween(lastDirect[muscle.id], selected.date) >= 2;
-        return { ...muscle, current, target, gap, floorGap, priority, recoveryClear };
-      }).filter((muscle) => muscle.gap > 0 && muscle.recoveryClear && hasPrimaryExerciseForMuscle(muscle.id))
-        .sort((a, b) => (
-          Number(b.floorGap > 0) - Number(a.floorGap > 0)
-          || Number(b.priority) - Number(a.priority)
-          || b.gap - a.gap
-          || a.current - b.current
-        ));
-      if (!candidates.length) break;
-      const muscle = candidates.find((candidate) => items.at(-1)?.muscle.id !== candidate.id) || candidates[0];
-      const exerciseCandidates = coachExerciseCandidates(muscle.id, usedThisSession)
-        .sort((a, b) => (plannedExerciseUses.get(a.exercise.id) || 0) - (plannedExerciseUses.get(b.exercise.id) || 0) || b.score - a.score);
-      const chosen = exerciseCandidates.find((candidate) => candidate.eligible) || exerciseCandidates[0];
-      if (!chosen || !isActiveCoachExercise(chosen.exercise)) break;
-      const sets = Math.max(1, Math.min(4, Math.ceil(muscle.gap), muscle.floorGap > 0 ? Math.ceil(muscle.floorGap) : 4));
-      const minutes = estimateExerciseMinutes(chosen.exercise, sets);
-      if (totalMinutes + minutes > setup.averageMinutes + COACH_TIME_TOLERANCE_MINUTES) break;
-      const performanceSignal = coachExercisePerformanceSignal(chosen.exercise);
-      const growthMode = muscle.target > HYPERTROPHY.growthHigh ? "aggressive" : muscle.target > HYPERTROPHY.growthLow ? "medium" : "soft";
-      const item = {
-        muscle,
-        exercise: chosen.exercise,
-        sets,
-        minutes,
-        phase: muscle.floorGap > 0 ? "floor" : "weekly-target",
-        growthMode,
-        performanceSignal,
-        planTarget: coachPlanTargetForExercise(chosen.exercise, performanceSignal),
-        reason: muscle.floorGap > 0
-          ? `${muscle.label} has ${fmt(muscle.floorGap, 1)} sets left to reach the weekly floor.`
-          : `${muscle.label} is a selected priority with ${fmt(muscle.gap, 1)} sets left toward ${fmt(muscle.target)}.`
-      };
-      items.push(item);
-      usedThisSession.add(chosen.exercise.id);
-      plannedExerciseUses.set(chosen.exercise.id, (plannedExerciseUses.get(chosen.exercise.id) || 0) + 1);
-      projected[muscle.id] = (projected[muscle.id] || 0) + sets;
-      chosen.exercise.primaryMuscles.forEach((id) => {
-        if (id !== muscle.id) projected[id] = (projected[id] || 0) + sets;
-        lastDirect[id] = selected.date;
-      });
-      chosen.exercise.secondaryMuscles.forEach((id) => {
-        projected[id] = (projected[id] || 0) + sets * 0.5;
-      });
-      totalMinutes += minutes;
-      if (items.length >= 7) break;
+    return { ...selected, status: "planned", items: [], submitted: [], totalMinutes: 0, usedExercises: new Set() };
+  });
+  const plannedSessions = sessions.filter((session) => session.status === "planned");
+
+  const recoveryClearForDate = (muscleId, date) => {
+    const actualClear = !lastDirect[muscleId] || daysBetween(lastDirect[muscleId], date) >= 2;
+    const plannedClear = plannedDirectDates[muscleId].every((plannedDate) => Math.abs(daysBetween(plannedDate, date)) >= 2);
+    return actualClear && plannedClear;
+  };
+
+  const candidateForPhase = (muscle, phase) => {
+    const current = Number(projected[muscle.id] || 0);
+    const target = Number(setup.targets[muscle.id] || HYPERTROPHY.minimumSets);
+    const gap = Math.max(0, target - current);
+    const floorGap = Math.max(0, HYPERTROPHY.minimumSets - current);
+    const priority = setup.priorities.includes(muscle.id);
+    const phaseEligible = phase === "floor"
+      ? floorGap > 0
+      : phase === "priority"
+        ? priority && floorGap <= 0 && gap > 0
+        : !priority && floorGap <= 0 && gap > 0;
+    return { ...muscle, current, target, gap, floorGap, priority, phaseEligible };
+  };
+
+  const addWeeklyPhaseItem = (session, phase) => {
+    if (session.items.length >= COACH_MAX_EXERCISES_PER_SESSION) return false;
+    const candidates = muscleGroups
+      .map((muscle) => candidateForPhase(muscle, phase))
+      .filter((muscle) => (
+        muscle.phaseEligible
+        && recoveryClearForDate(muscle.id, session.date)
+        && hasPrimaryExerciseForMuscle(muscle.id)
+      ))
+      .sort((a, b) => (
+        (phase === "floor" ? Number(b.priority) - Number(a.priority) : 0)
+        || (phase === "floor" ? b.floorGap - a.floorGap : b.gap - a.gap)
+        || a.current - b.current
+      ));
+    const muscle = candidates.find((candidate) => session.items.at(-1)?.muscle.id !== candidate.id) || candidates[0];
+    if (!muscle) return false;
+    const exerciseCandidates = coachExerciseCandidates(muscle.id, session.usedExercises)
+      .sort((a, b) => (plannedExerciseUses.get(a.exercise.id) || 0) - (plannedExerciseUses.get(b.exercise.id) || 0) || b.score - a.score);
+    const chosen = exerciseCandidates.find((candidate) => candidate.eligible) || exerciseCandidates[0];
+    if (!chosen || !isActiveCoachExercise(chosen.exercise)) return false;
+    let sets = Math.max(1, Math.min(4, Math.ceil(phase === "floor" ? muscle.floorGap : muscle.gap)));
+    let minutes = estimateExerciseMinutes(chosen.exercise, sets);
+    while (sets > 1 && session.totalMinutes + minutes > setup.averageMinutes + COACH_TIME_TOLERANCE_MINUTES) {
+      sets -= 1;
+      minutes = estimateExerciseMinutes(chosen.exercise, sets);
     }
-    sessions.push({ ...selected, status: "planned", items: orderCoachSessionItems(items), submitted: [], totalMinutes });
-  }
+    if (session.totalMinutes + minutes > setup.averageMinutes + COACH_TIME_TOLERANCE_MINUTES) return false;
+    const performanceSignal = coachExercisePerformanceSignal(chosen.exercise);
+    const growthMode = muscle.target > HYPERTROPHY.growthHigh ? "aggressive" : muscle.target > HYPERTROPHY.growthLow ? "medium" : "soft";
+    session.items.push({
+      muscle,
+      exercise: chosen.exercise,
+      sets,
+      minutes,
+      phase,
+      growthMode,
+      performanceSignal,
+      planTarget: coachPlanTargetForExercise(chosen.exercise, performanceSignal),
+      reason: phase === "floor"
+        ? `${muscle.label} has ${fmt(muscle.floorGap, 1)} sets left to reach the weekly floor.`
+        : phase === "priority"
+          ? `${muscle.label} is a selected priority with ${fmt(muscle.gap, 1)} sets left toward ${fmt(muscle.target)}.`
+          : `${muscle.label} receives remaining capacity after weekly floors and selected priorities.`
+    });
+    session.usedExercises.add(chosen.exercise.id);
+    plannedExerciseUses.set(chosen.exercise.id, (plannedExerciseUses.get(chosen.exercise.id) || 0) + 1);
+    applyCoachStimulusCredits(projected, chosen.exercise, sets);
+    chosen.exercise.primaryMuscles.forEach((id) => plannedDirectDates[id].push(session.date));
+    session.totalMinutes += minutes;
+    return true;
+  };
+
+  ["floor", "priority", "optional"].forEach((phase) => {
+    let changed = true;
+    while (changed) {
+      changed = false;
+      plannedSessions.forEach((session) => {
+        if (addWeeklyPhaseItem(session, phase)) changed = true;
+      });
+    }
+  });
+  plannedSessions.forEach((session) => {
+    session.items = orderCoachSessionItems(session.items);
+    delete session.usedExercises;
+  });
 
   reconcileCoachSecondaryStimulus(sessions, projected, setup.targets);
 
@@ -4495,6 +4522,15 @@ function buildCoachWeeklyPlan(setupInput = selectedCoachWeeklyPlan()) {
   const remainingSets = muscleGroups.reduce((sum, muscle) => sum + Math.max(0, setup.targets[muscle.id] - (actualStats.find((stat) => stat.id === muscle.id)?.sets || 0)), 0);
   const missing = muscleGroups.filter((muscle) => setup.targets[muscle.id] > (projected[muscle.id] || 0) && !hasPrimaryExerciseForMuscle(muscle.id));
   const attainment = coachWeeklyAttainment(setup, projected);
+  const priorityShortfalls = attainment.priorityUnmet.map((item) => {
+    const exercise = exerciseDatabase().find((candidate) => candidate.primaryMuscles.includes(item.id));
+    const eligibleDates = plannedSessions.filter((session) => recoveryClearForDate(item.id, session.date));
+    let limitation = "selected timeframe";
+    if (!exercise) limitation = "missing active exercise coverage";
+    else if (!eligibleDates.length) limitation = "recovery spacing";
+    else if (eligibleDates.every((session) => session.items.length >= COACH_MAX_EXERCISES_PER_SESSION)) limitation = "six-exercise session limit";
+    return { ...item, limitation };
+  });
   const capacityFits = attainment.unmet.length === 0 && !missing.length;
   const unmetSummary = attainment.unmet.slice(0, 4).map((item) => `${item.label} ${fmt(item.planned, 1)}/${fmt(item.target)}`).join(", ");
   const unmetRemainder = Math.max(0, attainment.unmet.length - 4);
@@ -4514,7 +4550,7 @@ function buildCoachWeeklyPlan(setupInput = selectedCoachWeeklyPlan()) {
         ? `${attainmentSummary} Add primary exercises for ${missing.map((muscle) => muscle.label).join(", ")} before Coach can distribute those targets.`
         : capacityFits
         ? `${attainmentSummary} Coach can schedule every weekly floor and defined target across the remaining selected days.`
-        : `${attainmentSummary} Still short: ${unmetSummary}${unmetRemainder ? `, and ${unmetRemainder} more` : ""}. ${remainingSets > capacity.estimatedSetCapacity ? "The selected days do not provide enough estimated set capacity." : "The remaining day spacing, recovery rules, or per-session limits prevent Coach from safely assigning every requested set."}`
+        : `${attainmentSummary} Still short: ${unmetSummary}${unmetRemainder ? `, and ${unmetRemainder} more` : ""}.${priorityShortfalls.length ? ` Priority limits: ${priorityShortfalls.map((item) => `${item.label} - ${item.limitation}`).join("; ")}.` : ""} ${remainingSets > capacity.estimatedSetCapacity ? "The selected days do not provide enough estimated set capacity." : "The remaining day spacing, recovery rules, timeframe, or six-exercise limit prevent Coach from safely assigning every requested set."}`
     }
   };
 }

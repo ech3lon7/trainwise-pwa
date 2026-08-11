@@ -1414,8 +1414,8 @@ const nearOptimumTimeframe = runScenario(`
   });
 `);
 
-assert(withinCoachTimeWindow(nearOptimumTimeframe.total, 60), `Expected 18/20 muscles to still fill 1 hour with more muscle slots, got ${nearOptimumTimeframe.total}: ${nearOptimumTimeframe.detail}`);
-assert(nearOptimumTimeframe.itemCount <= 8, `Expected 18/20 1 hour plan to honor the 60-minute muscle cap, got ${nearOptimumTimeframe.itemCount}`);
+assert(nearOptimumTimeframe.total <= 63, `Expected 18/20 muscles to stay inside the 1 hour tolerance, got ${nearOptimumTimeframe.total}: ${nearOptimumTimeframe.detail}`);
+assert(nearOptimumTimeframe.itemCount <= 6, `Expected 18/20 1 hour plan to honor the hard six-exercise cap, got ${nearOptimumTimeframe.itemCount}`);
 
 const highVolumeTimeframe = runScenario(`
   ${resetAndHelpers}
@@ -2023,6 +2023,70 @@ assert(weeklyCoachPlan.priorityProjected > 10, `Expected weekly plan to add volu
 assert.strictEqual(weeklyCoachPlan.priorityTarget, 24, "Expected numeric weekly target to remain attached to the priority muscle.");
 assert(weeklyCoachPlan.plannedDays > 0, "Expected the weekly planner to create remaining sessions.");
 assert(weeklyCoachPlan.markup.includes("Weekly distribution") && weeklyCoachPlan.markup.includes("Copy this day to Log"), "Expected weekly Coach distribution and day-copy controls.");
+
+const weeklyPriorityBeforeOptionalGrowth = runScenario(`
+  ${resetAndHelpers}
+  state.settings.customExercises = muscleGroups.map((muscle) => ({
+    id: "weekly-priority-" + muscle.id,
+    name: "Weekly Priority " + muscle.label,
+    primaryMuscles: [muscle.id],
+    secondaryMuscles: [],
+    equipment: "machine",
+    reps: "8-15",
+    rest: "60 sec",
+    cue: "Train.",
+    userCreated: true
+  }));
+  state.workouts = muscleGroups.map((muscle) => makeWorkout(muscle, 2, 10));
+  var setup = normalizeCoachWeeklyPlan({
+    days: [5, 0],
+    averageMinutes: 30,
+    priorities: ["chest"],
+    targets: Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, ["chest", "hamstrings"].includes(muscle.id) ? 20 : 10]))
+  });
+  var plan = buildCoachWeeklyPlan(setup);
+  ({
+    chestAdded: plan.projected.chest - 10,
+    hamstringsAdded: plan.projected.hamstrings - 10,
+    maxExercises: Math.max(...plan.sessions.map((session) => session.items.length))
+  });
+`);
+
+assert(weeklyPriorityBeforeOptionalGrowth.chestAdded >= weeklyPriorityBeforeOptionalGrowth.hamstringsAdded, `Expected priority Chest capacity before optional Hamstrings growth, got +${weeklyPriorityBeforeOptionalGrowth.chestAdded} Chest and +${weeklyPriorityBeforeOptionalGrowth.hamstringsAdded} Hamstrings.`);
+assert(weeklyPriorityBeforeOptionalGrowth.chestAdded > 0, "Expected priority Chest to receive remaining weekly capacity.");
+assert(weeklyPriorityBeforeOptionalGrowth.maxExercises <= 6, `Expected weekly sessions to cap at six exercises, got ${weeklyPriorityBeforeOptionalGrowth.maxExercises}.`);
+
+const weeklyFloorBeforePriorityGrowth = runScenario(`
+  ${resetAndHelpers}
+  state.settings.customExercises = muscleGroups.map((muscle) => ({
+    id: "weekly-floor-" + muscle.id,
+    name: "Weekly Floor " + muscle.label,
+    primaryMuscles: [muscle.id],
+    secondaryMuscles: [],
+    equipment: "machine",
+    reps: "8-15",
+    rest: "60 sec",
+    cue: "Train.",
+    userCreated: true
+  }));
+  state.workouts = muscleGroups.map((muscle) => makeWorkout(muscle, 2, muscle.id === "hamstrings" ? 6 : 10));
+  var plan = buildCoachWeeklyPlan(normalizeCoachWeeklyPlan({ days: [5], averageMinutes: 30, priorities: ["chest"], targets: { chest: 20, hamstrings: 10 } }));
+  ({ chest: plan.projected.chest, hamstrings: plan.projected.hamstrings, phases: plan.sessions.flatMap((session) => session.items.map((item) => item.phase)) });
+`);
+
+assert(weeklyFloorBeforePriorityGrowth.hamstrings >= 10, `Expected Hamstrings floor to be protected before Chest growth, got ${weeklyFloorBeforePriorityGrowth.hamstrings}.`);
+assert(weeklyFloorBeforePriorityGrowth.chest > 10, `Expected remaining capacity to reach priority Chest after the Hamstrings floor, got ${weeklyFloorBeforePriorityGrowth.chest}.`);
+assert(weeklyFloorBeforePriorityGrowth.phases.includes("floor") && weeklyFloorBeforePriorityGrowth.phases.includes("priority"), "Expected explicit floor and priority planning phases.");
+
+const todayHardExerciseCap = runScenario(`
+  ${resetAndHelpers}
+  state.workouts = muscleGroups.map((muscle) => makeWorkout(muscle, 2, 18));
+  var plan = buildTodayPlan(75).sessionPlan;
+  ({ count: plan.items.length, total: plan.totalMinutes });
+`);
+
+assert(todayHardExerciseCap.count <= 6, `Expected Today to cap at six exercises even at 1 hour+, got ${todayHardExerciseCap.count}.`);
+assert(todayHardExerciseCap.total <= 78, `Expected Today to remain inside the 75-minute tolerance, got ${todayHardExerciseCap.total}.`);
 
 const weeklyPreferenceSync = runScenario(`
   ${resetAndHelpers}
