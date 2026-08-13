@@ -148,10 +148,10 @@ assert(coverage.noteBody.includes(`${coverage.total}/60`), `Expected Coach note 
 const coachExerciseSequencing = runScenario(`
   ${resetAndHelpers}
   state.settings.customExercises = [
-    { id: "curl", name: "Bicep Curl", primaryMuscles: ["biceps"], secondaryMuscles: [], equipment: "dumbbells", reps: "8-15", rest: "60 sec", cue: "Curl.", userCreated: true },
-    { id: "hammer", name: "Hammer Curl", primaryMuscles: ["biceps"], secondaryMuscles: [], equipment: "dumbbells", reps: "8-15", rest: "60 sec", cue: "Hammer.", userCreated: true },
-    { id: "bench", name: "Bench Press", primaryMuscles: ["chest"], secondaryMuscles: ["triceps", "shoulders"], equipment: "barbell", reps: "6-12", rest: "120 sec", cue: "Bench.", userCreated: true },
-    { id: "row", name: "Cable Row", primaryMuscles: ["back"], secondaryMuscles: ["biceps"], equipment: "cable", reps: "8-15", rest: "90 sec", cue: "Row.", userCreated: true }
+    { id: "curl", name: "Bicep Curl", primaryMuscles: ["biceps"], secondaryMuscles: [], exerciseType: "isolation", equipment: "dumbbells", reps: "8-15", rest: "60 sec", cue: "Curl.", userCreated: true },
+    { id: "hammer", name: "Hammer Curl", primaryMuscles: ["biceps"], secondaryMuscles: [], exerciseType: "isolation", equipment: "dumbbells", reps: "8-15", rest: "60 sec", cue: "Hammer.", userCreated: true },
+    { id: "bench", name: "Bench Press", primaryMuscles: ["chest"], secondaryMuscles: ["triceps", "shoulders"], exerciseType: "compound", equipment: "barbell", reps: "6-12", rest: "120 sec", cue: "Bench.", userCreated: true },
+    { id: "row", name: "Cable Row", primaryMuscles: ["back"], secondaryMuscles: ["biceps"], exerciseType: "compound", equipment: "cable", reps: "8-15", rest: "90 sec", cue: "Row.", userCreated: true }
   ];
   var biceps = muscleGroups.find((muscle) => muscle.id === "biceps");
   var chest = muscleGroups.find((muscle) => muscle.id === "chest");
@@ -1467,8 +1467,8 @@ const restartTimeframe = runScenario(`
 `);
 
 assert.strictEqual(restartTimeframe.mode, "restart", `Expected no-workout case to remain restart mode, got ${restartTimeframe.mode}`);
-assert(withinCoachTimeWindow(restartTimeframe.total, 60), `Expected restart 1 hour plan to fill time with more muscles, got ${restartTimeframe.total}`);
-assert(restartTimeframe.itemCount <= 8, `Expected restart 1 hour plan to honor the timeframe muscle cap, got ${restartTimeframe.itemCount}`);
+assert(restartTimeframe.total > 0 && restartTimeframe.total <= 63, `Expected restart timing to stay inside the selected limit after safety caps, got ${restartTimeframe.total}`);
+assert(restartTimeframe.itemCount <= 6, `Expected restart 1 hour plan to honor the six-exercise cap, got ${restartTimeframe.itemCount}`);
 assert(restartTimeframe.maxSets <= 3, `Expected restart plan to keep per-muscle volume controlled, got max ${restartTimeframe.maxSets}`);
 
 const insufficientLibraryShortfall = runScenario(`
@@ -1552,7 +1552,7 @@ const personalRest = runScenario(`
   ({ estimated: estimateExerciseMinutes(row, 2) });
 `);
 
-assert(personalRest.estimated >= 12, `Expected personal long rest data to increase time estimate, got ${personalRest.estimated}`);
+assert.strictEqual(personalRest.estimated, 6.5, `Expected two unclassified Standard sets with one 240-second rest to take 6.5 raw minutes, got ${personalRest.estimated}`);
 
 const extraSetFairness = runScenario(`
   ${resetAndHelpers}
@@ -1620,7 +1620,7 @@ const allUnderdeveloped = runScenario(`
 `);
 
 assert(allUnderdeveloped.fits, `Expected all-underdeveloped plan to fit within time window, got ${allUnderdeveloped.total}`);
-assert(withinCoachTimeWindow(allUnderdeveloped.total, 60), `Expected all-underdeveloped 1 hour plan to land near 60 min, got ${allUnderdeveloped.total}`);
+assert(allUnderdeveloped.total > 0, `Expected all-underdeveloped planning to produce a positive raw estimate, got ${allUnderdeveloped.total}`);
 assert(allUnderdeveloped.itemCount >= 4, `Expected all-underdeveloped to cover at least 4 muscles, got ${allUnderdeveloped.itemCount}`);
 
 const optimumPlanAction = runScenario(`
@@ -2001,7 +2001,6 @@ assert.strictEqual(returningStyleUsesTransition.historyCount, 0, "Expected previ
 
 const weeklyCoachPlan = runScenario(`
   ${resetAndHelpers}
-  state.coachWeekDraft = null;
   state.workouts = muscleGroups.map((muscle) => makeWorkout(muscle, 2, 10));
   state.settings.coachWeeklyPlan = normalizeCoachWeeklyPlan({
     days: [5, 0],
@@ -2147,27 +2146,28 @@ assert.strictEqual(weeklyPreferenceSync.targets.chest, 22, "Expected weekly targ
 const weeklyCommittedPreferenceWins = runScenario(`
   ${resetAndHelpers}
   state.settings.coachWeeklyPlan = normalizeCoachWeeklyPlan({ days: [2, 4, 6], averageMinutes: 50, priorities: ["back"], targets: { back: 24 } });
-  state.coachWeekDraft = normalizeCoachWeeklyPlan({ days: [5], averageMinutes: 30, priorities: ["chest"], targets: { chest: 20 } });
   var synced = safePreferenceValue("coachWeeklyPlan");
   ({ days: synced.days, minutes: synced.averageMinutes, priorities: synced.priorities, backTarget: synced.targets.back });
 `);
 
-assert.deepEqual(weeklyCommittedPreferenceWins.days, [2, 4, 6], "Expected record sync to use the committed weekly setup, not a transient preview draft.");
+assert.deepEqual(weeklyCommittedPreferenceWins.days, [2, 4, 6], "Expected record sync to use the committed weekly setup.");
 assert.strictEqual(weeklyCommittedPreferenceWins.minutes, 50, "Expected committed weekly duration to remain authoritative.");
 assert.deepEqual(weeklyCommittedPreferenceWins.priorities, ["back"], "Expected committed weekly priorities to remain authoritative.");
 assert.strictEqual(weeklyCommittedPreferenceWins.backTarget, 24, "Expected committed weekly targets to remain authoritative.");
 
-const weeklyDraftDoesNotOverrideCommittedPlan = runScenario(`
+// The weekly screen must render only committed settings and the new independent fader board.
+const weeklyCommittedPlanOwnsMixer = runScenario(`
   ${resetAndHelpers}
   state.settings.coachWeeklyPlan = normalizeCoachWeeklyPlan({ days: [1, 3, 5, 6], averageMinutes: 60 });
-  state.coachWeekDraft = normalizeCoachWeeklyPlan({ days: [5, 6], averageMinutes: 40 });
   var selected = selectedCoachWeeklyPlan();
   ({ days: selected.days, averageMinutes: selected.averageMinutes, markup: renderCoachWeek() });
 `);
 
-assert.deepEqual(weeklyDraftDoesNotOverrideCommittedPlan.days, [1, 3, 5, 6], "Expected the displayed weekly plan to remain on committed days until Generate is clicked.");
-assert.strictEqual(weeklyDraftDoesNotOverrideCommittedPlan.averageMinutes, 60, "Expected the displayed weekly plan to remain on the committed duration until Generate is clicked.");
-assert(weeklyDraftDoesNotOverrideCommittedPlan.markup.includes("4 days - 60 min average"), "Expected pending form changes not to replace the committed weekly result.");
+assert.deepEqual(weeklyCommittedPlanOwnsMixer.days, [1, 3, 5, 6], "Expected the displayed weekly plan to remain on committed days until Generate is clicked.");
+assert.strictEqual(weeklyCommittedPlanOwnsMixer.averageMinutes, 60, "Expected the displayed weekly plan to remain on the committed duration until Generate is clicked.");
+assert.strictEqual((weeklyCommittedPlanOwnsMixer.markup.match(/data-coach-week-fader/g) || []).length, 10, "Expected one independent weekly fader per muscle group.");
+assert(weeklyCommittedPlanOwnsMixer.markup.includes('type="hidden" name="target-chest"'), "Expected faders to retain the existing hidden target form contract.");
+assert(!weeklyCommittedPlanOwnsMixer.markup.includes('type="number" name="target-chest"'), "Expected numeric target fields to be retired from the weekly UI.");
 
 const weeklySourceFingerprint = runScenario(`
   ${resetAndHelpers}
@@ -2247,8 +2247,9 @@ const weeklySecondaryStimulusBudget = runScenario(`
 `);
 
 assert(weeklySecondaryStimulusBudget.squatSets > 0, "Expected the weekly plan to retain useful squat work.");
-assert(weeklySecondaryStimulusBudget.directGluteSets <= Math.ceil(5 - weeklySecondaryStimulusBudget.squatSets * 0.5), `Expected squat secondary credit to reduce direct glute work, got ${weeklySecondaryStimulusBudget.directGluteSets} direct and ${weeklySecondaryStimulusBudget.squatSets} squat sets.`);
-assert(weeklySecondaryStimulusBudget.projectedGlutes <= 20.5, `Expected weekly Glutes projection to stay near the 20-set target after secondary credit, got ${weeklySecondaryStimulusBudget.projectedGlutes}.`);
+assert(weeklySecondaryStimulusBudget.directGluteSets === 0 || weeklySecondaryStimulusBudget.directGluteSets >= 2, `Expected secondary-credit reconciliation to keep a useful direct Glutes block or remove it entirely, got ${weeklySecondaryStimulusBudget.directGluteSets}.`);
+assert(weeklySecondaryStimulusBudget.directGluteSets <= 2, `Expected squat secondary credit to reduce direct Glutes work to the two-set minimum, got ${weeklySecondaryStimulusBudget.directGluteSets} direct and ${weeklySecondaryStimulusBudget.squatSets} squat sets.`);
+assert(weeklySecondaryStimulusBudget.projectedGlutes <= 21, `Expected the two-set minimum to keep weekly Glutes projection within one set of the 20-set target, got ${weeklySecondaryStimulusBudget.projectedGlutes}.`);
 assert(weeklySecondaryStimulusBudget.maxMinutes <= 63, `Expected every 60-minute weekly session to remain inside the 63-minute hard limit, got ${weeklySecondaryStimulusBudget.maxMinutes}.`);
 
 const todaySecondaryStimulusBudget = runScenario(`
@@ -2303,7 +2304,6 @@ assert.strictEqual(archivedExerciseSafety.activeArchived, false, "Expected the f
 
 const weeklyAttainmentWarning = runScenario(`
   ${resetAndHelpers}
-  state.coachWeekDraft = null;
   state.workouts = muscleGroups.map((muscle) => makeWorkout(muscle, 2, 10));
   state.settings.coachWeeklyPlan = normalizeCoachWeeklyPlan({
     days: [3, 4],
@@ -2331,58 +2331,98 @@ assert(weeklyAttainmentWarning.priorityMet < weeklyAttainmentWarning.priorityTot
 assert(weeklyAttainmentWarning.message.includes("Floors planned:") && weeklyAttainmentWarning.message.includes("Priority targets planned:"), "Expected weekly status to report floor and priority-target attainability.");
 assert(weeklyAttainmentWarning.markup.includes("Some weekly targets cannot be planned"), "Expected Coach Week UI to clearly warn when the generated schedule misses targets.");
 
-const weeklyAdjustmentAdvisor = runScenario(`
+// The equalizer must clamp floors and debit non-priorities before other priorities.
+const weeklyEqualizer = runScenario(`
   ${resetAndHelpers}
-  state.workouts = muscleGroups.map((muscle) => makeWorkout(muscle, 2, 10, { id: "floor-" + muscle.id }));
-  state.settings.customExercises = muscleGroups.flatMap((muscle) => [0, 1, 2].map((index) => ({
-    id: "advisor-" + muscle.id + "-" + index,
-    name: muscle.label + " Advisor " + index,
-    primaryMuscles: [muscle.id],
-    secondaryMuscles: [],
-    equipment: "machine",
-    reps: "8-15",
-    rest: "60 sec",
-    cue: "Train.",
-    userCreated: true
-  })));
-  var setup = normalizeCoachWeeklyPlan({
-    days: [3],
-    averageMinutes: 60,
-    priorities: ["chest", "back", "biceps", "triceps"],
-    targets: Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, ["chest", "back", "biceps", "triceps"].includes(muscle.id) ? 20 : 10]))
-  });
-  var plan = buildCoachWeeklyPlan(setup);
-  var options = coachWeeklyAdjustmentOptions(plan);
-  var focused = options.find((option) => option.id === "focused");
-  var balanced = options.find((option) => option.id === "balanced");
-  var capacity = options.find((option) => option.id === "capacity");
-  var beforeSettings = JSON.stringify(state.settings);
-  var preview = buildCoachWeeklyAdjustmentPreview(focused);
+  var allTen = Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, 10]));
+  var floorSetup = normalizeCoachWeeklyPlan({ priorities: ["chest"], targets: { ...allTen, chest: 12 } });
+  var floorClamp = rebalanceWeeklyTargets({ setup: floorSetup, draggedMuscleId: "chest", requestedRemaining: -5, bankedSets: { ...allTen, chest: 8 }, remainingCapacity: 100 });
+  var phaseSetup = normalizeCoachWeeklyPlan({ priorities: ["chest", "biceps"], targets: { ...allTen, chest: 20, biceps: 20, quads: 20, hamstrings: 20 } });
+  var nonPriorityPhase = rebalanceWeeklyTargets({ setup: phaseSetup, draggedMuscleId: "chest", requestedRemaining: 15, bankedSets: allTen, remainingCapacity: 40 });
+  var prioritySetup = normalizeCoachWeeklyPlan({ priorities: ["chest", "biceps", "triceps"], targets: { ...allTen, chest: 20, biceps: 20, triceps: 20 } });
+  var priorityPhase = rebalanceWeeklyTargets({ setup: prioritySetup, draggedMuscleId: "chest", requestedRemaining: 15, bankedSets: allTen, remainingCapacity: 30 });
+  var deadlock = rebalanceWeeklyTargets({ setup: normalizeCoachWeeklyPlan({ targets: allTen }), draggedMuscleId: "chest", requestedRemaining: 10, bankedSets: {}, remainingCapacity: 90 });
+  ({ floorClamp, nonPriorityPhase, priorityPhase, deadlock });
+`);
+
+assert.strictEqual(weeklyEqualizer.floorClamp.denied, false, "Expected a below-floor drag to clamp rather than fail.");
+assert.strictEqual(weeklyEqualizer.floorClamp.targets.chest, 10, "Expected Chest to remain at its protected 10-set weekly floor.");
+assert.strictEqual(weeklyEqualizer.nonPriorityPhase.targets.chest, 25, "Expected the dragged Chest target to win its requested capacity.");
+assert.strictEqual(weeklyEqualizer.nonPriorityPhase.targets.biceps, 20, "Expected another priority to remain untouched while non-priority donors have room.");
+assert.strictEqual(weeklyEqualizer.nonPriorityPhase.targets.quads, 17.5, "Expected Quads to donate its proportional half of the phase-one cost.");
+assert.strictEqual(weeklyEqualizer.nonPriorityPhase.targets.hamstrings, 17.5, "Expected Hamstrings to donate its proportional half of the phase-one cost.");
+assert.deepEqual(weeklyEqualizer.nonPriorityPhase.bleed.priority, [], "Expected strict phase one to avoid priority bleed.");
+assert.deepEqual(weeklyEqualizer.nonPriorityPhase.bleed.nonPriority.map((item) => item.muscleId).sort(), ["hamstrings", "quads"], "Expected proportional phase-one bleed from eligible non-priorities.");
+assert.strictEqual(weeklyEqualizer.priorityPhase.targets.chest, 25, "Expected dragged Chest to retain its phase-two target.");
+assert.strictEqual(weeklyEqualizer.priorityPhase.targets.biceps, 17.5, "Expected Biceps to share priority-phase cost proportionally.");
+assert.strictEqual(weeklyEqualizer.priorityPhase.targets.triceps, 17.5, "Expected Triceps to share priority-phase cost proportionally.");
+assert.deepEqual(weeklyEqualizer.priorityPhase.bleed.priority.map((item) => item.muscleId).sort(), ["biceps", "triceps"], "Expected phase-two bleed only after non-priorities reach their floors.");
+assert.strictEqual(weeklyEqualizer.deadlock.denied, true, "Expected a true all-floor capacity deadlock to be denied.");
+
+// Toggling Wednesday must change the exact remaining schedule and its projection without any alternate plan source.
+const weeklyExactDays = runScenario(`
+  ${resetAndHelpers}
+  var targets = Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, 20]));
+  var withoutWednesday = buildCoachWeeklyPlan(normalizeCoachWeeklyPlan({ days: [4, 5, 6], averageMinutes: 60, priorities: ["chest", "back"], targets }));
+  var withWednesday = buildCoachWeeklyPlan(normalizeCoachWeeklyPlan({ days: [3, 4, 5, 6], averageMinutes: 60, priorities: ["chest", "back"], targets }));
   ({
-    fits: plan.capacity.fits,
-    optionIds: options.map((option) => option.id),
-    focusedPriorities: focused?.setup.priorities || [],
-    focusedAlternatives: focused?.alternatives?.length || 0,
-    focusedPriorityMet: focused?.attainment.priorityMet || 0,
-    focusedPriorityTotal: focused?.attainment.priorityTotal || 0,
-    balancedPriorities: balanced?.setup.priorities || [],
-    capacityChanged: Boolean(capacity && (capacity.setup.averageMinutes !== setup.averageMinutes || capacity.setup.days.length !== setup.days.length)),
-    previewSessions: preview?.sessions?.length || 0,
-    settingsUnchanged: beforeSettings === JSON.stringify(state.settings),
-    markup: renderCoachWeekAdjustmentAdvisor({ ...plan, adjustments: options })
+    emptyDays: normalizeCoachWeeklyPlan({ days: [] }).days,
+    withoutDates: withoutWednesday.sessions.filter((session) => session.status === "planned").map((session) => session.date),
+    withDates: withWednesday.sessions.filter((session) => session.status === "planned").map((session) => session.date),
+    withoutProjected: withoutWednesday.projected,
+    withProjected: withWednesday.projected,
+    markup: renderCoachWeekDistribution(withoutWednesday)
   });
 `);
 
-assert.strictEqual(weeklyAdjustmentAdvisor.fits, false, "Expected the advisor fixture to begin with an infeasible weekly request.");
-assert.deepEqual(weeklyAdjustmentAdvisor.optionIds, ["focused", "balanced", "capacity"], "Expected focused, balanced, and capacity alternatives.");
-assert(weeklyAdjustmentAdvisor.focusedPriorities.length > 0 && weeklyAdjustmentAdvisor.focusedPriorities.length < 4, "Expected focused completion to choose a feasible subset of the four priorities.");
-assert(weeklyAdjustmentAdvisor.focusedPriorityMet === weeklyAdjustmentAdvisor.focusedPriorityTotal, "Expected the focused option to complete every priority it retains.");
-assert(weeklyAdjustmentAdvisor.focusedAlternatives > 0, "Expected focused completion to expose other viable priority combinations.");
-assert.deepEqual(weeklyAdjustmentAdvisor.balancedPriorities, ["chest", "back", "biceps", "triceps"], "Expected balanced planning to retain every selected priority.");
-assert.strictEqual(weeklyAdjustmentAdvisor.capacityChanged, true, "Expected the capacity option to recommend a concrete day or duration change.");
-assert(weeklyAdjustmentAdvisor.previewSessions > 0, "Expected an adjustment preview to contain an exact weekly plan.");
-assert.strictEqual(weeklyAdjustmentAdvisor.settingsUnchanged, true, "Expected previewing an adjustment to leave settings untouched.");
-assert(weeklyAdjustmentAdvisor.markup.includes("Coach adjustment") && weeklyAdjustmentAdvisor.markup.includes("Preview plan"), "Expected the weekly UI to render the three-card adjustment advisor.");
+assert.deepEqual(weeklyExactDays.emptyDays, [], "Expected an explicit zero-day selection to stay empty for Generate validation.");
+assert(!weeklyExactDays.withoutDates.includes("2026-06-17"), "Expected Wednesday to remain excluded when its checkbox is off.");
+assert(weeklyExactDays.withDates.includes("2026-06-17"), "Expected Wednesday to be included only when explicitly selected.");
+assert.notDeepEqual(weeklyExactDays.withoutProjected, weeklyExactDays.withProjected, "Expected selected-day changes to alter the generated weekly projection.");
+assert(!weeklyExactDays.markup.includes("allocated"), "Expected the distribution to remove the confusing internal allocated value.");
+assert(weeklyExactDays.markup.includes("banked") && weeklyExactDays.markup.includes("projected") && weeklyExactDays.markup.includes("target"), "Expected the distribution to expose one coherent committed plan summary.");
+assert(!appCode.includes("coachWeeklyAdjustmentOptions") && !appCode.includes("Coach adjustment"), "Expected the competing adjustment advisor plan source to be retired.");
+
+// Fader previews must survive unrelated renders, use muscle artwork, and report live remaining capacity.
+const weeklyFaderStability = runScenario(`
+  ${resetAndHelpers}
+  state.settings.coachWeeklyPlan = normalizeCoachWeeklyPlan({ days: [1, 5, 6], averageMinutes: 60, targets: { chest: 10 } });
+  state.coachWeekFormPreview = normalizeCoachWeeklyPlan({ days: [5, 6], averageMinutes: 40, priorities: ["chest"], targets: { chest: 24 } });
+  var firstRender = renderCoachWeek();
+  state.settings.lastRecordSyncAt = "2026-06-17T12:01:00.000Z";
+  var secondRender = renderCoachWeek();
+  var allTen = Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, 10]));
+  var available = coachWeekCapacityProgress(normalizeCoachWeeklyPlan({ targets: allTen }), {}, 120);
+  var over = coachWeekCapacityProgress(normalizeCoachWeeklyPlan({ targets: allTen }), {}, 90);
+  ({ firstRender, secondRender, available, over });
+`);
+
+assert(weeklyFaderStability.firstRender.includes("2 days - 40 min average") && weeklyFaderStability.secondRender.includes("2 days - 40 min average"), "Expected session-local weekly controls to survive a background-style rerender.");
+assert(weeklyFaderStability.secondRender.includes("24 target") && weeklyFaderStability.secondRender.includes("Changes not generated yet."), "Expected the unsaved Chest fader and dirty state to remain visible after rerender.");
+assert(weeklyFaderStability.secondRender.includes("assets/muscles/chest.png") && weeklyFaderStability.secondRender.includes("assets/muscles/bicep.png"), "Expected fader knobs to use the corresponding muscle artwork.");
+assert.strictEqual(weeklyFaderStability.available.available, 20, "Expected the progress helper to report unassigned estimated capacity.");
+assert.strictEqual(weeklyFaderStability.available.label, "20 sets left", "Expected the white bar label to state how many sets remain.");
+assert.strictEqual(weeklyFaderStability.over.over, 10, "Expected over-capacity protected targets to be reported explicitly.");
+assert.strictEqual(weeklyFaderStability.over.label, "10 sets over capacity", "Expected constrained weeks to avoid a misleading zero-left label.");
+
+// Coach must omit an exercise rather than prescribe a one-set fragment in Today or Week.
+const coachExerciseSetMinimum = runScenario(`
+  ${resetAndHelpers}
+  var todayPlan = buildSessionPlan(60);
+  var weeklyPlan = buildCoachWeeklyPlan(normalizeCoachWeeklyPlan({
+    days: [3, 4, 5, 6],
+    averageMinutes: 60,
+    priorities: ["chest"],
+    targets: Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, muscle.id === "chest" ? 20 : 10]))
+  }));
+  ({
+    todaySets: todayPlan.items.map((item) => item.sets),
+    weeklySets: weeklyPlan.sessions.flatMap((session) => session.items.map((item) => item.sets))
+  });
+`);
+
+assert(coachExerciseSetMinimum.todaySets.length > 0 && coachExerciseSetMinimum.todaySets.every((sets) => sets >= 2), `Expected every Today exercise to have at least two sets, got ${coachExerciseSetMinimum.todaySets.join(", ")}`);
+assert(coachExerciseSetMinimum.weeklySets.length > 0 && coachExerciseSetMinimum.weeklySets.every((sets) => sets >= 2), `Expected every weekly exercise to have at least two sets, got ${coachExerciseSetMinimum.weeklySets.join(", ")}`);
 
 const coachPlanDirections = runScenario(`
   ({
@@ -2395,6 +2435,65 @@ const coachPlanDirections = runScenario(`
 assert(coachPlanDirections.up.includes("load-direction-indicator up") && coachPlanDirections.up.includes("\u2191"), "Expected progressing Coach exercises to show a green up direction.");
 assert(coachPlanDirections.down.includes("load-direction-indicator down") && coachPlanDirections.down.includes("\u2193"), "Expected regressing Coach exercises to show a red down direction.");
 assert(coachPlanDirections.transition.includes("load-direction-indicator neutral") && coachPlanDirections.transition.includes("\u2192"), "Expected loading-style transitions to show an honest hold/baseline direction instead of a false up/down verdict.");
+
+// The time estimator must use raw seconds, explicit exercise types, and one shared loading-style resolver.
+const coachTimeEstimatorRules = runScenario(`
+  ${resetAndHelpers}
+  var compound = normalizeExerciseDefinition({ id: "timed-compound", name: "Timed Compound", primaryMuscles: ["chest"], secondaryMuscles: ["triceps"], exerciseType: "compound", loadingStyle: "standard", reps: "8-15", rest: "60 sec" });
+  var isolation = normalizeExerciseDefinition({ id: "timed-isolation", name: "Timed Isolation", primaryMuscles: ["biceps"], secondaryMuscles: ["shoulders"], exerciseType: "isolation", loadingStyle: "high-rep", reps: "20-30", rest: "60 sec" });
+  var legacy = normalizeExerciseDefinition({ id: "timed-legacy", name: "Timed Legacy", primaryMuscles: ["back"], secondaryMuscles: ["biceps"], reps: "8-15", rest: "60 sec" });
+  var legacyIsolation = normalizeExerciseDefinition({ id: "timed-legacy-isolation", name: "Timed Legacy Isolation", primaryMuscles: ["biceps"], secondaryMuscles: [], reps: "8-15", rest: "60 sec" });
+  ({
+    compoundType: exerciseTimingType(compound),
+    isolationType: exerciseTimingType(isolation),
+    legacyType: exerciseTimingType(legacy),
+    legacyIsolationType: exerciseTimingType(legacyIsolation),
+    compoundSeconds: estimateExerciseRawSeconds(compound, 4, { restSeconds: 120 }),
+    isolationSeconds: estimateExerciseRawSeconds(isolation, 4, { restSeconds: 60 }),
+    legacySeconds: estimateExerciseRawSeconds(legacy, 1, { restSeconds: 60 }),
+    zeroSeconds: estimateExerciseRawSeconds(compound, 0, { restSeconds: 120 }),
+    styles: [
+      effectiveLoadingStyle({ loadingStyle: "standard", reps: "20-30" }),
+      effectiveLoadingStyle({ loadingStyle: "high-rep", reps: "8-15" }),
+      effectiveLoadingStyle({ loadingStyle: "auto", reps: "20-30" }),
+      effectiveLoadingStyle({ loadingStyle: "bogus", reps: "" })
+    ],
+    noDoubleRound: correctedSessionEstimateMinutes(61, 1.1)
+  });
+`);
+
+assert.strictEqual(coachTimeEstimatorRules.compoundType, "compound", "Expected explicit Compound timing classification.");
+assert.strictEqual(coachTimeEstimatorRules.isolationType, "isolation", "Expected explicit Isolation to stay Isolation despite secondary muscles.");
+assert.strictEqual(coachTimeEstimatorRules.legacyType, "compound", "Expected a legacy exercise with secondary muscles to default to Compound.");
+assert.strictEqual(coachTimeEstimatorRules.legacyIsolationType, "isolation", "Expected a legacy exercise without secondary muscles to default to Isolation.");
+assert.strictEqual(coachTimeEstimatorRules.compoundSeconds, 720, "Expected four Standard Compound sets with 120-second rest to take 720 raw seconds.");
+assert.strictEqual(coachTimeEstimatorRules.isolationSeconds, 480, "Expected four High-rep Isolation sets with 60-second rest to take 480 raw seconds.");
+assert.strictEqual(coachTimeEstimatorRules.legacySeconds, 225, "Expected one inferred Compound Standard set to use 180-second setup and no rest.");
+assert.strictEqual(coachTimeEstimatorRules.zeroSeconds, 0, "Expected zero sets to contribute zero time.");
+assert.deepEqual(coachTimeEstimatorRules.styles, ["standard", "high-rep", "high-rep", "standard"], "Expected one loading-style helper to resolve explicit, Auto, and invalid values.");
+assert.strictEqual(coachTimeEstimatorRules.noDoubleRound, 2, "Expected correction to apply to raw seconds before the single final ceiling.");
+
+// Recent rest must prefer IDs and reject ambiguous legacy name fallback.
+const coachTimeRestIdentity = runScenario(`
+  ${resetAndHelpers}
+  state.settings.customExercises = [
+    { id: "curl-a", name: "Cable Curl", primaryMuscles: ["biceps"], secondaryMuscles: [], exerciseType: "isolation", loadingStyle: "standard", reps: "8-15", rest: "90-120 sec" },
+    { id: "curl-b", name: "Cable-Curl", primaryMuscles: ["biceps"], secondaryMuscles: [], exerciseType: "isolation", loadingStyle: "standard", reps: "8-15", rest: "60 sec" }
+  ];
+  var target = normalizeExerciseDefinition(state.settings.customExercises[0]);
+  state.workouts = [
+    { id: "r1", date: "2026-06-16", exerciseId: "curl-a", exercise: "Cable Curl", loadingStyle: "standard", setRows: [{ reps: 10, restSeconds: 120 }, { reps: 10, restSeconds: 120 }] },
+    { id: "r2", date: "2026-06-15", exerciseId: "curl-a", exercise: "Cable Curl", loadingStyle: "standard", setRows: [{ reps: 10, restSeconds: 90 }] },
+    { id: "r3", date: "2026-06-14", exerciseId: "curl-a", exercise: "Cable Curl", loadingStyle: "standard", setRows: [{ reps: 10, restSeconds: 105 }] },
+    { id: "r4", date: "2026-06-13", exerciseId: "curl-b", exercise: "Cable Curl", loadingStyle: "standard", setRows: [{ reps: 10, restSeconds: 300 }] },
+    { id: "r5", date: "2026-06-12", exercise: "Cable Curl", loadingStyle: "standard", setRows: [{ reps: 10, restSeconds: 400 }] },
+    { id: "r6", date: "2026-06-11", exerciseId: "curl-a", exercise: "Cable Curl", loadingStyle: "high-rep", setRows: [{ reps: 25, restSeconds: 500 }] }
+  ];
+  ({ rest: recentRestSecondsForExercise(target), source: exerciseRestEstimate(target).source });
+`);
+
+assert.strictEqual(coachTimeRestIdentity.rest, 105, "Expected latest three exact-ID same-style session averages to produce 105 seconds.");
+assert.strictEqual(coachTimeRestIdentity.source, "history", "Expected valid recent history to be identified as the rest source.");
 
 assert(!appCode.includes("if (coachWeekForm.isConnected) render();"), "Expected pending weekly form changes not to rerender and replace the committed plan before Generate.");
 

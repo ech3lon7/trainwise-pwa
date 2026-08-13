@@ -197,9 +197,12 @@ assert(!appCode.includes('selectedExercise: "Push-up"'), "Expected Log startup n
 assert(!appCode.includes('showBanner("Unsaved draft restored."'), "Expected startup draft recovery not to show a top banner.");
 assert(appCode.includes("notifyMetricSaved"), "Expected metrics saves to use a dedicated bottom-only notification helper.");
 assert(!stylesCode.includes(".mobile-quick-toggle"), "Expected floating quick action button styling to be removed.");
-assert(indexCode.includes("v=1.5.77"), "Expected index shell references to use bumped app version.");
+assert(indexCode.includes("v=1.5.84"), "Expected index shell references to use bumped app version.");
 assert(!indexCode.includes('id="app" class="app-content" aria-live'), "Expected broad app aria-live to be removed in favor of targeted live regions.");
-assert(serviceWorkerCode.includes("trainwise-cache-v99"), "Expected service worker cache version bump.");
+assert(serviceWorkerCode.includes("trainwise-cache-v106"), "Expected service worker cache version bump.");
+// The mobile tab bar must anchor to the visible bottom edge and compact only during active scrolling.
+assert(/\.tabbar\s*\{[^}]*top:\s*auto;[^}]*bottom:\s*env\(safe-area-inset-bottom\)/s.test(stylesCode), "Expected the tab bar to use a stable bottom safe-area anchor instead of a dynamic viewport top offset.");
+assert(stylesCode.includes(".tabbar.is-scrolling") && appCode.includes("updateTabbarScrollState"), "Expected the tab bar to shrink during scrolling and restore after scrolling stops.");
 assert(appCode.includes("data-settings-panel"), "Expected Settings panels to preserve open state with stable panel ids.");
 assert(appCode.includes('forceSettingsPanelOpen("supabase-sync")'), "Expected Supabase actions to keep the Supabase panel open after rendering.");
 
@@ -1696,6 +1699,7 @@ const exerciseFormValidation = runScenario(`
     primaryMuscle: "biceps",
     secondaryMuscles: ["biceps", "forearms", "triceps"],
     equipment: "dumbbells",
+    exerciseType: "isolation",
     reps: "10",
     rest: "1:30",
     cue: "Strict."
@@ -2517,6 +2521,7 @@ const exerciseLoadingPreferences = runScenario(`
     rest: "60 sec",
     progressionMode: "normal",
     loadingStyle: "high-rep",
+    exerciseType: "isolation",
     loadIncrement: "0.5",
     cue: "Keep it clean."
   });
@@ -2532,7 +2537,7 @@ const loadingStyleRepRangeCoherence = runScenario(`
   var normalizedStandard = normalizeExerciseDefinition({ id: "standard", name: "Standard", primaryMuscles: ["biceps"], loadingStyle: "standard", reps: "20-30" });
   var invalidHigh = validateExerciseFormInput({ name: "Invalid High", primaryMuscle: "biceps", reps: "8-15", rest: "60 sec", loadingStyle: "high-rep" });
   var invalidStandard = validateExerciseFormInput({ name: "Invalid Standard", primaryMuscle: "biceps", reps: "20-30", rest: "60 sec", loadingStyle: "standard" });
-  var automatic = validateExerciseFormInput({ name: "Automatic", primaryMuscle: "biceps", reps: "20-30", rest: "60 sec", loadingStyle: "auto" });
+  var automatic = validateExerciseFormInput({ name: "Automatic", primaryMuscle: "biceps", reps: "20-30", rest: "60 sec", loadingStyle: "auto", exerciseType: "isolation" });
   ({ highReps: normalizedHigh.reps, standardReps: normalizedStandard.reps, invalidHigh, invalidStandard, automatic });
 `);
 
@@ -2561,5 +2566,136 @@ const coachSubstitutionProvenance = runScenario(`
 
 assert.strictEqual(coachSubstitutionProvenance.source, "coach-modified", "Expected edits to a Coach draft to retain honest Coach-modified provenance.");
 assert.strictEqual(coachSubstitutionProvenance.hasCopiedRows, false, "Expected edited Coach-copy highlighting metadata to clear.");
+
+const workoutTimerIntervals = runScenario(`
+  ${reset}
+  var timer = {
+    timingSessionId: "timing-1",
+    draftSessionId: "draft-1",
+    draftDate: todayISO(),
+    startedAt: "2026-06-17T12:00:00.000Z",
+    accumulatedActiveSeconds: 30,
+    runningSince: "2026-06-17T12:01:00.000Z"
+  };
+  var elapsed = workoutTimerElapsedSeconds(timer, Date.parse("2026-06-17T12:01:45.000Z"));
+  var paused = pauseWorkoutTimerValue(timer, Date.parse("2026-06-17T12:01:45.000Z"));
+  var resumed = resumeWorkoutTimerValue(paused, Date.parse("2026-06-17T12:05:00.000Z"));
+  ({ elapsed, paused, resumed, rerendered: workoutTimerElapsedSeconds(paused, Date.parse("2026-06-17T12:10:00.000Z")) });
+`);
+
+assert(appCode.includes('suffixMarkup: draft.length ? workoutTimerMarkup({ inline: true }) : ""'), "Expected Strength timer controls to render inside the top date control beside Today.");
+assert(!appCode.includes('${workoutTimerMarkup()}\n            <button class="primary-button lock-button"'), "Expected the timer controls to be removed from the bottom Lock-in area.");
+
+assert.strictEqual(workoutTimerIntervals.elapsed, 75, "Expected elapsed time to add the running interval once.");
+assert.strictEqual(workoutTimerIntervals.paused.accumulatedActiveSeconds, 75, "Expected Pause to freeze the running interval into accumulated time.");
+assert.strictEqual(workoutTimerIntervals.paused.runningSince, "", "Expected Pause to clear the running timestamp.");
+assert.strictEqual(workoutTimerIntervals.resumed.runningSince, "2026-06-17T12:05:00.000Z", "Expected Resume to start one new interval.");
+assert.strictEqual(workoutTimerIntervals.rerendered, 75, "Expected elapsed rendering to leave paused accumulated time unchanged.");
+
+const workoutTimerDraftGuard = runScenario(`
+  ${reset}
+  state.draftDate = todayISO();
+  state.draftSessionId = "active-draft";
+  state.workoutDraft = [{ draftId: "row", exercise: "Bench Press", setRows: [{ weight: 100, reps: 10, rir: 2 }] }];
+  var matching = { timingSessionId: "one", draftSessionId: "active-draft", draftDate: todayISO(), startedAt: new Date().toISOString(), accumulatedActiveSeconds: 0, runningSince: "" };
+  var wrongDraft = { ...matching, draftSessionId: "other" };
+  var historical = { ...matching, draftDate: "2026-06-16" };
+  ({ matching: workoutTimerMatchesActiveDraft(matching), wrongDraft: workoutTimerMatchesActiveDraft(wrongDraft), historical: workoutTimerMatchesActiveDraft(historical) });
+`);
+
+assert.strictEqual(workoutTimerDraftGuard.matching, true, "Expected a current-date timer to match only its own draft identity.");
+assert.strictEqual(workoutTimerDraftGuard.wrongDraft, false, "Expected a timer from another draft to be rejected.");
+assert.strictEqual(workoutTimerDraftGuard.historical, false, "Expected a historical timer to be rejected.");
+
+const timingCoverageGuards = runScenario(`
+  ${reset}
+  ({
+    emptyType: timingTypeClassification({ compoundSets: 0, isolationSets: 0, unclassifiedSets: 0 }),
+    belowType: timingTypeClassification({ compoundSets: 69, isolationSets: 0, unclassifiedSets: 31 }),
+    boundaryType: timingTypeClassification({ compoundSets: 70, isolationSets: 0, unclassifiedSets: 30 }),
+    emptyStyle: timingStyleClassification({ standardSets: 0, highRepSets: 0, allSets: 0 }),
+    boundaryStyle: timingStyleClassification({ standardSets: 7, highRepSets: 3, allSets: 10 })
+  });
+`);
+
+assert.strictEqual(timingCoverageGuards.emptyType.coverage, 0, "Expected zero typed sets to produce zero coverage.");
+assert.strictEqual(timingCoverageGuards.emptyType.key, "unclassified", "Expected an empty session to remain unclassified.");
+assert.strictEqual(timingCoverageGuards.belowType.key, "unclassified", "Expected 69% type coverage to block a specific factor.");
+assert.strictEqual(timingCoverageGuards.boundaryType.key, "compound", "Expected 70% type coverage to permit Compound classification.");
+assert.strictEqual(timingCoverageGuards.emptyStyle.coverage, 0, "Expected zero styled sets to avoid NaN coverage.");
+assert.strictEqual(timingCoverageGuards.boundaryStyle.key, "standard", "Expected 70% Standard share to permit Standard-heavy classification.");
+
+const timingSampleDeduplication = runScenario(`
+  ${reset}
+  var makeTiming = (id, ratio, completedAt) => ({
+    timingSessionId: id,
+    estimatorVersion: COACH_TIME_ESTIMATOR_VERSION,
+    startedAt: new Date(Date.parse(completedAt) - 3600000).toISOString(),
+    completedAt,
+    activeSeconds: 3600 * ratio,
+    baseEstimatedSeconds: 3600,
+    compoundSets: 8,
+    isolationSets: 0,
+    unclassifiedSets: 0,
+    standardSets: 8,
+    highRepSets: 0,
+    allSets: 8
+  });
+  var now = new Date("2026-06-17T18:00:00.000Z");
+  var workouts = [
+    { id: "a", updatedAt: "2026-06-17T17:00:00.000Z", sessionTiming: makeTiming("same", 1.2, "2026-06-17T17:00:00.000Z") },
+    { id: "b", updatedAt: "2026-06-17T17:30:00.000Z", sessionTiming: makeTiming("same", 1.1, "2026-06-17T17:00:00.000Z") },
+    { id: "c", sessionTiming: makeTiming("two", 0.9, "2026-06-16T17:00:00.000Z") },
+    { id: "d", sessionTiming: makeTiming("three", 1.0, "2026-06-15T17:00:00.000Z") }
+  ];
+  var result = timingCorrectionSamples(workouts, now);
+  ({ count: result.samples.length, duplicateIds: result.duplicateIds, canonicalRatio: result.samples.find((sample) => sample.timingSessionId === "same").ratio, global: timingGlobalFactor(result.samples) });
+`);
+
+assert.strictEqual(timingSampleDeduplication.count, 3, "Expected duplicate workout rows to produce one timing sample.");
+assert.deepEqual(timingSampleDeduplication.duplicateIds, ["same"], "Expected duplicate timing IDs to remain diagnosable.");
+assert.strictEqual(timingSampleDeduplication.canonicalRatio, 1.1, "Expected the latest updated canonical row to win a duplicate timing ID.");
+assert.strictEqual(timingSampleDeduplication.global, 1, "Expected three samples to use the half-strength median adjustment.");
+
+const timingFactorBoundaries = runScenario(`
+  ${reset}
+  var samples = (ratios) => ratios.map((ratio, index) => ({ ratio, completedAt: String(20 - index) }));
+  ({
+    two: timingGlobalFactor(samples([1.2, 1.1])),
+    three: timingGlobalFactor(samples([1.2, 1.1, 1.0])),
+    four: timingGlobalFactor(samples([1.3, 1.2, 1.0, 0.9])),
+    five: timingGlobalFactor(samples([1.4, 1.3, 1.2, 1.0, 0.8]))
+  });
+`);
+
+assert.strictEqual(timingFactorBoundaries.two, 1, "Expected fewer than three samples to keep the neutral factor.");
+assert.strictEqual(timingFactorBoundaries.three, 1.05, "Expected three samples to use a half-strength median.");
+assert.strictEqual(timingFactorBoundaries.four, 1.05, "Expected four samples to average the middle ratios before half adjustment.");
+assert.strictEqual(timingFactorBoundaries.five, 1.2, "Expected five samples to use the full latest-five median.");
+
+const exerciseTypeFormRequirement = runScenario(`
+  ${reset}
+  ({
+    missing: validateExerciseFormInput({ name: "Legacy Curl", primaryMuscle: "biceps", reps: "8-15", rest: "60 sec", loadingStyle: "standard" }),
+    isolation: validateExerciseFormInput({ name: "Typed Curl", primaryMuscle: "biceps", reps: "8-15", rest: "60 sec", loadingStyle: "standard", exerciseType: "isolation" })
+  });
+`);
+
+assert.strictEqual(exerciseTypeFormRequirement.missing.ok, false, "Expected new or edited exercises to require an explicit type.");
+assert.strictEqual(exerciseTypeFormRequirement.isolation.ok, true, "Expected an explicit Isolation exercise to validate.");
+assert.strictEqual(exerciseTypeFormRequirement.isolation.exercise.exerciseType, "isolation", "Expected exercise type to persist with the definition.");
+
+const inferredLegacyExerciseFormTypes = runScenario(`
+  ${reset}
+  ({
+    compound: exerciseFormValues({ name: "Legacy Row", secondaryMuscles: ["biceps"] }).exerciseType,
+    isolation: exerciseFormValues({ name: "Legacy Curl", secondaryMuscles: [] }).exerciseType,
+    manualOverride: exerciseFormValues({ name: "Manual Isolation", secondaryMuscles: ["shoulders"], exerciseType: "isolation" }).exerciseType
+  });
+`);
+
+assert.strictEqual(inferredLegacyExerciseFormTypes.compound, "compound", "Expected the Exercise form to label legacy exercises with secondary muscles as Compound.");
+assert.strictEqual(inferredLegacyExerciseFormTypes.isolation, "isolation", "Expected the Exercise form to label legacy exercises without secondary muscles as Isolation.");
+assert.strictEqual(inferredLegacyExerciseFormTypes.manualOverride, "isolation", "Expected a manual Exercise type to override automatic classification.");
 
 console.log("log regression tests passed");

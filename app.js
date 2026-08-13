@@ -3,10 +3,11 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 3;
 const STORES = ["workouts", "metrics", "settings", "syncQueue"];
-const APP_VERSION = "1.5.77";
+const APP_VERSION = "1.5.84";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 const DRAFT_RECOVERY_KEY = "trainwise-draft-recovery-v1";
 const DATED_STRENGTH_DRAFTS_KEY = "trainwise-strength-drafts-by-date-v1";
+const WORKOUT_TIMER_KEY = "trainwise-workout-timer-v1";
 const COPIED_COACH_PLAN_KEY = "trainwise-copied-coach-plan-v1";
 const SYNC_BOOTSTRAP_VERSION = 1;
 const SYNC_POLL_MS = 60000;
@@ -22,9 +23,12 @@ let chartId = 0;
 let reloadingForUpdate = false;
 let renderToken = 0;
 let scrollTopTimer = null;
+let tabbarScrollTimer = null;
+let coachWeekFaderDrag = null;
 let recordSyncTimer = null;
 let recordSyncPromise = null;
 let recordSyncLifecycleStarted = false;
+let workoutTimerTick = null;
 let uiAudioContext = null;
 let uiAudioResumePromise = null;
 let uiAudioNeedsResume = true;
@@ -34,6 +38,9 @@ const MAX_PENDING_UI_CUES = 3;
 const SESSION_LIMIT_MINUTES = 60;
 const COACH_TIME_TOLERANCE_MINUTES = 3;
 const COACH_MAX_EXERCISES_PER_SESSION = 6;
+// Keep every Coach-prescribed exercise large enough to be a useful working block.
+const COACH_MIN_SETS_PER_EXERCISE = 2;
+const COACH_TIME_ESTIMATOR_VERSION = "coach-time-v1";
 const COACH_TIMEFRAME_OPTIONS = [
   { label: "30 min", minutes: 30 },
   { label: "40 min", minutes: 40 },
@@ -209,6 +216,8 @@ const state = {
   openExerciseMenu: null,
   logHistoryExercise: "",
   workoutDraft: [],
+  draftSessionId: "",
+  workoutTimer: null,
   strengthDraftsByDate: {},
   loadedWorkoutDateIds: [],
   historyMode: "records",
@@ -220,8 +229,7 @@ const state = {
   weeklyMuscleDetail: null,
   returnStack: [],
   coachView: "today",
-  coachWeekDraft: null,
-  coachWeekAdjustmentPreview: "",
+  coachWeekFormPreview: null,
   coachTimeframeMinutes: SESSION_LIMIT_MINUTES,
   coachGlobalGrowthMode: "medium",
   coachTargetMuscles: [],
@@ -317,18 +325,26 @@ function shiftISODate(value, deltaDays) {
   return isoFromLocalDate(date);
 }
 
-function renderDateControl({ id, name = "", label = "Date", value = todayISO(), className = "", inputClass = "", clearable = false, required = true } = {}) {
+function renderDateControl({ id, name = "", label = "Date", value = todayISO(), className = "", inputClass = "", clearable = false, required = true, suffixMarkup = "" } = {}) {
   const safeId = escapeHtml(id);
   const safeValue = escapeHtml(value || todayISO());
   return `
     <div class="field date-control-field ${escapeHtml(className)}">
       <label for="${safeId}">${escapeHtml(label)}</label>
-      <div class="date-control">
+      <div class="date-control ${suffixMarkup ? "has-suffix" : ""}">
         <button class="date-step-button" type="button" data-action="date-step" data-date-input="${safeId}" data-date-delta="-1" aria-label="Previous day">&lsaquo;</button>
         <input id="${safeId}" class="${escapeHtml(inputClass)}" ${name ? `name="${escapeHtml(name)}"` : ""} type="date" ${required ? "required" : ""} value="${safeValue}" data-shared-date-input>
         <button class="date-step-button" type="button" data-action="date-step" data-date-input="${safeId}" data-date-delta="1" aria-label="Next day">&rsaquo;</button>
-        <button class="ghost-button date-today-button" type="button" data-action="date-today" data-date-input="${safeId}">Today</button>
-        ${clearable ? `<button class="ghost-button date-clear-button" type="button" data-action="date-clear" data-date-input="${safeId}">Clear</button>` : ""}
+        ${suffixMarkup ? `
+          <div class="date-control-tail">
+            <button class="ghost-button date-today-button" type="button" data-action="date-today" data-date-input="${safeId}">Today</button>
+            ${suffixMarkup}
+            ${clearable ? `<button class="ghost-button date-clear-button" type="button" data-action="date-clear" data-date-input="${safeId}">Clear</button>` : ""}
+          </div>
+        ` : `
+          <button class="ghost-button date-today-button" type="button" data-action="date-today" data-date-input="${safeId}">Today</button>
+          ${clearable ? `<button class="ghost-button date-clear-button" type="button" data-action="date-clear" data-date-input="${safeId}">Clear</button>` : ""}
+        `}
       </div>
     </div>
   `;
@@ -1006,6 +1022,23 @@ function normalizeLoadingStyle(value) {
   return LOADING_STYLE_OPTIONS.some((option) => option.id === style) ? style : "auto";
 }
 
+// Preserve manual classifications, then classify legacy exercises from secondary-muscle usage.
+function normalizeExerciseType(value) {
+  const type = String(value || "").trim();
+  return ["compound", "isolation"].includes(type) ? type : "";
+}
+
+function exerciseTimingType(exercise = {}) {
+  const explicitType = normalizeExerciseType(exercise.exerciseType);
+  if (explicitType) return explicitType;
+  return Array.isArray(exercise.secondaryMuscles) && exercise.secondaryMuscles.length ? "compound" : "isolation";
+}
+
+function exerciseTypeLabel(exercise = {}) {
+  const type = exerciseTimingType(exercise);
+  return type === "compound" ? "Compound" : type === "isolation" ? "Isolation" : "Unclassified";
+}
+
 function loadingStyleLabel(value) {
   return LOADING_STYLE_OPTIONS.find((option) => option.id === normalizeLoadingStyle(value))?.label || "Coach chooses";
 }
@@ -1021,9 +1054,11 @@ function effectiveLoadIncrement(exercise = {}, weight = 0) {
 }
 
 function effectiveLoadingStyle(exercise = {}) {
-  const style = normalizeLoadingStyle(exercise.loadingStyle);
-  if (style !== "auto") return style;
-  return parseRepRange(exercise.reps).low >= 15 ? "high-rep" : "standard";
+  const definition = typeof exercise === "object" && exercise !== null ? exercise : { loadingStyle: exercise };
+  const rawStyle = String(definition.loadingStyle || "").trim();
+  if (rawStyle === "standard" || rawStyle === "high-rep") return rawStyle;
+  if (rawStyle !== "auto") return "standard";
+  return parseRepRange(definition.reps).low >= 15 ? "high-rep" : "standard";
 }
 
 function repRangeForLoadingStyle(reps, loadingStyle) {
@@ -1036,7 +1071,7 @@ function repRangeForLoadingStyle(reps, loadingStyle) {
 }
 
 function workoutLoadingStyle(workout = {}) {
-  return normalizeLoadingStyle(workout.loadingStyle) === "high-rep" ? "high-rep" : "standard";
+  return effectiveLoadingStyle(workout);
 }
 
 function normalizeExerciseDefinition(exercise) {
@@ -1059,6 +1094,7 @@ function normalizeExerciseDefinition(exercise) {
     rest: String(exercise.rest || "60-120 sec").trim() || "60-120 sec",
     progressionMode: normalizeProgressionMode(exercise.progressionMode),
     loadingStyle,
+    exerciseType: normalizeExerciseType(exercise.exerciseType),
     loadIncrement: normalizeLoadIncrement(exercise.loadIncrement),
     cue: String(exercise.cue || "Custom exercise. Keep form strict and progress gradually.").trim(),
     userCreated: true,
@@ -1689,6 +1725,7 @@ function exerciseFormValuesFromInput(data = {}) {
     rest: String(formDataValue(data, "rest") || "").trim(),
     progressionMode: normalizeProgressionMode(formDataValue(data, "progressionMode")),
     loadingStyle: normalizeLoadingStyle(formDataValue(data, "loadingStyle")),
+    exerciseType: normalizeExerciseType(formDataValue(data, "exerciseType")),
     loadIncrement: normalizeLoadIncrement(formDataValue(data, "loadIncrement")),
     cue: String(formDataValue(data, "cue") || "").trim()
   };
@@ -1699,6 +1736,7 @@ function validateExerciseFormInput(data = {}, editingId = state.editingExerciseI
   const errors = {};
   const validMuscleIds = new Set(muscleGroups.map((muscle) => muscle.id));
   if (!values.name) errors.name = "Exercise name is required.";
+  if (!values.exerciseType) errors.exerciseType = "Choose Compound or Isolation.";
   const primaryMuscle = validMuscleIds.has(values.primaryMuscle) ? values.primaryMuscle : "chest";
   const duplicate = getCustomExercises({ includeArchived: true }).find((exercise) => (
     exercise.id !== editingId && normalizeName(exercise.name) === normalizeName(values.name)
@@ -1729,6 +1767,7 @@ function validateExerciseFormInput(data = {}, editingId = state.editingExerciseI
       rest,
       progressionMode: normalizeProgressionMode(values.progressionMode),
       loadingStyle: normalizeLoadingStyle(values.loadingStyle),
+      exerciseType: values.exerciseType,
       loadIncrement: normalizeLoadIncrement(values.loadIncrement),
       cue: values.cue || "Custom exercise. Keep form strict and progress gradually."
     }
@@ -2485,6 +2524,7 @@ function exerciseFormDraftFromForm(form = document.getElementById("exercise-form
     || values.equipment
     || values.reps
     || values.rest
+    || values.exerciseType
     || values.cue
     || (values.secondaryMuscles || []).length
     || values.primaryMuscle !== "chest";
@@ -2515,6 +2555,7 @@ function normalizeRecoveredStrengthDraft(saved) {
     date: saved.date || todayISO(),
     selectedExercise: saved.selectedExercise || "",
     draftTargetMuscle: saved.draftTargetMuscle || "chest",
+    draftSessionId: String(saved.draftSessionId || "").trim() || uid(),
     workoutDraft: saved.workoutDraft.map((draft) => ({
       ...draft,
       draftId: draft.draftId || uid(),
@@ -2523,14 +2564,18 @@ function normalizeRecoveredStrengthDraft(saved) {
   };
 }
 
-function saveStrengthDraftForDate(date = state.draftDate) {
+function saveStrengthDraftForDate(date = state.draftDate, options = {}) {
   const key = date || todayISO();
   const drafts = { ...readStrengthDraftsByDate() };
-  if (key === state.draftDate && hasMeaningfulStrengthDraft()) {
+  const timerOwnsDraft = state.workoutTimer
+    && state.workoutTimer.draftDate === key
+    && state.workoutTimer.draftSessionId === state.draftSessionId;
+  if (key === state.draftDate && (hasMeaningfulStrengthDraft() || options.force === true || timerOwnsDraft)) {
     drafts[key] = {
       date: key,
       selectedExercise: state.selectedExercise,
       draftTargetMuscle: state.draftTargetMuscle,
+      draftSessionId: ensureDraftSessionId(),
       workoutDraft: clonePlain(state.workoutDraft)
     };
   } else if (key === state.draftDate) {
@@ -2557,6 +2602,7 @@ function applyRecoveredStrengthDraft(saved) {
   state.draftDate = recovered.date;
   state.selectedExercise = recovered.selectedExercise;
   state.draftTargetMuscle = recovered.draftTargetMuscle;
+  state.draftSessionId = recovered.draftSessionId;
   state.workoutDraft = recovered.workoutDraft;
   state.editingWorkoutId = null;
   state.loadedWorkoutDateIds = [];
@@ -3209,21 +3255,349 @@ function hasPrimaryExerciseForMuscle(muscleId) {
   return exerciseDatabase().some((exercise) => exercise.primaryMuscles.includes(muscleId));
 }
 
-function estimateExerciseMinutes(exercise, sets) {
-  const personalRestSeconds = averageRestSecondsForExercise(exercise);
-  const restMatch = String(exercise.rest || "90 sec").match(/(\d+)(?:-(\d+))?/);
-  const restSeconds = personalRestSeconds
-    || (restMatch ? (Number(restMatch[2] || restMatch[1]) + Number(restMatch[1])) / 2 : 90);
-  const isCompound = (exercise.secondaryMuscles || []).length > 0;
-  const compoundMultiplier = isCompound ? 1.15 : 1;
-  const perSetMinutes = (0.75 + restSeconds / 60) * compoundMultiplier;
-  return Math.ceil(3 + sets * perSetMinutes);
+// Resolve a legacy name only when it identifies exactly one current or archived definition.
+function uniqueExerciseDefinitionByName(name) {
+  const normalized = normalizeName(name);
+  if (!normalized) return null;
+  const matches = (Array.isArray(state.settings.customExercises) ? state.settings.customExercises : [])
+    .map(normalizeExerciseDefinition)
+    .filter(Boolean)
+    .filter((definition) => normalizeName(definition.name) === normalized);
+  return matches.length === 1 ? matches[0] : null;
+}
+
+function ensureDraftSessionId() {
+  if (!state.draftSessionId) state.draftSessionId = uid();
+  return state.draftSessionId;
+}
+
+function normalizeWorkoutTimer(timer) {
+  if (!timer || typeof timer !== "object") return null;
+  const normalized = {
+    timingSessionId: String(timer.timingSessionId || "").trim(),
+    draftSessionId: String(timer.draftSessionId || "").trim(),
+    draftDate: String(timer.draftDate || "").trim(),
+    startedAt: String(timer.startedAt || "").trim(),
+    accumulatedActiveSeconds: Math.max(0, Number(timer.accumulatedActiveSeconds) || 0),
+    runningSince: timer.runningSince ? String(timer.runningSince) : ""
+  };
+  return normalized.timingSessionId && normalized.draftSessionId && normalized.draftDate ? normalized : null;
+}
+
+function workoutTimerElapsedSeconds(timer, now = Date.now()) {
+  const normalized = normalizeWorkoutTimer(timer);
+  if (!normalized) return 0;
+  const runningMs = normalized.runningSince ? Math.max(0, Number(now) - Date.parse(normalized.runningSince)) : 0;
+  return Math.max(0, normalized.accumulatedActiveSeconds + runningMs / 1000);
+}
+
+function pauseWorkoutTimerValue(timer, now = Date.now()) {
+  const normalized = normalizeWorkoutTimer(timer);
+  if (!normalized || !normalized.runningSince) return normalized;
+  return { ...normalized, accumulatedActiveSeconds: workoutTimerElapsedSeconds(normalized, now), runningSince: "" };
+}
+
+function resumeWorkoutTimerValue(timer, now = Date.now()) {
+  const normalized = normalizeWorkoutTimer(timer);
+  if (!normalized || normalized.runningSince) return normalized;
+  return { ...normalized, runningSince: new Date(now).toISOString() };
+}
+
+function workoutTimerMatchesActiveDraft(timer = state.workoutTimer) {
+  const normalized = normalizeWorkoutTimer(timer);
+  if (!normalized) return false;
+  const drafts = Array.isArray(state.workoutDraft) ? state.workoutDraft : [];
+  const editingSavedWorkout = drafts.some((draft) => draft.editingWorkoutId);
+  return !editingSavedWorkout
+    && normalized.draftDate === todayISO()
+    && normalized.draftDate === state.draftDate
+    && normalized.draftSessionId === state.draftSessionId;
+}
+
+function persistWorkoutTimer(timer = state.workoutTimer) {
+  state.workoutTimer = normalizeWorkoutTimer(timer);
+  if (state.workoutTimer) safeLocalStorageSet(WORKOUT_TIMER_KEY, JSON.stringify(state.workoutTimer));
+  else safeLocalStorageRemove(WORKOUT_TIMER_KEY);
+  return state.workoutTimer;
+}
+
+function discardStaleWorkoutTimer() {
+  if (state.workoutTimer && !workoutTimerMatchesActiveDraft(state.workoutTimer)) persistWorkoutTimer(null);
+  return state.workoutTimer;
+}
+
+function loadWorkoutTimer() {
+  try {
+    state.workoutTimer = normalizeWorkoutTimer(JSON.parse(safeLocalStorageGet(WORKOUT_TIMER_KEY) || "null"));
+  } catch {
+    state.workoutTimer = null;
+  }
+  if (state.workoutTimer && !state.workoutDraft.length && state.workoutTimer.draftDate === todayISO()) {
+    const savedDraft = strengthDraftForDate(state.workoutTimer.draftDate);
+    if (savedDraft?.draftSessionId === state.workoutTimer.draftSessionId) applyRecoveredStrengthDraft(savedDraft);
+  }
+  return discardStaleWorkoutTimer();
+}
+
+function workoutTimerAvailable() {
+  const drafts = Array.isArray(state.workoutDraft) ? state.workoutDraft : [];
+  return state.logMode === "strength"
+    && state.draftDate === todayISO()
+    && drafts.length > 0
+    && !drafts.some((draft) => draft.editingWorkoutId);
+}
+
+function formatWorkoutTimer(seconds) {
+  const total = Math.max(0, Math.floor(Number(seconds) || 0));
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const remainder = String(total % 60).padStart(2, "0");
+  return hours ? `${hours}:${String(minutes).padStart(2, "0")}:${remainder}` : `${minutes}:${remainder}`;
+}
+
+function startWorkoutTimerTicker() {
+  if (workoutTimerTick) return;
+  workoutTimerTick = window.setInterval(() => {
+    const output = document.querySelector("[data-workout-timer-output]");
+    if (output && state.workoutTimer?.runningSince) output.textContent = formatWorkoutTimer(workoutTimerElapsedSeconds(state.workoutTimer));
+  }, 1000);
+}
+
+// Keep historical rest matching strict so renamed or duplicated exercises cannot contaminate estimates.
+function workoutMatchesTimingExercise(workout, exercise) {
+  const exerciseId = String(exercise?.id || "").trim();
+  const workoutId = String(workout?.exerciseId || "").trim();
+  if (exerciseId && workoutId) return exerciseId === workoutId;
+  if (workoutId || !exerciseId) return false;
+  const resolved = uniqueExerciseDefinitionByName(workout?.exercise);
+  return resolved?.id === exerciseId;
+}
+
+// Parse the configured rest range without using submitted-session data.
+function configuredRestSecondsForExercise(exercise = {}) {
+  const text = String(exercise.rest || "").trim();
+  if (!text) return 90;
+  const parts = text.split(/\s*-\s*/).map(parseRestSeconds).filter(Number.isFinite);
+  if (parts.length === 1 && parts[0] >= 15 && parts[0] <= 600) return parts[0];
+  if (parts.length >= 2 && parts[0] >= 15 && parts[1] <= 600) return (parts[0] + parts[1]) / 2;
+  return 90;
+}
+
+// Average the latest three eligible submitted-session rest averages for this identity and style.
+function exerciseRestEstimate(exercise, options = {}) {
+  const workouts = Array.isArray(options.workouts) ? options.workouts : state.workouts;
+  const excludedIds = new Set((options.excludeWorkoutIds || []).map(String));
+  const style = effectiveLoadingStyle(exercise);
+  const sessionAverages = workoutsNewestFirst(workouts)
+    .filter((workout) => !excludedIds.has(String(workout.id || "")))
+    .filter((workout) => workoutMatchesTimingExercise(workout, exercise))
+    .filter((workout) => workoutLoadingStyle(workout) === style)
+    .map((workout) => {
+      const rests = setRowsFromWorkout(workout)
+        .map((row) => row.restSeconds)
+        .filter((value) => Number.isFinite(value) && value >= 15 && value <= 600);
+      return rests.length ? rests.reduce((sum, value) => sum + value, 0) / rests.length : null;
+    })
+    .filter(Number.isFinite)
+    .slice(0, 3);
+  if (sessionAverages.length) {
+    return {
+      seconds: sessionAverages.reduce((sum, value) => sum + value, 0) / sessionAverages.length,
+      source: "history",
+      sessionCount: sessionAverages.length
+    };
+  }
+  return { seconds: configuredRestSecondsForExercise(exercise), source: "configured", sessionCount: 0 };
+}
+
+function recentRestSecondsForExercise(exercise, options = {}) {
+  const estimate = exerciseRestEstimate(exercise, options);
+  return estimate.source === "history" ? estimate.seconds : null;
+}
+
+// Calculate one exercise in raw seconds; session rounding happens only after correction is applied.
+function estimateExerciseRawSeconds(exercise, sets, options = {}) {
+  const setCount = Math.max(0, Math.floor(Number(sets) || 0));
+  if (!setCount) return 0;
+  const setupSeconds = exerciseTimingType(exercise) === "compound" ? 180 : 60;
+  const workSeconds = effectiveLoadingStyle(exercise) === "high-rep" ? 60 : 45;
+  const restSeconds = Number.isFinite(options.restSeconds)
+    ? Math.max(0, options.restSeconds)
+    : exerciseRestEstimate(exercise, options).seconds;
+  return setupSeconds + (setCount * workSeconds) + (Math.max(0, setCount - 1) * restSeconds);
+}
+
+// Sum raw exercise estimates without per-exercise rounding.
+function estimateSessionRawSeconds(items = [], options = {}) {
+  return items.reduce((total, item) => {
+    const exercise = item.exercise || item;
+    const sets = item.sets ?? item.setCount ?? 0;
+    return total + estimateExerciseRawSeconds(exercise, sets, options);
+  }, 0);
+}
+
+// Apply the personal factor once, then round the final session estimate once.
+function correctedSessionEstimateMinutes(totalRawSeconds, correctionFactor = 1) {
+  const seconds = Math.max(0, Number(totalRawSeconds) || 0);
+  const factor = Number.isFinite(correctionFactor) && correctionFactor > 0 ? correctionFactor : 1;
+  return seconds ? Math.ceil((seconds * factor) / 60) : 0;
+}
+
+function timingMedian(values = []) {
+  const sorted = values.filter(Number.isFinite).sort((a, b) => a - b);
+  if (!sorted.length) return null;
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
+}
+
+function timingCoverage(knownSets, allSets) {
+  const known = Number(knownSets);
+  const total = Number(allSets);
+  if (!Number.isFinite(known) || !Number.isFinite(total) || total <= 0) return 0;
+  const coverage = known / total;
+  return Number.isFinite(coverage) ? Math.max(0, Math.min(1, coverage)) : 0;
+}
+
+// Classify a frozen session only when enough of its submitted sets are explicitly typed.
+function timingTypeClassification(metadata = {}) {
+  const compoundSets = Math.max(0, Number(metadata.compoundSets) || 0);
+  const isolationSets = Math.max(0, Number(metadata.isolationSets) || 0);
+  const unclassifiedSets = Math.max(0, Number(metadata.unclassifiedSets) || 0);
+  const knownTypeSets = compoundSets + isolationSets;
+  const allSets = knownTypeSets + unclassifiedSets;
+  const coverage = timingCoverage(knownTypeSets, allSets);
+  if (coverage < 0.7 || knownTypeSets <= 0) return { key: "unclassified", coverage, allSets };
+  if (compoundSets / knownTypeSets >= 0.7) return { key: "compound", coverage, allSets };
+  if (isolationSets / knownTypeSets >= 0.7) return { key: "isolation", coverage, allSets };
+  return { key: "mixed", coverage, allSets };
+}
+
+// Shared loading-style counts are still guarded so malformed imported metadata cannot create NaN factors.
+function timingStyleClassification(metadata = {}) {
+  const standardSets = Math.max(0, Number(metadata.standardSets) || 0);
+  const highRepSets = Math.max(0, Number(metadata.highRepSets) || 0);
+  const knownStyleSets = standardSets + highRepSets;
+  const allSets = Math.max(0, Number(metadata.allSets) || knownStyleSets);
+  const coverage = timingCoverage(knownStyleSets, allSets);
+  if (coverage < 0.7 || knownStyleSets <= 0) return { key: "unclassified", coverage, allSets };
+  if (standardSets / knownStyleSets >= 0.7) return { key: "standard", coverage, allSets };
+  if (highRepSets / knownStyleSets >= 0.7) return { key: "high-rep", coverage, allSets };
+  return { key: "mixed", coverage, allSets };
+}
+
+function validTimingMetadata(metadata = {}) {
+  return String(metadata.timingSessionId || "").trim()
+    && String(metadata.estimatorVersion || "").trim()
+    && Number.isFinite(Number(metadata.activeSeconds))
+    && Number.isFinite(Number(metadata.baseEstimatedSeconds))
+    && Number(metadata.baseEstimatedSeconds) > 0
+    && Number.isFinite(Date.parse(metadata.startedAt || ""))
+    && Number.isFinite(Date.parse(metadata.completedAt || ""));
+}
+
+// Deduplicate lock-in rows and imported copies before building correction samples.
+function timingCorrectionSamples(workouts = state.workouts, now = new Date()) {
+  const groups = new Map();
+  (workouts || []).forEach((workout) => {
+    const metadata = workout?.sessionTiming;
+    const id = String(metadata?.timingSessionId || "").trim();
+    if (!id) return;
+    if (!groups.has(id)) groups.set(id, []);
+    groups.get(id).push(workout);
+  });
+  const duplicateIds = [...groups.entries()].filter(([, entries]) => entries.length > 1).map(([id]) => id);
+  const canonical = [...groups.values()].map((entries) => [...entries].sort((a, b) => {
+    const validCompare = Number(validTimingMetadata(b.sessionTiming)) - Number(validTimingMetadata(a.sessionTiming));
+    if (validCompare) return validCompare;
+    const completedCompare = String(b.sessionTiming?.completedAt || "").localeCompare(String(a.sessionTiming?.completedAt || ""));
+    if (completedCompare) return completedCompare;
+    const updatedCompare = String(b.updatedAt || "").localeCompare(String(a.updatedAt || ""));
+    if (updatedCompare) return updatedCompare;
+    return String(b.id || "").localeCompare(String(a.id || ""));
+  })[0]);
+  const nowMs = now instanceof Date ? now.getTime() : new Date(now).getTime();
+  const samples = canonical.map((workout) => {
+    const metadata = workout.sessionTiming || {};
+    const activeSeconds = Number(metadata.activeSeconds);
+    const baseEstimatedSeconds = Number(metadata.baseEstimatedSeconds);
+    const completedMs = Date.parse(metadata.completedAt || "");
+    let excludedReason = "";
+    if (!validTimingMetadata(metadata)) excludedReason = "invalid metadata";
+    else if (metadata.estimatorVersion !== COACH_TIME_ESTIMATOR_VERSION) excludedReason = "estimator version";
+    else if (activeSeconds < 300 || activeSeconds > 14400) excludedReason = "duration outside 5-240 minutes";
+    else if (!Number.isFinite(nowMs) || nowMs - completedMs > 42 * 86400000 || completedMs > nowMs + 60000) excludedReason = "outside 42 days";
+    const ratio = Math.max(0.7, Math.min(1.4, activeSeconds / baseEstimatedSeconds));
+    return {
+      timingSessionId: metadata.timingSessionId,
+      workoutId: workout.id,
+      completedAt: metadata.completedAt,
+      ratio,
+      type: timingTypeClassification(metadata),
+      style: timingStyleClassification(metadata),
+      excludedReason
+    };
+  }).sort((a, b) => String(b.completedAt || "").localeCompare(String(a.completedAt || "")));
+  return { samples: samples.filter((sample) => !sample.excludedReason), excluded: samples.filter((sample) => sample.excludedReason), duplicateIds };
+}
+
+function timingGlobalFactor(samples = []) {
+  const latest = samples.slice(0, samples.length >= 5 ? 5 : samples.length >= 3 ? samples.length : 0);
+  if (!latest.length) return 1;
+  const median = timingMedian(latest.map((sample) => sample.ratio));
+  return latest.length < 5 ? 1 + (median - 1) * 0.5 : median;
+}
+
+function timingFactorForClassification(samples, category, key) {
+  if (!key || ["unclassified", "mixed"].includes(key)) return null;
+  const matching = samples.filter((sample) => sample[category]?.key === key).slice(0, 5);
+  return matching.length >= 5 ? timingMedian(matching.map((sample) => sample.ratio)) : null;
+}
+
+// Build frozen set counts for submitted metadata and planned-session classification.
+function timingSetCounts(items = []) {
+  return items.reduce((counts, item) => {
+    const exercise = item.exercise || item;
+    const sets = Math.max(0, Math.floor(Number(item.sets ?? item.setCount ?? item.setRows?.length) || 0));
+    if (!sets) return counts;
+    const type = exerciseTimingType(exercise);
+    counts[`${type}Sets`] += sets;
+    const style = effectiveLoadingStyle(exercise);
+    counts[style === "high-rep" ? "highRepSets" : "standardSets"] += sets;
+    counts.allSets += sets;
+    return counts;
+  }, { compoundSets: 0, isolationSets: 0, unclassifiedSets: 0, standardSets: 0, highRepSets: 0, allSets: 0 });
+}
+
+// Blend global and sufficiently sampled matching factors without multiplying them.
+function timingCorrectionProfile(items = [], workouts = state.workouts, now = new Date()) {
+  const diagnostics = timingCorrectionSamples(workouts, now);
+  const counts = timingSetCounts(items);
+  const type = timingTypeClassification(counts);
+  const style = timingStyleClassification(counts);
+  const globalFactor = timingGlobalFactor(diagnostics.samples);
+  const typeFactor = timingFactorForClassification(diagnostics.samples, "type", type.key);
+  const styleFactor = timingFactorForClassification(diagnostics.samples, "style", style.key);
+  const factors = [{ key: "global", weight: 0.6, value: globalFactor }];
+  if (Number.isFinite(typeFactor)) factors.push({ key: "type", weight: 0.25, value: typeFactor });
+  if (Number.isFinite(styleFactor)) factors.push({ key: "style", weight: 0.15, value: styleFactor });
+  const totalWeight = factors.reduce((sum, factor) => sum + factor.weight, 0);
+  const factor = factors.reduce((sum, item) => sum + item.value * item.weight, 0) / totalWeight;
+  return { factor, factors, counts, type, style, ...diagnostics };
+}
+
+function estimateCoachSessionTiming(items = [], options = {}) {
+  const workouts = Array.isArray(options.workouts) ? options.workouts : state.workouts;
+  const rawSeconds = estimateSessionRawSeconds(items, { ...options, workouts });
+  const correction = timingCorrectionProfile(items, workouts, options.now || new Date());
+  return { rawSeconds, minutes: correctedSessionEstimateMinutes(rawSeconds, correction.factor), correction };
+}
+
+function estimateExerciseMinutes(exercise, sets, options = {}) {
+  return estimateExerciseRawSeconds(exercise, sets, options) / 60;
 }
 
 function exercisePlanType(exercise = {}) {
-  const primaryCount = (exercise.primaryMuscles || []).length;
-  const secondaryCount = (exercise.secondaryMuscles || []).length;
-  return primaryCount > 1 || secondaryCount > 0 ? "compound" : "isolation";
+  return exerciseTimingType(exercise) === "compound" ? "compound" : "isolation";
 }
 
 function coachItemPrimaryMuscle(item = {}) {
@@ -3262,11 +3636,8 @@ function orderCoachSessionItems(items = []) {
 }
 
 function averageRestSecondsForExercise(exercise) {
-  const values = exerciseHistoryForDefinition(exercise)
-    .map(averageRestSeconds)
-    .filter((value) => Number.isFinite(value) && value > 0);
-  if (!values.length) return null;
-  return values.reduce((sum, value) => sum + value, 0) / values.length;
+  const estimate = exerciseRestEstimate(exercise);
+  return estimate.source === "history" ? estimate.seconds : null;
 }
 
 function latestWorkoutForMuscle(muscleId, mode = "any", workouts = state.workouts) {
@@ -3489,6 +3860,14 @@ function plannedExerciseMinutes(item, sets = item.sets) {
   return estimateExerciseMinutes(item.exercise, sets);
 }
 
+function plannedCoachSessionMinutes(items = []) {
+  return estimateCoachSessionTiming(items).minutes;
+}
+
+function plannedCoachSessionMinutesWithSet(items, targetItem, sets) {
+  return plannedCoachSessionMinutes(items.map((item) => item === targetItem ? { ...item, sets } : item));
+}
+
 function coachModePlanningBehavior(growthMode, caps, isTarget = false) {
   const option = coachGrowthModeOption(growthMode);
   const mode = option.id;
@@ -3553,15 +3932,15 @@ function initialSetsForPlanTarget(target, caps, allowHighVolume = false, growthM
   const gap = planSetGap(target, allowHighVolume, growthMode);
   if (!gap) return 0;
   const behavior = coachModePlanningBehavior(growthMode, caps);
-  return Math.max(1, Math.min(behavior.maxSets, gap, behavior.startSets));
+  return Math.max(COACH_MIN_SETS_PER_EXERCISE, Math.min(behavior.maxSets, gap, behavior.startSets));
 }
 
 function maxSetsForPlanTarget(target, caps, fillToTime = false, allowHighVolume = false, growthMode = coachGrowthModeForMuscle(target.id), isTarget = false) {
   const targetGap = planSetGap(target, allowHighVolume, growthMode);
   const modeMaxSets = maxSetsForMode(caps, growthMode, isTarget);
   if (!targetGap) return 0;
-  if (fillToTime) return Math.max(1, Math.min(modeMaxSets, targetGap));
-  return Math.max(1, Math.min(modeMaxSets, Math.max(1, Math.ceil(target.deficit))));
+  if (fillToTime) return Math.max(COACH_MIN_SETS_PER_EXERCISE, Math.min(modeMaxSets, targetGap));
+  return Math.max(COACH_MIN_SETS_PER_EXERCISE, Math.min(modeMaxSets, Math.max(COACH_MIN_SETS_PER_EXERCISE, Math.ceil(target.deficit))));
 }
 
 function targetReserveSetCount(target, growthMode, limitMinutes = selectedCoachTimeframeMinutes()) {
@@ -3569,7 +3948,8 @@ function targetReserveSetCount(target, growthMode, limitMinutes = selectedCoachT
   const base = mode === "soft" ? 2 : mode === "aggressive" ? 4 : 3;
   const timed = limitMinutes <= 40 ? Math.min(base, 2) : limitMinutes >= 75 && mode === "aggressive" ? 5 : base;
   const highVolumeRoom = Math.max(0, Math.floor(HYPERTROPHY.highVolumeFillMax - target.sets));
-  return Math.min(timed, highVolumeRoom);
+  // A selected target with any remaining room receives a useful two-set block instead of a one-set fragment.
+  return highVolumeRoom > 0 ? Math.max(COACH_MIN_SETS_PER_EXERCISE, Math.min(timed, highVolumeRoom)) : 0;
 }
 
 function coachExerciseStimulusCredits(exercise, sets = 1) {
@@ -3597,27 +3977,30 @@ function reconcileCoachSecondaryStimulus(sessions, projected, targets) {
   muscleGroups.forEach((muscle) => {
     const target = Math.max(HYPERTROPHY.minimumSets, Number(targets?.[muscle.id]) || HYPERTROPHY.minimumSets);
     while ((projected[muscle.id] || 0) - target >= 1) {
+      // Reconcile excess secondary credit by trimming larger blocks or removing a complete two-set block.
       const candidates = plannedSessions.flatMap((session) => session.items.map((item) => ({ session, item })))
-        .filter(({ item }) => item.muscle.id === muscle.id && item.sets > 0)
+        .filter(({ item }) => item.muscle.id === muscle.id && item.sets >= COACH_MIN_SETS_PER_EXERCISE)
         .sort((a, b) => (
           a.item.exercise.secondaryMuscles.length - b.item.exercise.secondaryMuscles.length
           || b.item.sets - a.item.sets
         ));
       const candidate = candidates.find(({ item }) => {
-        const credits = coachExerciseStimulusCredits(item.exercise, 1);
+        const removableSets = item.sets === COACH_MIN_SETS_PER_EXERCISE ? COACH_MIN_SETS_PER_EXERCISE : 1;
+        const credits = coachExerciseStimulusCredits(item.exercise, removableSets);
         return Object.entries(credits).every(([muscleId, credit]) => (
           muscleId === muscle.id || (projected[muscleId] || 0) - credit >= (Number(targets?.[muscleId]) || HYPERTROPHY.minimumSets)
-        ));
+        )) && (projected[muscle.id] || 0) - (credits[muscle.id] || 0) >= target;
       });
       if (!candidate) break;
-      candidate.item.sets -= 1;
-      applyCoachStimulusCredits(projected, candidate.item.exercise, -1);
+      const removableSets = candidate.item.sets === COACH_MIN_SETS_PER_EXERCISE ? COACH_MIN_SETS_PER_EXERCISE : 1;
+      candidate.item.sets -= removableSets;
+      applyCoachStimulusCredits(projected, candidate.item.exercise, -removableSets);
       if (candidate.item.sets > 0) {
         candidate.item.minutes = plannedExerciseMinutes(candidate.item);
       } else {
         candidate.session.items.splice(candidate.session.items.indexOf(candidate.item), 1);
       }
-      candidate.session.totalMinutes = candidate.session.items.reduce((sum, item) => sum + item.minutes, 0);
+      candidate.session.totalMinutes = plannedCoachSessionMinutes(candidate.session.items);
     }
   });
   return projected;
@@ -3769,20 +4152,22 @@ function buildSessionPlan(limitMinutes = SESSION_LIMIT_MINUTES, options = {}) {
     const planTarget = coachPlanTargetForExercise(exercise, performanceSignal);
     addPerformanceNote(performanceSignal);
     let sets = Number.isFinite(addOptions.setCount)
-      ? Math.max(1, addOptions.setCount)
+      ? Math.max(COACH_MIN_SETS_PER_EXERCISE, addOptions.setCount)
       : initialSetsForPlanTarget(target, caps, allowHighVolume, addOptions.initialGrowthMode || growthMode);
-    if (Number.isFinite(addOptions.setCap)) sets = Math.min(sets, Math.max(1, addOptions.setCap));
-    if (planTarget.kind === "deload") sets = Math.max(1, sets - 1);
+    if (Number.isFinite(addOptions.setCap)) sets = Math.min(sets, Math.max(COACH_MIN_SETS_PER_EXERCISE, addOptions.setCap));
+    if (planTarget.kind === "deload") sets = Math.max(COACH_MIN_SETS_PER_EXERCISE, sets - 1);
     if (!sets) return false;
     let minutes = estimateExerciseMinutes(exercise, sets);
-    while (sets > 1 && totalMinutes + minutes > hardLimit) {
+    let prospectiveMinutes = plannedCoachSessionMinutes([...items, { muscle: target, exercise, sets }]);
+    while (sets > COACH_MIN_SETS_PER_EXERCISE && prospectiveMinutes > hardLimit) {
       sets -= 1;
       minutes = estimateExerciseMinutes(exercise, sets);
+      prospectiveMinutes = plannedCoachSessionMinutes([...items, { muscle: target, exercise, sets }]);
     }
-    if (totalMinutes + minutes > hardLimit) return false;
+    if (prospectiveMinutes > hardLimit) return false;
     items.push({ muscle: target, exercise, sets, minutes, reason: "", phase, planTarget, performanceSignal, growthMode });
     usedExercises.add(exercise.id);
-    totalMinutes += minutes;
+    totalMinutes = prospectiveMinutes;
     return true;
   };
 
@@ -3860,12 +4245,12 @@ function buildSessionPlan(limitMinutes = SESSION_LIMIT_MINUTES, options = {}) {
 
       for (const { item, allowHighVolume } of eligibleTargetItems) {
         const nextMinutes = plannedExerciseMinutes(item, item.sets + 1);
-        const extraMinutes = nextMinutes - item.minutes;
-        if (totalMinutes + extraMinutes > hardLimit) continue;
+        const prospectiveMinutes = plannedCoachSessionMinutesWithSet(items, item, item.sets + 1);
+        if (prospectiveMinutes > hardLimit) continue;
         item.sets += 1;
         item.minutes = nextMinutes;
         if (allowHighVolume && item.muscle.sets + item.sets > HYPERTROPHY.growthHigh) item.phase = "high-volume";
-        totalMinutes += extraMinutes;
+        totalMinutes = prospectiveMinutes;
         targetFillChanged = true;
         break;
       }
@@ -3929,12 +4314,12 @@ function buildSessionPlan(limitMinutes = SESSION_LIMIT_MINUTES, options = {}) {
         ) || (coachGrowthModeRank(b.item.growthMode) - coachGrowthModeRank(a.item.growthMode)) || (plannedSetGap(b.item, allowHighVolume, b.effectiveGrowthMode) - plannedSetGap(a.item, allowHighVolume, a.effectiveGrowthMode)) || (plannedOptimumGap(b.item) - plannedOptimumGap(a.item)) || (b.item.muscle.deficit - a.item.muscle.deficit) || (a.item.sets - b.item.sets) || (plannedExerciseMinutes(a.item, a.item.sets + 1) - plannedExerciseMinutes(b.item, b.item.sets + 1)));
       for (const { item } of eligible) {
         const nextMinutes = plannedExerciseMinutes(item, item.sets + 1);
-        const extraMinutes = nextMinutes - item.minutes;
-        if (totalMinutes + extraMinutes > hardLimit) continue;
+        const prospectiveMinutes = plannedCoachSessionMinutesWithSet(items, item, item.sets + 1);
+        if (prospectiveMinutes > hardLimit) continue;
         item.sets += 1;
         item.minutes = nextMinutes;
         if (allowHighVolume && item.muscle.sets + item.sets > HYPERTROPHY.growthHigh) item.phase = "high-volume";
-        totalMinutes += extraMinutes;
+        totalMinutes = prospectiveMinutes;
         changed = true;
         break;
       }
@@ -3948,7 +4333,7 @@ function buildSessionPlan(limitMinutes = SESSION_LIMIT_MINUTES, options = {}) {
         .filter(({ item }) => (
           item.muscle.id !== protectedMuscleId
           && !isCoachTargetMuscle(item.muscle.id, targetMuscles)
-          && item.sets > 1
+          && item.sets > COACH_MIN_SETS_PER_EXERCISE
         ))
         .sort((a, b) => (
           coachGrowthModeRank(a.item.growthMode) - coachGrowthModeRank(b.item.growthMode)
@@ -3956,16 +4341,16 @@ function buildSessionPlan(limitMinutes = SESSION_LIMIT_MINUTES, options = {}) {
       if (!candidate) return false;
 
       const previousMinutes = candidate.item.minutes;
-      if (candidate.item.sets > 1) {
+      if (candidate.item.sets > COACH_MIN_SETS_PER_EXERCISE) {
         candidate.item.sets -= 1;
         candidate.item.minutes = plannedExerciseMinutes(candidate.item);
         const freedMinutes = previousMinutes - candidate.item.minutes;
         if (freedMinutes <= 0) return false;
-        totalMinutes -= freedMinutes;
+        totalMinutes = plannedCoachSessionMinutes(items);
       } else {
-        totalMinutes -= previousMinutes;
         usedExercises.delete(candidate.item.exercise.id);
         items.splice(candidate.index, 1);
+        totalMinutes = plannedCoachSessionMinutes(items);
       }
     }
     return true;
@@ -3988,12 +4373,13 @@ function buildSessionPlan(limitMinutes = SESSION_LIMIT_MINUTES, options = {}) {
       const modeLabel = coachGrowthModeLabel(item.growthMode);
       while (item.sets < minimumSets) {
         const nextMinutes = plannedExerciseMinutes(item, item.sets + 1);
-        const extraMinutes = nextMinutes - item.minutes;
-        if (totalMinutes + extraMinutes > hardLimit && !freeNonTargetMinutesForTarget(extraMinutes, muscleId)) break;
-        if (totalMinutes + extraMinutes > hardLimit) break;
+        let prospectiveMinutes = plannedCoachSessionMinutesWithSet(items, item, item.sets + 1);
+        if (prospectiveMinutes > hardLimit && !freeNonTargetMinutesForTarget(prospectiveMinutes - totalMinutes, muscleId)) break;
+        prospectiveMinutes = plannedCoachSessionMinutesWithSet(items, item, item.sets + 1);
+        if (prospectiveMinutes > hardLimit) break;
         item.sets += 1;
         item.minutes = nextMinutes;
-        totalMinutes += extraMinutes;
+        totalMinutes = prospectiveMinutes;
         changed = true;
       }
       if (item.sets < minimumSets) {
@@ -4022,13 +4408,17 @@ function buildSessionPlan(limitMinutes = SESSION_LIMIT_MINUTES, options = {}) {
         const increasedReceiverMinutes = plannedExerciseMinutes(receiver, receiver.sets + 1);
         const extraMinutes = increasedReceiverMinutes - receiverMinutes;
         if (freedMinutes <= 0 || extraMinutes <= 0) continue;
-        if (totalMinutes - freedMinutes + extraMinutes > hardLimit) continue;
+        const prospectiveItems = items.map((item) => item === donor
+          ? { ...item, sets: item.sets - 1 }
+          : item === receiver ? { ...item, sets: item.sets + 1 } : item);
+        const prospectiveMinutes = plannedCoachSessionMinutes(prospectiveItems);
+        if (prospectiveMinutes > hardLimit) continue;
         donor.sets -= 1;
         donor.minutes = reducedDonorMinutes;
         receiver.sets += 1;
         receiver.minutes = increasedReceiverMinutes;
         if (receiver.muscle.sets + receiver.sets > HYPERTROPHY.growthHigh) receiver.phase = "high-volume";
-        totalMinutes = totalMinutes - freedMinutes + extraMinutes;
+        totalMinutes = prospectiveMinutes;
         return true;
       }
     }
@@ -4073,7 +4463,7 @@ function buildSessionPlan(limitMinutes = SESSION_LIMIT_MINUTES, options = {}) {
 
   const projected = Object.fromEntries(allStats.map((stat) => [stat.id, stat.sets]));
   items.forEach((item) => applyCoachStimulusCredits(projected, item.exercise, item.sets));
-  const session = { items, totalMinutes };
+  const session = { items, totalMinutes: plannedCoachSessionMinutes(items) };
   const targets = Object.fromEntries(allStats.map((target) => [
     target.id,
     planSetCeilingForTarget(target, allowsHighVolumeTarget(target), growthModeFor(target.id))
@@ -4289,7 +4679,9 @@ function attachCoachBriefing(plan) {
 
 function normalizeCoachWeeklyPlan(value = {}) {
   const validMuscles = new Set(muscleGroups.map((muscle) => muscle.id));
-  const days = Array.isArray(value.days)
+  // Preserve an explicitly empty day selection so Generate can reject it instead of silently adding weekdays.
+  const hasExplicitDays = Array.isArray(value.days);
+  const days = hasExplicitDays
     ? [...new Set(value.days.map(Number).filter((day) => COACH_WEEKDAY_OPTIONS.some((option) => option.day === day)))]
     : [1, 3, 5, 6];
   const priorities = Array.isArray(value.priorities)
@@ -4301,7 +4693,7 @@ function normalizeCoachWeeklyPlan(value = {}) {
     return [muscle.id, Math.min(30, Math.max(HYPERTROPHY.minimumSets, Number.isFinite(requested) ? requested : fallback))];
   }));
   return {
-    days: days.length ? days : [1, 3, 5],
+    days: hasExplicitDays ? days : [1, 3, 5, 6],
     averageMinutes: Math.min(75, Math.max(30, Number(value.averageMinutes) || 60)),
     priorities,
     targets,
@@ -4413,6 +4805,97 @@ function coachWeeklySetBudgets(setup, actualStats, estimatedSetCapacity, eligibl
   return { setBudgets, remainingCapacity, allocatedCapacity: Math.max(0, (Number(estimatedSetCapacity) || 0) - remainingCapacity) };
 }
 
+// Reduce one donor phase proportionally while respecting each muscle's protected remaining floor.
+function bleedWeeklyTargetPhase(remaining, floors, donorIds, excess) {
+  const reductions = Object.fromEntries(donorIds.map((id) => [id, 0]));
+  let amountLeft = Math.max(0, Number(excess) || 0);
+  let active = donorIds.filter((id) => remaining[id] > floors[id]);
+  while (amountLeft > 0.001 && active.length) {
+    const available = active.reduce((sum, id) => sum + Math.max(0, remaining[id] - floors[id]), 0);
+    if (available <= 0.001) break;
+    const requested = Math.min(amountLeft, available);
+    let removed = 0;
+    active.forEach((id) => {
+      const room = Math.max(0, remaining[id] - floors[id]);
+      const share = requested * (room / available);
+      const reduction = Math.min(room, share);
+      remaining[id] -= reduction;
+      reductions[id] += reduction;
+      removed += reduction;
+    });
+    if (removed <= 0.001) break;
+    amountLeft -= removed;
+    active = active.filter((id) => remaining[id] - floors[id] > 0.001);
+  }
+  return {
+    remainingExcess: Math.max(0, amountLeft),
+    donors: donorIds
+      .filter((id) => reductions[id] > 0.001)
+      .map((id) => ({ muscleId: id, sets: Math.round(reductions[id] * 10) / 10 }))
+  };
+}
+
+// Rebalance a dragged weekly target against remaining capacity with strict non-priority then priority donation phases.
+function rebalanceWeeklyTargets({ setup: setupInput, draggedMuscleId, requestedRemaining, bankedSets = {}, remainingCapacity = 0 }) {
+  const setup = normalizeCoachWeeklyPlan(setupInput);
+  const validIds = new Set(muscleGroups.map((muscle) => muscle.id));
+  if (!validIds.has(draggedMuscleId)) {
+    return { targets: clonePlain(setup.targets), bleed: { nonPriority: [], priority: [] }, denied: true, reason: "That muscle is not available in the weekly planner." };
+  }
+
+  // Convert full weekly targets into the adjustable remainder above already submitted stimulus.
+  const banked = Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, Math.max(0, Number(bankedSets[muscle.id]) || 0)]));
+  const floors = Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, Math.max(0, HYPERTROPHY.minimumSets - banked[muscle.id])]));
+  const maximums = Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, Math.max(0, 30 - banked[muscle.id])]));
+  const remaining = Object.fromEntries(muscleGroups.map((muscle) => {
+    const current = Math.max(0, Number(setup.targets[muscle.id]) - banked[muscle.id]);
+    return [muscle.id, Math.min(maximums[muscle.id], Math.max(floors[muscle.id], current))];
+  }));
+  const originalTargets = clonePlain(setup.targets);
+  const capacity = Math.max(0, Number(remainingCapacity) || 0);
+  const minimumDemand = Object.values(floors).reduce((sum, value) => sum + value, 0);
+  if (minimumDemand > capacity + 0.001) {
+    return {
+      targets: originalTargets,
+      bleed: { nonPriority: [], priority: [] },
+      denied: true,
+      reason: `The remaining week can hold about ${fmt(capacity)} sets, but protecting every 10-set floor requires ${fmt(minimumDemand)}.`
+    };
+  }
+
+  // Clamp the dragged muscle to its protected floor and its 30-set weekly ceiling.
+  remaining[draggedMuscleId] = Math.min(
+    maximums[draggedMuscleId],
+    Math.max(floors[draggedMuscleId], Number(requestedRemaining) || 0)
+  );
+  let excess = Math.max(0, Object.values(remaining).reduce((sum, value) => sum + value, 0) - capacity);
+  const nonPriorityIds = muscleGroups
+    .map((muscle) => muscle.id)
+    .filter((id) => id !== draggedMuscleId && !setup.priorities.includes(id));
+  const priorityIds = muscleGroups
+    .map((muscle) => muscle.id)
+    .filter((id) => id !== draggedMuscleId && setup.priorities.includes(id));
+  const nonPriorityBleed = bleedWeeklyTargetPhase(remaining, floors, nonPriorityIds, excess);
+  excess = nonPriorityBleed.remainingExcess;
+  const priorityBleed = bleedWeeklyTargetPhase(remaining, floors, priorityIds, excess);
+  excess = priorityBleed.remainingExcess;
+  if (excess > 0.001) {
+    return {
+      targets: originalTargets,
+      bleed: { nonPriority: nonPriorityBleed.donors, priority: priorityBleed.donors },
+      denied: true,
+      reason: "That target cannot fit without taking another muscle below its protected 10-set floor."
+    };
+  }
+
+  // Return full weekly targets so the existing hidden inputs and Generate path remain unchanged.
+  const targets = Object.fromEntries(muscleGroups.map((muscle) => [
+    muscle.id,
+    Math.round(Math.min(30, Math.max(HYPERTROPHY.minimumSets, banked[muscle.id] + remaining[muscle.id])) * 10) / 10
+  ]));
+  return { targets, bleed: { nonPriority: nonPriorityBleed.donors, priority: priorityBleed.donors }, denied: false, reason: "" };
+}
+
 function coachWeeklyAttainment(setup, projected = {}) {
   const results = muscleGroups.map((muscle) => {
     const planned = Number(projected[muscle.id] || 0);
@@ -4509,13 +4992,16 @@ function buildCoachWeeklyPlan(setupInput = selectedCoachWeeklyPlan()) {
       .sort((a, b) => (plannedExerciseUses.get(a.exercise.id) || 0) - (plannedExerciseUses.get(b.exercise.id) || 0) || b.score - a.score);
     const chosen = exerciseCandidates.find((candidate) => candidate.eligible) || exerciseCandidates[0];
     if (!chosen || !isActiveCoachExercise(chosen.exercise)) return false;
-    let sets = Math.max(1, Math.min(4, Math.ceil(phase === "floor" ? muscle.floorGap : muscle.gap)));
+    // Weekly sessions use the same two-set minimum as Today's Plan, even for a one-set remaining gap.
+    let sets = Math.max(COACH_MIN_SETS_PER_EXERCISE, Math.min(4, Math.ceil(phase === "floor" ? muscle.floorGap : muscle.gap)));
     let minutes = estimateExerciseMinutes(chosen.exercise, sets);
-    while (sets > 1 && session.totalMinutes + minutes > setup.averageMinutes + COACH_TIME_TOLERANCE_MINUTES) {
+    let prospectiveMinutes = plannedCoachSessionMinutes([...session.items, { exercise: chosen.exercise, sets }]);
+    while (sets > COACH_MIN_SETS_PER_EXERCISE && prospectiveMinutes > setup.averageMinutes + COACH_TIME_TOLERANCE_MINUTES) {
       sets -= 1;
       minutes = estimateExerciseMinutes(chosen.exercise, sets);
+      prospectiveMinutes = plannedCoachSessionMinutes([...session.items, { exercise: chosen.exercise, sets }]);
     }
-    if (session.totalMinutes + minutes > setup.averageMinutes + COACH_TIME_TOLERANCE_MINUTES) return false;
+    if (prospectiveMinutes > setup.averageMinutes + COACH_TIME_TOLERANCE_MINUTES) return false;
     const performanceSignal = coachExercisePerformanceSignal(chosen.exercise);
     const growthMode = muscle.target > HYPERTROPHY.growthHigh ? "aggressive" : muscle.target > HYPERTROPHY.growthLow ? "medium" : "soft";
     session.items.push({
@@ -4537,7 +5023,7 @@ function buildCoachWeeklyPlan(setupInput = selectedCoachWeeklyPlan()) {
     plannedExerciseUses.set(chosen.exercise.id, (plannedExerciseUses.get(chosen.exercise.id) || 0) + 1);
     applyCoachStimulusCredits(projected, chosen.exercise, sets);
     chosen.exercise.primaryMuscles.forEach((id) => plannedDirectDates[id].push(session.date));
-    session.totalMinutes += minutes;
+    session.totalMinutes = prospectiveMinutes;
     return true;
   };
 
@@ -4595,211 +5081,7 @@ function buildCoachWeeklyPlan(setupInput = selectedCoachWeeklyPlan()) {
   };
 }
 
-function coachWeeklyPrioritySubsets(ids = []) {
-  const subsets = [];
-  const visit = (start, selected, size) => {
-    if (selected.length === size) {
-      subsets.push([...selected]);
-      return;
-    }
-    for (let index = start; index <= ids.length - (size - selected.length); index += 1) {
-      selected.push(ids[index]);
-      visit(index + 1, selected, size);
-      selected.pop();
-    }
-  };
-  for (let size = ids.length; size >= 1; size -= 1) visit(0, [], size);
-  return subsets;
-}
-
-function coachWeeklyAdjustmentOption(id, title, summary, setup, plan, extra = {}) {
-  return {
-    id,
-    title,
-    summary,
-    setup: normalizeCoachWeeklyPlan(setup),
-    projected: clonePlain(plan.projected),
-    attainment: clonePlain(plan.attainment),
-    capacity: clonePlain(plan.capacity),
-    remainingDates: plan.sessions.filter((session) => session.status === "planned").map((session) => session.date),
-    ...extra
-  };
-}
-
-function coachWeeklyAdjustmentOptions(planInput) {
-  const plan = planInput || buildCoachWeeklyPlan();
-  const setup = normalizeCoachWeeklyPlan(plan.setup);
-  if (plan.capacity.fits || !setup.priorities.length) return [];
-  const priorityIds = setup.priorities;
-  const focusedCandidates = [];
-  let focusedSize = 0;
-
-  for (const priorities of coachWeeklyPrioritySubsets(priorityIds)) {
-    if (focusedSize && priorities.length < focusedSize) break;
-    const targets = Object.fromEntries(muscleGroups.map((muscle) => [
-      muscle.id,
-      priorities.includes(muscle.id) ? setup.targets[muscle.id] : HYPERTROPHY.minimumSets
-    ]));
-    const candidateSetup = normalizeCoachWeeklyPlan({ ...setup, priorities, targets, generatedPlan: null, sourceFingerprint: "" });
-    const candidatePlan = buildCoachWeeklyPlan(candidateSetup);
-    if (candidatePlan.attainment.floorUnmet.length || candidatePlan.attainment.priorityMet !== priorities.length) continue;
-    focusedSize = priorities.length;
-    focusedCandidates.push({
-      key: `focused-${focusedCandidates.length}`,
-      setup: candidateSetup,
-      plan: candidatePlan,
-      labels: priorities.map((id) => muscleLabel(id))
-    });
-    if (focusedCandidates.length >= 3) break;
-  }
-
-  if (!focusedCandidates.length) {
-    const fallbackId = priorityIds
-      .map((id) => ({ id, ratio: (plan.projected[id] || 0) / Math.max(setup.targets[id] || HYPERTROPHY.minimumSets, 1) }))
-      .sort((a, b) => b.ratio - a.ratio)[0]?.id;
-    const priorities = fallbackId ? [fallbackId] : [];
-    const targets = Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, priorities.includes(muscle.id) ? setup.targets[muscle.id] : HYPERTROPHY.minimumSets]));
-    const candidateSetup = normalizeCoachWeeklyPlan({ ...setup, priorities, targets, generatedPlan: null, sourceFingerprint: "" });
-    focusedCandidates.push({ key: "focused-0", setup: candidateSetup, plan: buildCoachWeeklyPlan(candidateSetup), labels: priorities.map((id) => muscleLabel(id)) });
-  }
-
-  const focusedPrimary = focusedCandidates[0];
-  const focused = coachWeeklyAdjustmentOption(
-    "focused",
-    "Focused completion",
-    focusedPrimary.labels.length
-      ? `Protect every 10-set floor, then fully pursue ${focusedPrimary.labels.join(" and ")}.`
-      : "Protect the weekly floors with the available time.",
-    focusedPrimary.setup,
-    focusedPrimary.plan,
-    {
-      previewKey: focusedPrimary.key,
-      alternatives: focusedCandidates.map((candidate) => ({
-        key: candidate.key,
-        labels: candidate.labels,
-        setup: candidate.setup,
-        projected: clonePlain(candidate.plan.projected),
-        attainment: clonePlain(candidate.plan.attainment),
-        capacity: clonePlain(candidate.plan.capacity)
-      }))
-    }
-  );
-
-  const balancedTargets = Object.fromEntries(muscleGroups.map((muscle) => {
-    if (!priorityIds.includes(muscle.id)) return [muscle.id, HYPERTROPHY.minimumSets];
-    const achievable = Math.max(HYPERTROPHY.minimumSets, Math.floor(Number(plan.projected[muscle.id]) || 0));
-    return [muscle.id, Math.min(setup.targets[muscle.id], achievable)];
-  }));
-  const balancedSetup = normalizeCoachWeeklyPlan({ ...setup, targets: balancedTargets, generatedPlan: null, sourceFingerprint: "" });
-  const balancedPlan = buildCoachWeeklyPlan(balancedSetup);
-  const balanced = coachWeeklyAdjustmentOption(
-    "balanced",
-    "Balanced priorities",
-    "Protect every floor and spread the remaining capacity across all selected priorities.",
-    balancedSetup,
-    balancedPlan,
-    { previewKey: "balanced" }
-  );
-
-  const currentPriorityScore = priorityIds.reduce((sum, id) => sum + Math.min(1, (plan.projected[id] || 0) / Math.max(setup.targets[id], 1)), 0);
-  const availableExtraDays = COACH_WEEKDAY_OPTIONS
-    .filter((option) => {
-      const date = coachWeekDate(option.day);
-      return date >= todayISO() && !setup.days.includes(option.day) && !workoutsForDate(date).length;
-    })
-    .map((option) => option.day);
-  const daySubsets = [[]];
-  availableExtraDays.forEach((day) => daySubsets.push(...daySubsets.map((days) => [...days, day])));
-  const minuteOptions = [...new Set([setup.averageMinutes, ...COACH_TIMEFRAME_OPTIONS.map((option) => option.minutes).filter((minutes) => minutes > setup.averageMinutes)])];
-  const capacityCandidates = [];
-  daySubsets.forEach((extraDays) => minuteOptions.forEach((averageMinutes) => {
-    if (!extraDays.length && averageMinutes === setup.averageMinutes) return;
-    const candidateSetup = normalizeCoachWeeklyPlan({
-      ...setup,
-      days: [...setup.days, ...extraDays],
-      averageMinutes,
-      generatedPlan: null,
-      sourceFingerprint: ""
-    });
-    const candidatePlan = buildCoachWeeklyPlan(candidateSetup);
-    const priorityScore = priorityIds.reduce((sum, id) => sum + Math.min(1, (candidatePlan.projected[id] || 0) / Math.max(setup.targets[id], 1)), 0);
-    const improvement = priorityScore - currentPriorityScore;
-    if (improvement <= 0 && candidatePlan.attainment.floorMet <= plan.attainment.floorMet) return;
-    capacityCandidates.push({
-      setup: candidateSetup,
-      plan: candidatePlan,
-      priorityScore,
-      improvement,
-      changeCost: Math.max(0, candidateSetup.days.length * averageMinutes - setup.days.length * setup.averageMinutes),
-      changes: extraDays.length + Number(averageMinutes !== setup.averageMinutes)
-    });
-  }));
-  capacityCandidates.sort((a, b) => (
-    Number(b.plan.attainment.priorityMet === b.plan.attainment.priorityTotal) - Number(a.plan.attainment.priorityMet === a.plan.attainment.priorityTotal)
-    || b.plan.attainment.priorityMet - a.plan.attainment.priorityMet
-    || b.priorityScore - a.priorityScore
-    || b.plan.attainment.floorMet - a.plan.attainment.floorMet
-    || a.changeCost - b.changeCost
-    || a.changes - b.changes
-  ));
-  const capacityCandidate = capacityCandidates[0] || { setup, plan, improvement: 0 };
-  const addedDays = capacityCandidate.setup.days.filter((day) => !setup.days.includes(day)).map((day) => COACH_WEEKDAY_OPTIONS.find((option) => option.day === day)?.short).filter(Boolean);
-  const capacityChanges = [
-    addedDays.length ? `add ${addedDays.join(", ")}` : "",
-    capacityCandidate.setup.averageMinutes !== setup.averageMinutes ? `use ${capacityCandidate.setup.averageMinutes} min sessions` : ""
-  ].filter(Boolean);
-  const capacity = coachWeeklyAdjustmentOption(
-    "capacity",
-    "More capacity",
-    capacityChanges.length
-      ? `Keep every requested target and ${capacityChanges.join(" plus ")}.`
-      : "No remaining day or duration change can safely improve this request.",
-    capacityCandidate.setup,
-    capacityCandidate.plan,
-    { previewKey: "capacity", unavailable: !capacityChanges.length }
-  );
-
-  return [focused, balanced, capacity];
-}
-
-function coachWeeklyAdjustmentOptionByKey(options, key) {
-  if (String(key).startsWith("focused-")) {
-    const focused = options.find((option) => option.id === "focused");
-    const alternative = focused?.alternatives?.find((item) => item.key === key);
-    if (alternative) return { ...focused, ...alternative, id: "focused", previewKey: key, title: "Focused completion" };
-  }
-  return options.find((option) => option.previewKey === key || option.id === key) || null;
-}
-
-function buildCoachWeeklyAdjustmentPreview(option) {
-  return option?.setup ? buildCoachWeeklyPlan(option.setup) : null;
-}
-
-function compactCoachWeeklyAdjustments(options = []) {
-  return options.map((option) => ({
-    id: option.id,
-    previewKey: option.previewKey,
-    title: option.title,
-    summary: option.summary,
-    setup: normalizeCoachWeeklyPlan(option.setup),
-    projected: clonePlain(option.projected),
-    attainment: clonePlain(option.attainment),
-    capacity: clonePlain(option.capacity),
-    remainingDates: [...(option.remainingDates || [])],
-    unavailable: Boolean(option.unavailable),
-    alternatives: (option.alternatives || []).map((alternative) => ({
-      key: alternative.key,
-      labels: [...alternative.labels],
-      setup: normalizeCoachWeeklyPlan(alternative.setup),
-      projected: clonePlain(alternative.projected),
-      attainment: clonePlain(alternative.attainment),
-      capacity: clonePlain(alternative.capacity)
-    }))
-  }));
-}
-
 function compactCoachWeeklyPlanSnapshot(plan) {
-  const adjustments = plan.capacity.fits ? [] : coachWeeklyAdjustmentOptions(plan);
   return {
     sessions: plan.sessions.map((session) => ({
       day: session.day,
@@ -4822,8 +5104,7 @@ function compactCoachWeeklyPlanSnapshot(plan) {
     setBudgets: clonePlain(plan.setBudgets || {}),
     missingIds: plan.missing.map((muscle) => muscle.id),
     capacity: clonePlain(plan.capacity),
-    attainment: clonePlain(plan.attainment),
-    adjustments: compactCoachWeeklyAdjustments(adjustments)
+    attainment: clonePlain(plan.attainment)
   };
 }
 
@@ -4863,7 +5144,7 @@ function displayedCoachWeeklyPlan(setupInput = selectedCoachWeeklyPlan()) {
       status,
       items,
       submitted,
-      totalMinutes: items.reduce((sum, item) => sum + item.minutes, 0)
+      totalMinutes: plannedCoachSessionMinutes(items)
     };
   });
   const currentFingerprint = coachWeeklySourceFingerprint(setup);
@@ -4876,7 +5157,6 @@ function displayedCoachWeeklyPlan(setupInput = selectedCoachWeeklyPlan()) {
     missing: (snapshot.missingIds || []).map((id) => muscleGroups.find((muscle) => muscle.id === id)).filter(Boolean),
     capacity: clonePlain(snapshot.capacity || {}),
     attainment: clonePlain(snapshot.attainment || {}),
-    adjustments: clonePlain(snapshot.adjustments || []),
     stale: invalidExercise || !setup.sourceFingerprint || setup.sourceFingerprint !== currentFingerprint
   };
 }
@@ -6240,6 +6520,8 @@ function applyTemplateExercise(item) {
     setRows: normalizeSetRows(item.setRows)
   };
   state.workoutDraft = [draft];
+  state.draftSessionId = uid();
+  discardStaleWorkoutTimer();
   state.selectedExercise = draft.exercise;
   state.draftTargetMuscle = draft.targetMuscle;
   state.draftNotes = draft.notes;
@@ -6343,6 +6625,7 @@ function exerciseFormValues(editing = null) {
     rest: editing?.rest || "",
     progressionMode: normalizeProgressionMode(editing?.progressionMode),
     loadingStyle: normalizeLoadingStyle(editing?.loadingStyle),
+    exerciseType: editing ? exerciseTimingType(editing) : "",
     loadIncrement: normalizeLoadIncrement(editing?.loadIncrement),
     cue: editing?.cue || ""
   };
@@ -6393,6 +6676,7 @@ function exerciseCard(exercise, editable = false) {
         ${exerciseUsageMetaMarkup(exercise)}
         <p class="muted small">${escapeHtml(exercise.equipment || "custom")} - ${escapeHtml(exercise.reps || "8-15")} reps - ${escapeHtml(exercise.rest || "60-120 sec")}</p>
         <p class="muted micro">${escapeHtml(loadingStyleLabel(exercise.loadingStyle))} - ${normalizeLoadIncrement(exercise.loadIncrement) ? `${escapeHtml(fmtLoad(normalizeLoadIncrement(exercise.loadIncrement)))} lb smallest jump` : "automatic 2.5 / 5 lb jumps"}</p>
+        <p class="muted micro exercise-type-status ${exerciseTimingType(exercise) === "unclassified" ? "is-unclassified" : ""}">${escapeHtml(exerciseTypeLabel(exercise))}${exerciseTimingType(exercise) === "unclassified" ? " - using Isolation timing" : ""}</p>
         ${normalizeProgressionMode(exercise.progressionMode) === "normal" ? "" : `<p class="muted micro">${escapeHtml(progressionModeLabel(exercise.progressionMode))}</p>`}
         <p class="muted micro">${escapeHtml(exercise.cue || "Keep form strict and progress gradually.")}</p>
       </div>
@@ -6537,6 +6821,15 @@ function renderExercises() {
           <div class="field">
             <label for="exercise-loading-style">Loading style</label>
             <select id="exercise-loading-style" name="loadingStyle">${loadingStyleOptions}</select>
+          </div>
+          <div class="field">
+            <label for="exercise-type">Exercise type</label>
+            <select id="exercise-type" name="exerciseType" required>
+              <option value="" ${values.exerciseType ? "" : "selected"}>Choose type</option>
+              <option value="compound" ${values.exerciseType === "compound" ? "selected" : ""}>Compound</option>
+              <option value="isolation" ${values.exerciseType === "isolation" ? "selected" : ""}>Isolation</option>
+            </select>
+            ${exerciseFormErrorMarkup(errors, "exerciseType")}
           </div>
           <div class="field">
             <label for="exercise-load-increment">Smallest load jump</label>
@@ -6705,6 +6998,27 @@ function emptyStrengthLogMarkup(canAddExerciseTable = false) {
   `;
 }
 
+function workoutTimerMarkup(options = {}) {
+  discardStaleWorkoutTimer();
+  const available = workoutTimerAvailable();
+  const timer = state.workoutTimer;
+  const running = Boolean(timer?.runningSince);
+  return `
+    <div class="workout-timer-row ${options.inline ? "is-inline" : ""} ${available ? "" : "is-disabled"}" aria-label="Workout timer">
+      <div class="workout-timer-readout">
+        <span>Active time</span>
+        <strong data-workout-timer-output>${escapeHtml(formatWorkoutTimer(workoutTimerElapsedSeconds(timer)))}</strong>
+      </div>
+      <div class="workout-timer-actions">
+        ${timer
+          ? `<button class="ghost-mini" type="button" data-action="${running ? "pause-workout-timer" : "resume-workout-timer"}" ${available ? "" : "disabled"}>${running ? "Pause" : "Resume"}</button>`
+          : `<button class="ghost-mini" type="button" data-action="start-workout-timer" ${available ? "" : "disabled"}>Start</button>`}
+        <button class="icon-button workout-timer-reset" type="button" data-action="reset-workout-timer" aria-label="Reset workout timer" title="Reset workout timer" ${timer && available ? "" : "disabled"}>&#8635;</button>
+      </div>
+    </div>
+  `;
+}
+
 function renderLog() {
   const templates = getDayTemplates();
   const draft = Array.isArray(state.workoutDraft) ? state.workoutDraft : [];
@@ -6750,7 +7064,13 @@ function renderLog() {
           ` : ""}
 
           <div class="field-row log-date-row">
-            ${renderDateControl({ id: "workout-date", name: "date", label: "Date", value: state.draftDate || todayISO() })}
+            ${renderDateControl({
+              id: "workout-date",
+              name: "date",
+              label: "Date",
+              value: state.draftDate || todayISO(),
+              suffixMarkup: draft.length ? workoutTimerMarkup({ inline: true }) : ""
+            })}
           </div>
 
           ${draft.length ? `
@@ -7570,13 +7890,93 @@ function coachPlanDirectionIndicator(planTarget) {
   return `<button class="load-direction-indicator ${direction}" type="button" data-action="show-load-direction" data-message="${escapeHtml(message)}" aria-label="${escapeHtml(label)}" title="${escapeHtml(message)}">${escapeHtml(symbol)}</button>`;
 }
 
+// Summarize the exact committed weekdays and duration shown by the generated distribution.
+function coachWeekScheduleSummary(setup) {
+  const labels = COACH_WEEKDAY_OPTIONS
+    .filter((option) => setup.days.includes(option.day))
+    .map((option) => option.short);
+  return `${labels.length ? labels.join(", ") : "No days"} - ${setup.averageMinutes} min`;
+}
+
+// Measure how much estimated weekly set capacity remains after the current unsubmitted targets.
+function coachWeekCapacityProgress(setup, bankedSets, remainingCapacity) {
+  const capacity = Math.max(0, Number(remainingCapacity) || 0);
+  const requested = muscleGroups.reduce((sum, muscle) => (
+    sum + Math.max(0, (Number(setup.targets[muscle.id]) || HYPERTROPHY.minimumSets) - (Number(bankedSets[muscle.id]) || 0))
+  ), 0);
+  const available = Math.max(0, capacity - requested);
+  const over = Math.max(0, requested - capacity);
+  return {
+    capacity,
+    requested,
+    available,
+    over,
+    width: capacity > 0 ? Math.min(100, available / capacity * 100) : 0,
+    label: over > 0 ? `${fmt(over, 1)} sets over capacity` : `${fmt(available, 1)} sets left`
+  };
+}
+
+// Render the horizontally scrollable weekly target mixer while preserving hidden inputs for the existing submit path.
+function renderCoachWeekMixer(setup, plan) {
+  // Keep banked fill and available capacity current even when the committed generated result is marked stale.
+  const liveStats = muscleSetStats(coachWeeklyWorkouts());
+  const liveDates = setup.days
+    .map((day) => coachWeekDate(day))
+    .filter((date) => date >= todayISO() && !workoutsForDate(date).length);
+  const banked = Object.fromEntries(muscleGroups.map((muscle) => [
+    muscle.id,
+    Number(liveStats.find((stat) => stat.id === muscle.id)?.sets) || 0
+  ]));
+  const capacity = Math.max(0, coachWeeklyCapacity(setup, liveDates).estimatedSetCapacity);
+  const progress = coachWeekCapacityProgress(setup, banked, capacity);
+  const axisTicks = [30, 25, 20, 15, 10, 5, 0];
+  return `
+    <div class="coach-week-mixer-head">
+      <div class="coach-week-capacity-progress ${progress.over ? "is-over" : ""}" data-coach-week-capacity-progress>
+        <span><strong data-coach-week-capacity-label>${escapeHtml(progress.label)}</strong><small>${fmt(capacity)} estimated capacity</small></span>
+        <span class="coach-week-capacity-track" aria-hidden="true"><span data-coach-week-capacity-fill style="width:${progress.width}%"></span></span>
+      </div>
+      <div class="coach-week-mixer-title"><strong>Weekly set equalizer</strong><small>Submitted work is locked. Drag the remaining target, then Generate.</small></div>
+    </div>
+    <div class="coach-week-mixer-shell">
+      <div class="coach-week-mixer-axis" aria-hidden="true">${axisTicks.map((tick) => `<span style="--tick:${tick}">${tick}</span>`).join("")}</div>
+      <div class="coach-week-mixer-scroll" data-coach-week-mixer-scroll>
+        <div class="coach-week-mixer" data-coach-week-mixer>
+          ${muscleGroups.map((muscle) => {
+            const submitted = banked[muscle.id];
+            const target = Math.min(30, Math.max(HYPERTROPHY.minimumSets, submitted, Number(setup.targets[muscle.id]) || HYPERTROPHY.minimumSets));
+            const remaining = Math.max(0, target - submitted);
+            const floor = Math.max(HYPERTROPHY.minimumSets, submitted);
+            return `
+              <div class="coach-week-fader ${setup.priorities.includes(muscle.id) ? "is-priority" : ""}" data-coach-week-fader data-muscle-id="${muscle.id}" data-banked-sets="${fmt(submitted, 1)}" style="--banked-pct:${Math.min(100, submitted / 30 * 100)}%;--target-pct:${target / 30 * 100}%;--floor-pct:${Math.min(100, floor / 30 * 100)}%">
+                <div class="coach-week-fader-readout"><strong data-weekly-remaining>${fmt(remaining, 1)} left</strong><small data-weekly-total>${fmt(target, 1)} target</small></div>
+                <div class="coach-week-fader-track" data-weekly-fader-track>
+                  <span class="coach-week-fader-grid" aria-hidden="true"></span>
+                  <span class="coach-week-fader-adjustable" aria-hidden="true"></span>
+                  <span class="coach-week-fader-banked" aria-hidden="true"></span>
+                  <span class="coach-week-fader-floor" aria-hidden="true"></span>
+                  <button class="coach-week-fader-knob" type="button" role="slider" data-weekly-fader-knob aria-label="${escapeHtml(muscle.label)} remaining weekly sets" aria-valuemin="${fmt(Math.max(0, HYPERTROPHY.minimumSets - submitted), 1)}" aria-valuemax="${fmt(Math.max(0, 30 - submitted), 1)}" aria-valuenow="${fmt(remaining, 1)}" aria-valuetext="${fmt(remaining, 1)} sets left, ${fmt(submitted, 1)} already submitted"><img src="${escapeHtml(`${muscleIconPaths[muscle.id]}?v=${APP_VERSION}`)}" alt="" draggable="false"></button>
+                </div>
+                <label class="coach-week-fader-label"><input type="checkbox" name="priorities" value="${muscle.id}" ${setup.priorities.includes(muscle.id) ? "checked" : ""}><span>${escapeHtml(muscle.label)}</span></label>
+                <small data-weekly-banked>${fmt(submitted, 1)} banked</small>
+                <input type="hidden" name="target-${muscle.id}" value="${fmt(target, 1)}">
+              </div>
+            `;
+          }).join("")}
+        </div>
+      </div>
+    </div>
+    <p class="coach-week-mixer-cost" data-coach-week-mixer-cost>Move a fader to see how the remaining weekly capacity is redistributed.</p>
+    <p class="coach-week-dirty" data-coach-week-dirty ${state.coachWeekFormPreview ? "" : "hidden"}>Changes not generated yet.</p>
+  `;
+}
+
 function renderCoachWeekDistribution(plan) {
   return `
     <div class="coach-week-distribution">
       ${muscleGroups.map((muscle) => {
         const current = plan.actualStats.find((stat) => stat.id === muscle.id)?.sets || 0;
         const projected = plan.projected[muscle.id] || current;
-        const allocated = plan.setBudgets?.[muscle.id] ?? projected;
         const target = plan.setup.targets[muscle.id] || HYPERTROPHY.minimumSets;
         const width = Math.min(100, (projected / Math.max(target, 1)) * 100);
         const status = projected < HYPERTROPHY.minimumSets
@@ -7586,7 +7986,7 @@ function renderCoachWeekDistribution(plan) {
             : { tone: "upper-met", label: "20 planned sets reached" };
         return `
           <div class="coach-week-muscle ${plan.setup.priorities.includes(muscle.id) ? "is-priority" : ""}">
-            <div><span class="coach-week-muscle-name"><strong>${escapeHtml(muscle.label)}</strong><span class="coach-week-muscle-status ${status.tone}" role="img" aria-label="${escapeHtml(status.label)}" title="${escapeHtml(status.label)}"></span></span><span>${fmt(current, 1)} now / ${fmt(projected, 1)} planned / ${fmt(allocated, 1)} allocated / ${fmt(target)} target</span></div>
+            <div><span class="coach-week-muscle-name"><strong>${escapeHtml(muscle.label)}</strong><span class="coach-week-muscle-status ${status.tone}" role="img" aria-label="${escapeHtml(status.label)}" title="${escapeHtml(status.label)}"></span></span><span>${fmt(current, 1)} banked / ${fmt(projected, 1)} projected / ${fmt(target)} target</span></div>
             <div class="progress-track"><span style="width:${width}%"></span></div>
           </div>
         `;
@@ -7613,81 +8013,32 @@ function renderCoachWeekDay(session) {
   `;
 }
 
-function renderCoachWeekAdjustmentPreview(option) {
-  const preview = buildCoachWeeklyAdjustmentPreview(option);
-  if (!preview) return "";
-  const priorityRows = preview.attainment.results.filter((item) => item.priority);
-  return `
-    <div class="coach-week-adjustment-preview">
-      <div class="coach-week-adjustment-preview-head"><strong>${escapeHtml(option.title)} preview</strong><button class="ghost-mini" type="button" data-action="close-coach-week-adjustment">Close</button></div>
-      <p>${escapeHtml(option.summary)}</p>
-      <div class="coach-week-adjustment-facts">
-        <span><strong>${preview.sessions.filter((session) => session.status === "planned").length}</strong><small>days left</small></span>
-        <span><strong>${preview.setup.averageMinutes}</strong><small>min average</small></span>
-        <span><strong>${preview.attainment.floorMet}/${muscleGroups.length}</strong><small>floors</small></span>
-        <span><strong>${preview.attainment.priorityMet}/${preview.attainment.priorityTotal}</strong><small>priorities</small></span>
-      </div>
-      ${priorityRows.length ? `<div class="coach-week-adjustment-targets">${priorityRows.map((item) => `<span>${escapeHtml(item.label)} <strong>${fmt(item.planned, 1)}/${fmt(item.target)}</strong></span>`).join("")}</div>` : ""}
-      <div class="coach-week-adjustment-actions">
-        <button class="primary-button" type="button" data-action="apply-coach-week-adjustment" data-option-key="${escapeHtml(option.previewKey || option.id)}" ${option.unavailable ? "disabled" : ""}>Use this plan</button>
-      </div>
-    </div>
-  `;
-}
-
-function renderCoachWeekAdjustmentAdvisor(plan) {
-  if (plan.capacity.fits || plan.stale) return "";
-  const options = plan.adjustments?.length ? plan.adjustments : coachWeeklyAdjustmentOptions(plan);
-  if (!options.length) return "";
-  const preview = coachWeeklyAdjustmentOptionByKey(options, state.coachWeekAdjustmentPreview);
-  return `
-    <details class="section collapsible-panel coach-week-adjustment" open>
-      <summary><span>Coach adjustment</span><small>3 ways to make the week fit</small></summary>
-      <p class="coach-week-adjustment-intro">This request does not fit the remaining week as written. Pick the tradeoff that matches what matters most.</p>
-      <div class="coach-week-adjustment-grid">
-        ${options.map((option) => `
-          <article class="coach-week-adjustment-card">
-            <div><strong>${escapeHtml(option.title)}</strong><span>${option.attainment.priorityMet}/${option.attainment.priorityTotal} priority targets - ${option.attainment.floorMet}/${muscleGroups.length} floors</span></div>
-            <p>${escapeHtml(option.summary)}</p>
-            <button class="ghost-button" type="button" data-action="preview-coach-week-adjustment" data-option-key="${escapeHtml(option.previewKey || option.id)}" ${option.unavailable ? "disabled" : ""}>Preview plan</button>
-            ${option.id === "focused" && option.alternatives?.length > 1 ? `<div class="coach-week-adjustment-combinations">${option.alternatives.slice(1).map((alternative) => `<button class="ghost-mini" type="button" data-action="preview-coach-week-adjustment" data-option-key="${escapeHtml(alternative.key)}">${escapeHtml(alternative.labels.join(" + "))}</button>`).join("")}</div>` : ""}
-          </article>
-        `).join("")}
-      </div>
-      ${preview ? renderCoachWeekAdjustmentPreview(preview) : ""}
-    </details>
-  `;
-}
-
 function renderCoachWeek() {
   const setup = selectedCoachWeeklyPlan();
   const plan = displayedCoachWeeklyPlan(setup);
+  // Reuse unsaved session-local controls after background sync rerenders without changing the committed distribution.
+  const formSetup = state.coachWeekFormPreview ? normalizeCoachWeeklyPlan(state.coachWeekFormPreview) : setup;
   return `
     <details class="section form-panel collapsible-panel coach-week-setup" open>
-      <summary><span>Build the week</span><small>${setup.days.length} days - ${setup.averageMinutes} min average</small></summary>
+      <summary><span>Build the week</span><small>${formSetup.days.length} days - ${formSetup.averageMinutes} min average</small></summary>
       <form id="coach-week-form">
-        <div class="field"><label>Training days</label><div class="coach-weekday-grid">${COACH_WEEKDAY_OPTIONS.map((option) => `<label class="choice-chip"><input type="checkbox" name="days" value="${option.day}" ${setup.days.includes(option.day) ? "checked" : ""}><span>${option.short}</span></label>`).join("")}</div></div>
-        <div class="field"><label for="coach-week-minutes">Average workout time</label><select id="coach-week-minutes" name="averageMinutes">${COACH_TIMEFRAME_OPTIONS.map((option) => `<option value="${option.minutes}" ${setup.averageMinutes === option.minutes ? "selected" : ""}>${escapeHtml(option.label)}</option>`).join("")}</select></div>
-        <div class="field"><label>Priority muscles and weekly targets</label><div class="coach-week-target-grid">${muscleGroups.map((muscle) => `
-          <div class="coach-week-target-row">
-            <label><input type="checkbox" name="priorities" value="${muscle.id}" ${setup.priorities.includes(muscle.id) ? "checked" : ""}><span>${escapeHtml(muscle.label)}</span></label>
-            <input type="number" name="target-${muscle.id}" min="10" max="30" step="1" value="${setup.targets[muscle.id]}" aria-label="${escapeHtml(muscle.label)} weekly set target">
-          </div>`).join("")}</div></div>
+        <div class="field"><label>Training days</label><div class="coach-weekday-grid">${COACH_WEEKDAY_OPTIONS.map((option) => `<label class="choice-chip"><input type="checkbox" name="days" value="${option.day}" ${formSetup.days.includes(option.day) ? "checked" : ""}><span>${option.short}</span></label>`).join("")}</div></div>
+        <div class="field"><label for="coach-week-minutes">Average workout time</label><select id="coach-week-minutes" name="averageMinutes">${COACH_TIMEFRAME_OPTIONS.map((option) => `<option value="${option.minutes}" ${formSetup.averageMinutes === option.minutes ? "selected" : ""}>${escapeHtml(option.label)}</option>`).join("")}</select></div>
+        <div class="field coach-week-mixer-field">${renderCoachWeekMixer(formSetup, plan)}</div>
         <button class="primary-button" type="submit">Generate weekly plan</button>
       </form>
     </details>
     ${plan.stale ? `<section class="section coach-week-capacity warn"><strong>Weekly plan needs regeneration</strong><p>Inputs, submitted workouts, loading styles, or the active exercise library changed. Generate again before copying a planned day.</p></section>` : ""}
     <section class="section coach-week-capacity ${plan.capacity.fits ? "good" : "warn"}"><strong>${plan.capacity.fits ? "All weekly targets are planned" : "Some weekly targets cannot be planned"}</strong><p>${escapeHtml(plan.capacity.message)}</p></section>
-    ${renderCoachWeekAdjustmentAdvisor(plan)}
-    <details class="section chart-panel collapsible-panel" open><summary><span>Weekly distribution</span><small>actual + planned credits</small></summary>${renderCoachWeekDistribution(plan)}</details>
+    <details class="section chart-panel collapsible-panel" open><summary><span>Weekly distribution</span><small>${escapeHtml(coachWeekScheduleSummary(plan.setup))}</small></summary>${renderCoachWeekDistribution(plan)}</details>
     <section class="section coach-week-days">${plan.sessions.map(renderCoachWeekDay).join("")}</section>
   `;
 }
 
 async function commitCoachWeeklyPlan(setupInput, message) {
+  // Reject an empty explicit schedule so Generate never restores a weekday the user turned off.
+  if (!Array.isArray(setupInput?.days) || !setupInput.days.length) throw new Error("Select at least one training day.");
   const setup = normalizeCoachWeeklyPlan({ ...setupInput, generatedAt: new Date().toISOString(), generatedPlan: null, sourceFingerprint: "" });
-  state.coachWeekDraft = null;
-  state.coachWeekAdjustmentPreview = "";
   const sourceFingerprint = coachWeeklySourceFingerprint(setup);
   const generatedPlan = buildCoachWeeklyPlan(setup);
   const committed = normalizeCoachWeeklyPlan({
@@ -7698,6 +8049,8 @@ async function commitCoachWeeklyPlan(setupInput, message) {
   await saveSetting("coachWeeklyPlan", committed);
   await queueSyncChange("preference", "coachWeeklyPlan", { value: committed });
   scheduleRecordSync();
+  // Clear the local preview only after the generated setup has been safely persisted and queued for sync.
+  state.coachWeekFormPreview = null;
   toast(message);
   await render();
 }
@@ -7707,6 +8060,101 @@ async function saveCoachWeeklyPlan(form) {
     coachWeeklyPlanFromForm(form),
     "Weekly plan regenerated from your current setup and submitted workouts."
   );
+}
+
+// Read current weekly form controls and derive the submitted stimulus plus capacity left on selected future dates.
+function coachWeekMixerFormContext(form) {
+  const setup = coachWeeklyPlanFromForm(form);
+  const selectedDates = setup.days
+    .map((day) => coachWeekDate(day))
+    .filter((date) => date >= todayISO() && !workoutsForDate(date).length);
+  const actualStats = muscleSetStats(coachWeeklyWorkouts());
+  const bankedSets = Object.fromEntries(actualStats.map((stat) => [stat.id, Number(stat.sets) || 0]));
+  const capacity = coachWeeklyCapacity(setup, selectedDates);
+  return { setup, bankedSets, remainingCapacity: capacity.estimatedSetCapacity, selectedDates };
+}
+
+// Format the live opportunity cost so the user can see exactly which targets donated capacity.
+function coachWeekBleedMessage(muscleId, target, bleed) {
+  const donors = [...(bleed.nonPriority || []), ...(bleed.priority || [])];
+  if (!donors.length) return `${muscleLabel(muscleId)} is set to ${fmt(target, 1)} weekly sets; no other target had to move.`;
+  return `${muscleLabel(muscleId)} is set to ${fmt(target, 1)}; ${donors.map((donor) => `-${fmt(donor.sets, 1)} ${muscleLabel(donor.muscleId)}`).join(", ")}.`;
+}
+
+// Update all fader visuals and hidden target inputs without rerendering or committing the form.
+function updateCoachWeekMixerDom(form, targets, bankedSets, bleed, draggedMuscleId) {
+  muscleGroups.forEach((muscle) => {
+    const fader = form.querySelector(`[data-coach-week-fader][data-muscle-id="${muscle.id}"]`);
+    const input = form.elements[`target-${muscle.id}`];
+    if (!fader || !input) return;
+    const banked = Math.max(0, Number(bankedSets[muscle.id]) || 0);
+    const target = Math.min(30, Math.max(HYPERTROPHY.minimumSets, Number(targets[muscle.id]) || HYPERTROPHY.minimumSets));
+    const remaining = Math.max(0, target - banked);
+    input.value = String(Math.round(target * 10) / 10);
+    fader.style.setProperty("--target-pct", `${target / 30 * 100}%`);
+    fader.querySelector("[data-weekly-remaining]").textContent = `${fmt(remaining, 1)} left`;
+    fader.querySelector("[data-weekly-total]").textContent = `${fmt(target, 1)} target`;
+    const knob = fader.querySelector("[data-weekly-fader-knob]");
+    knob?.setAttribute("aria-valuenow", fmt(remaining, 1));
+    knob?.setAttribute("aria-valuetext", `${fmt(remaining, 1)} sets left, ${fmt(banked, 1)} already submitted`);
+  });
+  const cost = form.querySelector("[data-coach-week-mixer-cost]");
+  if (cost && draggedMuscleId) cost.textContent = coachWeekBleedMessage(draggedMuscleId, targets[draggedMuscleId], bleed);
+}
+
+// Animate the white capacity bar and its label from the current unsaved form values.
+function updateCoachWeekCapacityProgressDom(form, setup, bankedSets, remainingCapacity) {
+  const progress = coachWeekCapacityProgress(setup, bankedSets, remainingCapacity);
+  const wrapper = form.querySelector("[data-coach-week-capacity-progress]");
+  const label = form.querySelector("[data-coach-week-capacity-label]");
+  const fill = form.querySelector("[data-coach-week-capacity-fill]");
+  wrapper?.classList.toggle("is-over", progress.over > 0);
+  if (label) label.textContent = progress.label;
+  if (fill) fill.style.width = `${progress.width}%`;
+}
+
+// Mark weekly controls as pending and refresh the capacity label from the exact current day/time selection.
+function markCoachWeekFormDirty(form) {
+  const context = coachWeekMixerFormContext(form);
+  const dirty = form.querySelector("[data-coach-week-dirty]");
+  if (dirty) dirty.hidden = false;
+  form.querySelectorAll("[data-coach-week-fader]").forEach((fader) => {
+    const priority = form.querySelector(`input[name="priorities"][value="${fader.dataset.muscleId}"]`);
+    fader.classList.toggle("is-priority", Boolean(priority?.checked));
+  });
+  // Preserve current form values across background sync renders until Generate commits them.
+  state.coachWeekFormPreview = context.setup;
+  updateCoachWeekCapacityProgressDom(form, context.setup, context.bankedSets, context.remainingCapacity);
+  return context;
+}
+
+// Apply one requested fader position through the pure strict-phase rebalancer.
+function applyCoachWeekFaderRequest(form, muscleId, requestedRemaining) {
+  const context = markCoachWeekFormDirty(form);
+  const result = rebalanceWeeklyTargets({
+    setup: context.setup,
+    draggedMuscleId: muscleId,
+    requestedRemaining,
+    bankedSets: context.bankedSets,
+    remainingCapacity: context.remainingCapacity
+  });
+  if (!result.denied) {
+    updateCoachWeekMixerDom(form, result.targets, context.bankedSets, result.bleed, muscleId);
+    // Capture the redistributed hidden targets so a later background render restores this exact preview.
+    state.coachWeekFormPreview = coachWeeklyPlanFromForm(form);
+    updateCoachWeekCapacityProgressDom(form, state.coachWeekFormPreview, context.bankedSets, context.remainingCapacity);
+  }
+  return result;
+}
+
+// Convert a pointer's vertical track position into an integer remaining-set request.
+function coachWeekRemainingFromPointer(fader, clientY) {
+  const track = fader.querySelector("[data-weekly-fader-track]");
+  if (!track) return 0;
+  const rect = track.getBoundingClientRect();
+  const total = Math.round(Math.max(0, Math.min(1, (rect.bottom - clientY) / Math.max(rect.height, 1))) * 30);
+  const banked = Number(fader.dataset.bankedSets) || 0;
+  return total - banked;
 }
 
 function copyCoachWeekDayToLog(date) {
@@ -7822,6 +8270,21 @@ function updateScrollTopButton() {
   scrollTopTimer = window.setTimeout(() => {
     button.classList.remove("is-visible");
   }, 3000);
+}
+
+// Compact the fixed mobile tab bar during active scrolling and restore it shortly after scrolling stops.
+function updateTabbarScrollState() {
+  const tabbar = document.querySelector(".tabbar");
+  if (!tabbar) return;
+  tabbar.classList.add("is-scrolling");
+  window.clearTimeout(tabbarScrollTimer);
+  tabbarScrollTimer = window.setTimeout(() => tabbar.classList.remove("is-scrolling"), 180);
+}
+
+// Keep both floating scroll controls synchronized with window and iOS visual-viewport movement.
+function handleViewportScroll() {
+  updateScrollTopButton();
+  updateTabbarScrollState();
 }
 
 function renderImportPreview() {
@@ -8479,11 +8942,42 @@ async function updateExerciseProgressionMode(exerciseName, progressionMode) {
   return updated;
 }
 
+// Freeze the timer baseline from the pre-submission database so the session cannot learn from itself.
+function workoutSubmissionTimingMetadata(drafts, timer, workoutsBeforeSubmission, completedAt = new Date().toISOString()) {
+  const finalizedTimer = pauseWorkoutTimerValue(timer, Date.parse(completedAt));
+  if (!finalizedTimer || !workoutTimerMatchesActiveDraft(finalizedTimer)) return null;
+  const items = drafts.map((draft) => ({
+    exercise: resolveExerciseMeta(draft.exercise, draft.targetMuscle),
+    sets: normalizeSetRows(draft.setRows).length
+  }));
+  state.draftSessionId = uid();
+  discardStaleWorkoutTimer();
+  const counts = timingSetCounts(items);
+  return {
+    timingSessionId: finalizedTimer.timingSessionId,
+    estimatorVersion: COACH_TIME_ESTIMATOR_VERSION,
+    startedAt: finalizedTimer.startedAt,
+    completedAt,
+    activeSeconds: workoutTimerElapsedSeconds(finalizedTimer, Date.parse(completedAt)),
+    baseEstimatedSeconds: estimateSessionRawSeconds(items, { workouts: workoutsBeforeSubmission }),
+    compoundSets: counts.compoundSets,
+    isolationSets: counts.isolationSets,
+    unclassifiedSets: counts.unclassifiedSets,
+    standardSets: counts.standardSets,
+    highRepSets: counts.highRepSets,
+    allSets: counts.allSets
+  };
+}
+
 async function saveWorkout(form) {
   readWorkoutDraftFromForm();
   const data = Object.fromEntries(new FormData(form));
-  const hadExisting = ensureWorkoutDraft().some((draft) => draft.editingWorkoutId);
-  const entries = ensureWorkoutDraft().map((draft, index) => {
+  const drafts = ensureWorkoutDraft();
+  const hadExisting = drafts.some((draft) => draft.editingWorkoutId);
+  const workoutsBeforeSubmission = [...state.workouts];
+  const completedAt = new Date().toISOString();
+  const submissionTiming = hadExisting ? null : workoutSubmissionTimingMetadata(drafts, state.workoutTimer, workoutsBeforeSubmission, completedAt);
+  const entries = drafts.map((draft, index) => {
     const exerciseName = draft.exercise.trim();
     const meta = resolveExerciseMeta(exerciseName, draft.targetMuscle);
     const setRows = normalizeSetRows(draft.setRows);
@@ -8500,6 +8994,7 @@ async function saveWorkout(form) {
       primaryMuscles: [...meta.primaryMuscles],
       secondaryMuscles: [...meta.secondaryMuscles],
       equipment: meta.equipment,
+      loadingStyle: effectiveLoadingStyle(meta),
       setRows,
       sets: setRows.length,
       reps: best?.reps || 1,
@@ -8511,8 +9006,9 @@ async function saveWorkout(form) {
       sourceExerciseId: draft.sourceExerciseId || existing?.sourceExerciseId || "",
       sourceExercise: draft.sourceExercise || existing?.sourceExercise || "",
       order: Number.isFinite(Number(draft.order)) ? Number(draft.order) : index,
+      ...(existing?.sessionTiming || submissionTiming ? { sessionTiming: existing?.sessionTiming || submissionTiming } : {}),
       createdAt: existing?.createdAt || new Date().toISOString(),
-      updatedAt: new Date().toISOString()
+      updatedAt: completedAt
     };
   });
 
@@ -8524,6 +9020,7 @@ async function saveWorkout(form) {
   for (const entry of entries) await queueSyncChange("workout", entry.id, entry);
   for (const id of staleWorkoutIds) await queueSyncChange("workout", id, null, { deleted: true });
   scheduleRecordSync();
+  if (submissionTiming) persistWorkoutTimer(null);
   const first = entries[0];
   state.selectedExercise = first.exercise;
   state.draftDate = first.date;
@@ -8544,6 +9041,7 @@ async function saveWorkout(form) {
     sourceExerciseId: entry.sourceExerciseId || "",
     sourceExercise: entry.sourceExercise || ""
   }));
+  state.draftSessionId = uid();
   state.loadedWorkoutDateIds = entries.map((entry) => entry.id).filter(Boolean);
   await loadState();
   clearDraftRecoveryScope("strength");
@@ -8770,6 +9268,8 @@ function workoutDebugSummary(workout) {
     pendingDraft: Boolean(workout.pendingDraft),
     editingWorkoutId: workout.editingWorkoutId || null,
     loadingStyle: workoutLoadingStyle(workout),
+    exerciseType: exerciseTimingType(workoutMeta(workout)),
+    sessionTiming: workout.sessionTiming ? clonePlain(workout.sessionTiming) : null,
     loadIncrement: normalizeLoadIncrement(workout.loadIncrement),
     source: workout.source || "manual",
     sourcePlanId: workout.sourcePlanId || "",
@@ -9015,7 +9515,6 @@ function recordsDebugSummary(records = allTimeRecords()) {
 
 function coachDebugWeeklyPlan() {
   const plan = buildCoachWeeklyPlan(normalizeCoachWeeklyPlan(state.settings.coachWeeklyPlan || {}));
-  const adjustments = coachWeeklyAdjustmentOptions(plan);
   return {
     setup: clonePlain(plan.setup),
     remainingDates: plan.sessions.filter((session) => session.status === "planned").map((session) => session.date),
@@ -9024,16 +9523,6 @@ function coachDebugWeeklyPlan() {
     actualSets: Object.fromEntries(plan.actualStats.map((stat) => [stat.id, stat.sets])),
     setBudgets: clonePlain(plan.setBudgets || {}),
     projectedSets: clonePlain(plan.projected),
-    adjustments: compactCoachWeeklyAdjustments(adjustments).map((option) => ({
-      id: option.id,
-      title: option.title,
-      summary: option.summary,
-      setup: clonePlain(option.setup),
-      projectedSets: clonePlain(option.projected),
-      attainment: clonePlain(option.attainment),
-      remainingDates: [...option.remainingDates],
-      alternatives: option.alternatives.map((alternative) => ({ key: alternative.key, labels: [...alternative.labels], setup: clonePlain(alternative.setup), projectedSets: clonePlain(alternative.projected) }))
-    })),
     sessions: plan.sessions.map((session) => ({
       date: session.date,
       status: session.status,
@@ -9048,6 +9537,37 @@ function coachDebugWeeklyPlan() {
         performanceStatus: item.performanceSignal?.status || "neutral"
       }))
     }))
+  };
+}
+
+function coachTimeEstimatorDebug(plan = buildTodayPlan(selectedCoachTimeframeMinutes())) {
+  const items = plan.sessionPlan?.items || [];
+  const timing = estimateCoachSessionTiming(items);
+  return {
+    estimatorVersion: COACH_TIME_ESTIMATOR_VERSION,
+    rawSeconds: timing.rawSeconds,
+    correctedMinutes: timing.minutes,
+    correctionFactor: timing.correction.factor,
+    factors: timing.correction.factors,
+    typeCoverage: timing.correction.type,
+    styleCoverage: timing.correction.style,
+    duplicateTimingSessionIds: timing.correction.duplicateIds,
+    excludedSamples: timing.correction.excluded,
+    eligibleSamples: timing.correction.samples,
+    activeTimer: state.workoutTimer ? clonePlain(state.workoutTimer) : null,
+    items: items.map((item) => {
+      const rest = exerciseRestEstimate(item.exercise);
+      return {
+        exerciseId: item.exercise.id,
+        exercise: item.exercise.name,
+        sets: item.sets,
+        exerciseType: exerciseTimingType(item.exercise),
+        effectiveLoadingStyle: effectiveLoadingStyle(item.exercise),
+        restSeconds: rest.seconds,
+        restSource: rest.source,
+        rawSeconds: estimateExerciseRawSeconds(item.exercise, item.sets)
+      };
+    })
   };
 }
 
@@ -9091,6 +9611,7 @@ function buildCoachDebugReport() {
     },
     coach: {
       todayPlan: coachDebugPlanSummary(todayPlan),
+      timeEstimator: coachTimeEstimatorDebug(todayPlan),
       copiedPlan: copiedPlan ? coachDebugPlanSummary(copiedPlan) : null,
       weeklyPlan: coachDebugWeeklyPlan(),
       modeComparison: coachDebugModeComparison(),
@@ -9903,6 +10424,8 @@ function editWorkout(id) {
     sourceExerciseId: entry.sourceExerciseId || "",
     sourceExercise: entry.sourceExercise || ""
   }];
+  state.draftSessionId = uid();
+  discardStaleWorkoutTimer();
   state.logHistoryExercise = "";
 }
 
@@ -9973,6 +10496,7 @@ function clearWorkoutDraft(date = todayISO()) {
   state.editingWorkoutId = null;
   state.loadedWorkoutDateIds = [];
   state.draftDate = date;
+  state.draftSessionId = uid();
   state.draftNotes = "";
   state.selectedExercise = "";
   state.draftTargetMuscle = "chest";
@@ -9987,6 +10511,7 @@ function loadWorkoutDateDraft(date) {
   const savedDraft = strengthDraftForDate(date);
   if (savedDraft) {
     applyRecoveredStrengthDraft(savedDraft);
+    discardStaleWorkoutTimer();
     return;
   }
   const entries = workoutsForDate(date);
@@ -9994,11 +10519,14 @@ function loadWorkoutDateDraft(date) {
     const first = entries[0];
     state.editingWorkoutId = first.id;
     state.loadedWorkoutDateIds = entries.map((entry) => entry.id).filter(Boolean);
+    state.draftSessionId = uid();
     state.workoutDraft = entries.map(workoutEntryToDraft);
     syncLegacyDraftFromFirst();
+    discardStaleWorkoutTimer();
     return;
   }
   clearWorkoutDraft(date);
+  discardStaleWorkoutTimer();
 }
 
 async function applySharedDateInput(input) {
@@ -10098,6 +10626,38 @@ async function handleAction(action, target) {
     async "preview-sound"() {
       const played = playUiCue("success", { force: true });
       toast(played ? "Sound preview played." : "Audio is unavailable in this browser.", { duration: 2000 });
+    },
+    async "start-workout-timer"() {
+      if (!workoutTimerAvailable()) throw new Error("The timer is available for a new workout on today's date.");
+      const now = new Date().toISOString();
+      state.workoutTimer = {
+        timingSessionId: uid(),
+        draftSessionId: ensureDraftSessionId(),
+        draftDate: state.draftDate,
+        startedAt: now,
+        accumulatedActiveSeconds: 0,
+        runningSince: now
+      };
+      saveStrengthDraftForDate(state.draftDate, { force: true });
+      persistWorkoutTimer(state.workoutTimer);
+      startWorkoutTimerTicker();
+      await render();
+    },
+    async "pause-workout-timer"() {
+      if (!workoutTimerMatchesActiveDraft()) return;
+      persistWorkoutTimer(pauseWorkoutTimerValue(state.workoutTimer));
+      await render();
+    },
+    async "resume-workout-timer"() {
+      if (!workoutTimerAvailable() || !workoutTimerMatchesActiveDraft()) return;
+      persistWorkoutTimer(resumeWorkoutTimerValue(state.workoutTimer));
+      startWorkoutTimerTicker();
+      await render();
+    },
+    async "reset-workout-timer"() {
+      if (!state.workoutTimer || !confirm("Reset the workout timer? Your Log rows will stay unchanged.")) return;
+      persistWorkoutTimer(null);
+      await render();
     },
     async "refresh-app-shell"() { await refreshAppShell(); },
     async "confirm-import"() { await confirmPendingImport(); },
@@ -10261,27 +10821,7 @@ async function handleAction(action, target) {
     },
     async "coach-view"() {
       state.coachView = target.dataset.view === "week" ? "week" : "today";
-      state.coachWeekAdjustmentPreview = "";
       await render({ animate: true });
-    },
-    async "preview-coach-week-adjustment"() {
-      const plan = displayedCoachWeeklyPlan();
-      const options = plan.adjustments?.length ? plan.adjustments : coachWeeklyAdjustmentOptions(plan);
-      const option = coachWeeklyAdjustmentOptionByKey(options, target.dataset.optionKey);
-      if (!option || option.unavailable) throw new Error("That adjustment is not available for the remaining week.");
-      state.coachWeekAdjustmentPreview = option.previewKey || option.id;
-      await render({ animate: true });
-    },
-    async "close-coach-week-adjustment"() {
-      state.coachWeekAdjustmentPreview = "";
-      await render();
-    },
-    async "apply-coach-week-adjustment"() {
-      const plan = displayedCoachWeeklyPlan();
-      const options = plan.adjustments?.length ? plan.adjustments : coachWeeklyAdjustmentOptions(plan);
-      const option = coachWeeklyAdjustmentOptionByKey(options, target.dataset.optionKey);
-      if (!option || option.unavailable) throw new Error("That adjustment is not available for the remaining week.");
-      await commitCoachWeeklyPlan(option.setup, `${option.title} is now your weekly plan.`);
     },
     async "copy-coach-week-day"() {
       copyCoachWeekDayToLog(target.dataset.date);
@@ -10654,6 +11194,8 @@ async function handleAction(action, target) {
           notes: item.notes || "",
           setRows: normalizeSetRows(item.setRows)
         }];
+        state.draftSessionId = uid();
+        discardStaleWorkoutTimer();
         syncLegacyDraftFromFirst();
       }
       await render();
@@ -10966,7 +11508,8 @@ document.addEventListener("change", async (event) => {
   try {
     const coachWeekForm = event.target.closest("#coach-week-form");
     if (coachWeekForm) {
-      state.coachWeekDraft = coachWeeklyPlanFromForm(coachWeekForm);
+      // Keep weekly edits local to the current form and expose that Generate is still required.
+      markCoachWeekFormDirty(coachWeekForm);
       return;
     }
     if (event.target.matches("[data-sound-effects-enabled]")) {
@@ -11095,7 +11638,28 @@ document.addEventListener("input", async (event) => {
   }
 });
 
+// Let keyboard users adjust the focused weekly fader by one remaining set at a time.
+document.addEventListener("keydown", (event) => {
+  const knob = event.target.closest("[data-weekly-fader-knob]");
+  if (!knob || !["ArrowUp", "ArrowRight", "ArrowDown", "ArrowLeft"].includes(event.key)) return;
+  const fader = knob.closest("[data-coach-week-fader]");
+  const form = knob.closest("#coach-week-form");
+  if (!fader || !form) return;
+  event.preventDefault();
+  const direction = ["ArrowUp", "ArrowRight"].includes(event.key) ? 1 : -1;
+  const result = applyCoachWeekFaderRequest(form, fader.dataset.muscleId, (Number(knob.getAttribute("aria-valuenow")) || 0) + direction);
+  if (result.denied) toast(result.reason);
+});
+
 document.addEventListener("pointermove", (event) => {
+  // Update only the active weekly fader so horizontal board scrolling remains available elsewhere.
+  if (coachWeekFaderDrag && event.pointerId === coachWeekFaderDrag.pointerId) {
+    event.preventDefault();
+    const requestedRemaining = coachWeekRemainingFromPointer(coachWeekFaderDrag.fader, event.clientY);
+    const result = applyCoachWeekFaderRequest(coachWeekFaderDrag.form, coachWeekFaderDrag.muscleId, requestedRemaining);
+    coachWeekFaderDrag.deniedReason = result.denied ? result.reason : "";
+    return;
+  }
   if (dragState.active) {
     dragState.currentY = event.clientY;
     const delta = dragState.currentY - dragState.startY;
@@ -11113,6 +11677,19 @@ document.addEventListener("pointermove", (event) => {
 });
 
 document.addEventListener("pointerdown", (event) => {
+  // Start fader movement only from its knob and capture the pointer through the full drag.
+  const faderKnob = event.target.closest("[data-weekly-fader-knob]");
+  if (faderKnob) {
+    const fader = faderKnob.closest("[data-coach-week-fader]");
+    const form = faderKnob.closest("#coach-week-form");
+    if (!fader || !form) return;
+    event.preventDefault();
+    faderKnob.setPointerCapture?.(event.pointerId);
+    coachWeekFaderDrag = { pointerId: event.pointerId, fader, form, muscleId: fader.dataset.muscleId, deniedReason: "" };
+    const result = applyCoachWeekFaderRequest(form, fader.dataset.muscleId, coachWeekRemainingFromPointer(fader, event.clientY));
+    coachWeekFaderDrag.deniedReason = result.denied ? result.reason : "";
+    return;
+  }
   const handle = event.target.closest("[data-drag-handle]");
   if (handle) {
     event.preventDefault();
@@ -11125,6 +11702,13 @@ document.addEventListener("pointerdown", (event) => {
 
 document.addEventListener("pointerup", async (event) => {
   try {
+    // Finish the fader preview in place; Generate remains the only commit action.
+    if (coachWeekFaderDrag && event.pointerId === coachWeekFaderDrag.pointerId) {
+      const deniedReason = coachWeekFaderDrag.deniedReason;
+      coachWeekFaderDrag = null;
+      if (deniedReason) toast(deniedReason);
+      return;
+    }
     await finishExerciseDrag(event);
   } catch (error) {
     toast(error.message || "Could not reorder exercise.");
@@ -11133,6 +11717,11 @@ document.addEventListener("pointerup", async (event) => {
 
 document.addEventListener("pointercancel", async (event) => {
   try {
+    // Drop a cancelled fader pointer without changing committed weekly settings.
+    if (coachWeekFaderDrag && event.pointerId === coachWeekFaderDrag.pointerId) {
+      coachWeekFaderDrag = null;
+      return;
+    }
     await finishExerciseDrag(event);
   } catch {
     dragState.id = null;
@@ -11205,9 +11794,9 @@ document.addEventListener("touchcancel", () => {
 });
 
 if (window.addEventListener) {
-  window.addEventListener("scroll", updateScrollTopButton, { passive: true });
+  window.addEventListener("scroll", handleViewportScroll, { passive: true });
   window.addEventListener("resize", updateScrollTopButton);
-  window.visualViewport?.addEventListener("scroll", updateScrollTopButton, { passive: true });
+  window.visualViewport?.addEventListener("scroll", handleViewportScroll, { passive: true });
   window.visualViewport?.addEventListener("resize", updateScrollTopButton);
 }
 
@@ -11278,6 +11867,9 @@ async function init() {
 
   restoreDraftRecovery();
   restoreCopiedCoachPlan();
+  if (state.workoutDraft.length) ensureDraftSessionId();
+  loadWorkoutTimer();
+  startWorkoutTimerTicker();
 
   if (navigator.storage?.persist) {
     navigator.storage.persist().catch(() => {});
