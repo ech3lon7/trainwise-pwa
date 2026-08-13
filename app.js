@@ -3,7 +3,7 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 3;
 const STORES = ["workouts", "metrics", "settings", "syncQueue"];
-const APP_VERSION = "1.5.84";
+const APP_VERSION = "1.5.85";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 const DRAFT_RECOVERY_KEY = "trainwise-draft-recovery-v1";
 const DATED_STRENGTH_DRAFTS_KEY = "trainwise-strength-drafts-by-date-v1";
@@ -4769,9 +4769,24 @@ function latestDirectMuscleDate(muscleId, workouts = state.workouts) {
   return workoutsNewestFirst(workouts).find((workout) => workoutMeta(workout).primaryMuscles.includes(muscleId))?.date || "";
 }
 
+// Estimate weekly muscle-credit capacity from four-set blocks in the active exercise library.
+function coachWeeklyStimulusCreditRate() {
+  const rates = exerciseDatabase().map((exercise) => {
+    const timing = estimateCoachSessionTiming([{ exercise, sets: 4 }]);
+    const correctedSeconds = timing.rawSeconds * timing.correction.factor;
+    const creditsPerSet = Object.values(coachExerciseStimulusCredits(exercise, 1)).reduce((sum, credit) => sum + credit, 0);
+    return correctedSeconds > 0 && creditsPerSet > 0 ? (creditsPerSet * 4) / correctedSeconds : 0;
+  }).filter((rate) => Number.isFinite(rate) && rate > 0);
+  return rates.length ? rates.reduce((sum, rate) => sum + rate, 0) / rates.length : 0;
+}
+
 function coachWeeklyCapacity(setup, plannedDates) {
   const totalMinutes = setup.averageMinutes * plannedDates.length;
-  const estimatedSetCapacity = plannedDates.length * Math.max(6, Math.floor((setup.averageMinutes - 4) / 2.2));
+  const stimulusCreditRate = coachWeeklyStimulusCreditRate();
+  const fallbackCapacity = plannedDates.length * Math.max(6, Math.floor((setup.averageMinutes - 4) / 2.2));
+  const estimatedSetCapacity = stimulusCreditRate
+    ? Math.max(plannedDates.length * 6, Math.floor(totalMinutes * 60 * stimulusCreditRate))
+    : fallbackCapacity;
   return { totalMinutes, estimatedSetCapacity };
 }
 
@@ -4922,6 +4937,52 @@ function coachWeeklyAttainment(setup, projected = {}) {
   };
 }
 
+// Use remaining session time to finish weekly targets through exercises already placed on that day.
+function topUpCoachWeeklySessionSets(sessions, projected, setBudgets, setup) {
+  const plannedSessions = sessions.filter((session) => session.status === "planned" && session.items.length);
+  const maxSetsPerExercise = sessionPlanCaps(setup.averageMinutes).maxSets;
+  const phaseMuscles = [
+    muscleGroups,
+    muscleGroups.filter((muscle) => setup.priorities.includes(muscle.id)),
+    muscleGroups.filter((muscle) => !setup.priorities.includes(muscle.id))
+  ];
+  phaseMuscles.forEach((muscles, phaseIndex) => {
+    let changed = true;
+    while (changed) {
+      changed = false;
+      const candidates = muscles
+        .filter((muscle) => {
+          const current = Number(projected[muscle.id]) || 0;
+          const ceiling = phaseIndex === 0
+            ? Math.min(HYPERTROPHY.minimumSets, Number(setBudgets[muscle.id]) || 0)
+            : Number(setBudgets[muscle.id]) || 0;
+          return current + 0.001 < ceiling;
+        })
+        .sort((a, b) => (
+          ((Number(setBudgets[b.id]) || 0) - (Number(projected[b.id]) || 0))
+          - ((Number(setBudgets[a.id]) || 0) - (Number(projected[a.id]) || 0))
+        ));
+      for (const muscle of candidates) {
+        const options = plannedSessions.flatMap((session) => session.items
+          .filter((item) => item.muscle.id === muscle.id && item.sets < maxSetsPerExercise)
+          .map((item) => {
+            const prospectiveMinutes = plannedCoachSessionMinutesWithSet(session.items, item, item.sets + 1);
+            return { session, item, prospectiveMinutes };
+          }))
+          .filter((option) => option.prospectiveMinutes <= setup.averageMinutes + COACH_TIME_TOLERANCE_MINUTES)
+          .sort((a, b) => a.item.sets - b.item.sets || a.session.totalMinutes - b.session.totalMinutes);
+        const selected = options[0];
+        if (!selected) continue;
+        selected.item.sets += 1;
+        selected.item.minutes = plannedExerciseMinutes(selected.item);
+        selected.session.totalMinutes = selected.prospectiveMinutes;
+        applyCoachStimulusCredits(projected, selected.item.exercise, 1);
+        changed = true;
+      }
+    }
+  });
+}
+
 function buildCoachWeeklyPlan(setupInput = selectedCoachWeeklyPlan()) {
   const setup = normalizeCoachWeeklyPlan(setupInput);
   const weekStart = currentTrainingWeekStart();
@@ -5036,6 +5097,7 @@ function buildCoachWeeklyPlan(setupInput = selectedCoachWeeklyPlan()) {
       });
     }
   });
+  topUpCoachWeeklySessionSets(sessions, projected, setBudgets, setup);
   plannedSessions.forEach((session) => {
     session.items = orderCoachSessionItems(session.items);
     delete session.usedExercises;

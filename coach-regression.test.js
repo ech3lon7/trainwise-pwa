@@ -2134,6 +2134,37 @@ assert.strictEqual(weeklySameSessionPriorityFill.projected, 20, `Expected same-d
 assert(weeklySameSessionPriorityFill.chestItems > 1, "Expected recovery spacing to allow multiple Chest exercises within the same workout date.");
 assert(weeklySameSessionPriorityFill.totalItems <= 6, `Expected same-session priority fill to preserve the six-exercise cap, got ${weeklySameSessionPriorityFill.totalItems}.`);
 
+const weeklyExistingExerciseTopUp = runScenario(`
+  ${resetAndHelpers}
+  state.settings.customExercises = [{
+    id: "abs-only",
+    name: "Only Abs Exercise",
+    primaryMuscles: ["abs"],
+    secondaryMuscles: [],
+    exerciseType: "isolation",
+    loadingStyle: "standard",
+    equipment: "machine",
+    reps: "8-15",
+    rest: "60 sec",
+    cue: "Train.",
+    userCreated: true
+  }];
+  state.workouts = muscleGroups.map((muscle) => makeWorkout(muscle, 2, muscle.id === "abs" ? 8 : 10, {
+    exercise: "Previous " + muscle.label,
+    exerciseId: "previous-" + muscle.id,
+    secondaryMuscles: []
+  }));
+  var targets = Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, muscle.id === "abs" ? 14 : 10]));
+  var plan = buildCoachWeeklyPlan(normalizeCoachWeeklyPlan({ days: [5], averageMinutes: 60, priorities: [], targets }));
+  var session = plan.sessions.find((item) => item.status === "planned");
+  ({ projectedAbs: plan.projected.abs, absSets: session.items.find((item) => item.exercise.id === "abs-only")?.sets || 0, itemCount: session.items.length, totalMinutes: session.totalMinutes });
+`);
+
+assert.strictEqual(weeklyExistingExerciseTopUp.projectedAbs, 14, `Expected available time to top up an existing exercise through its weekly target, got ${weeklyExistingExerciseTopUp.projectedAbs}.`);
+assert.strictEqual(weeklyExistingExerciseTopUp.absSets, 6, `Expected the existing Abs exercise to grow from its initial four-set block to six sets, got ${weeklyExistingExerciseTopUp.absSets}.`);
+assert.strictEqual(weeklyExistingExerciseTopUp.itemCount, 1, "Expected topping up sets to preserve the exercise count.");
+assert(weeklyExistingExerciseTopUp.totalMinutes <= 63, `Expected the topped-up session to remain within the selected time tolerance, got ${weeklyExistingExerciseTopUp.totalMinutes}.`);
+
 const weeklyPreferenceSync = runScenario(`
   ${resetAndHelpers}
   state.settings.coachWeeklyPlan = normalizeCoachWeeklyPlan({ days: [1, 3, 5], averageMinutes: 50, priorities: ["chest"], targets: { chest: 22 } });
@@ -2404,6 +2435,18 @@ assert.strictEqual(weeklyFaderStability.available.available, 20, "Expected the p
 assert.strictEqual(weeklyFaderStability.available.label, "20 sets left", "Expected the white bar label to state how many sets remain.");
 assert.strictEqual(weeklyFaderStability.over.over, 10, "Expected over-capacity protected targets to be reported explicitly.");
 assert.strictEqual(weeklyFaderStability.over.label, "10 sets over capacity", "Expected constrained weeks to avoid a misleading zero-left label.");
+
+const weeklyStimulusAwareCapacity = runScenario(`
+  ${resetAndHelpers}
+  state.settings.customExercises = [{ id: "capacity-iso", name: "Capacity Isolation", primaryMuscles: ["biceps"], secondaryMuscles: [], exerciseType: "isolation", loadingStyle: "standard", reps: "8-15", rest: "60 sec", userCreated: true }];
+  var isolationCapacity = coachWeeklyCapacity(normalizeCoachWeeklyPlan({ averageMinutes: 60 }), [{ date: "2026-06-19" }]).estimatedSetCapacity;
+  state.settings.customExercises = [{ id: "capacity-compound", name: "Capacity Compound", primaryMuscles: ["chest"], secondaryMuscles: ["triceps", "shoulders"], exerciseType: "compound", loadingStyle: "standard", reps: "8-15", rest: "60 sec", userCreated: true }];
+  var compoundCapacity = coachWeeklyCapacity(normalizeCoachWeeklyPlan({ averageMinutes: 60 }), [{ date: "2026-06-19" }]).estimatedSetCapacity;
+  ({ isolationCapacity, compoundCapacity });
+`);
+
+assert(weeklyStimulusAwareCapacity.isolationCapacity > 0, "Expected active exercise timing to produce usable weekly capacity.");
+assert(weeklyStimulusAwareCapacity.compoundCapacity > weeklyStimulusAwareCapacity.isolationCapacity, `Expected secondary stimulus credits to increase estimated weekly capacity, got ${JSON.stringify(weeklyStimulusAwareCapacity)}.`);
 
 // Coach must omit an exercise rather than prescribe a one-set fragment in Today or Week.
 const coachExerciseSetMinimum = runScenario(`
