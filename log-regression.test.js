@@ -197,12 +197,13 @@ assert(!appCode.includes('selectedExercise: "Push-up"'), "Expected Log startup n
 assert(!appCode.includes('showBanner("Unsaved draft restored."'), "Expected startup draft recovery not to show a top banner.");
 assert(appCode.includes("notifyMetricSaved"), "Expected metrics saves to use a dedicated bottom-only notification helper.");
 assert(!stylesCode.includes(".mobile-quick-toggle"), "Expected floating quick action button styling to be removed.");
-assert(indexCode.includes("v=1.5.85"), "Expected index shell references to use bumped app version.");
+assert(indexCode.includes("v=1.5.86"), "Expected index shell references to use bumped app version.");
 assert(!indexCode.includes('id="app" class="app-content" aria-live'), "Expected broad app aria-live to be removed in favor of targeted live regions.");
-assert(serviceWorkerCode.includes("trainwise-cache-v107"), "Expected service worker cache version bump.");
+assert(serviceWorkerCode.includes("trainwise-cache-v108"), "Expected service worker cache version bump.");
 // The mobile tab bar must anchor to the visible bottom edge and compact only during active scrolling.
 assert(/\.tabbar\s*\{[^}]*top:\s*auto;[^}]*bottom:\s*env\(safe-area-inset-bottom\)/s.test(stylesCode), "Expected the tab bar to use a stable bottom safe-area anchor instead of a dynamic viewport top offset.");
 assert(stylesCode.includes(".tabbar.is-scrolling") && appCode.includes("updateTabbarScrollState"), "Expected the tab bar to shrink during scrolling and restore after scrolling stops.");
+assert(appCode.includes("resetTabbarScrollState") && appCode.includes("window.setTimeout(resetTabbarScrollState, 0)"), "Expected debug export and viewport restoration to release a stuck compact tab bar.");
 assert(appCode.includes("data-settings-panel"), "Expected Settings panels to preserve open state with stable panel ids.");
 assert(appCode.includes('forceSettingsPanelOpen("supabase-sync")'), "Expected Supabase actions to keep the Supabase panel open after rendering.");
 
@@ -2661,6 +2662,7 @@ const timingFactorBoundaries = runScenario(`
   ${reset}
   var samples = (ratios) => ratios.map((ratio, index) => ({ ratio, completedAt: String(20 - index) }));
   ({
+    one: timingGlobalFactor(samples([1.2])),
     two: timingGlobalFactor(samples([1.2, 1.1])),
     three: timingGlobalFactor(samples([1.2, 1.1, 1.0])),
     four: timingGlobalFactor(samples([1.3, 1.2, 1.0, 0.9])),
@@ -2668,7 +2670,8 @@ const timingFactorBoundaries = runScenario(`
   });
 `);
 
-assert.strictEqual(timingFactorBoundaries.two, 1, "Expected fewer than three samples to keep the neutral factor.");
+assert.strictEqual(timingFactorBoundaries.one, 1.1, "Expected one completed timed session to begin a half-strength correction.");
+assert.strictEqual(timingFactorBoundaries.two, 1.075, "Expected two completed timed sessions to use their half-strength median.");
 assert.strictEqual(timingFactorBoundaries.three, 1.05, "Expected three samples to use a half-strength median.");
 assert.strictEqual(timingFactorBoundaries.four, 1.05, "Expected four samples to average the middle ratios before half adjustment.");
 assert.strictEqual(timingFactorBoundaries.five, 1.2, "Expected five samples to use the full latest-five median.");

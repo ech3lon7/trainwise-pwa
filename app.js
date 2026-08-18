@@ -3,12 +3,13 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 3;
 const STORES = ["workouts", "metrics", "settings", "syncQueue"];
-const APP_VERSION = "1.5.85";
+const APP_VERSION = "1.5.86";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 const DRAFT_RECOVERY_KEY = "trainwise-draft-recovery-v1";
 const DATED_STRENGTH_DRAFTS_KEY = "trainwise-strength-drafts-by-date-v1";
 const WORKOUT_TIMER_KEY = "trainwise-workout-timer-v1";
 const COPIED_COACH_PLAN_KEY = "trainwise-copied-coach-plan-v1";
+const COACH_WEEK_PREVIEW_STORAGE_KEY = "trainwise-coach-week-preview-v1";
 const SYNC_BOOTSTRAP_VERSION = 1;
 const SYNC_POLL_MS = 60000;
 const SYNC_SAFE_PREFERENCES = ["hypertrophyProfile", "nutritionGoal", "maintenanceProfile", "dashboardWidgets", "dashboardWidgetOrder", "coachWeeklyPlan"];
@@ -3373,14 +3374,22 @@ function workoutMatchesTimingExercise(workout, exercise) {
   return resolved?.id === exerciseId;
 }
 
-// Parse the configured rest range without using submitted-session data.
-function configuredRestSecondsForExercise(exercise = {}) {
+// Parse the configured rest range once so historical rests and fallback timing use the same bounds.
+function configuredRestRangeForExercise(exercise = {}) {
   const text = String(exercise.rest || "").trim();
-  if (!text) return 90;
+  if (!text) return { minimum: 90, maximum: 90, midpoint: 90 };
   const parts = text.split(/\s*-\s*/).map(parseRestSeconds).filter(Number.isFinite);
-  if (parts.length === 1 && parts[0] >= 15 && parts[0] <= 600) return parts[0];
-  if (parts.length >= 2 && parts[0] >= 15 && parts[1] <= 600) return (parts[0] + parts[1]) / 2;
-  return 90;
+  if (parts.length === 1 && parts[0] >= 15 && parts[0] <= 600) {
+    return { minimum: parts[0], maximum: parts[0], midpoint: parts[0] };
+  }
+  if (parts.length >= 2 && parts[0] >= 15 && parts[1] <= 600 && parts[0] <= parts[1]) {
+    return { minimum: parts[0], maximum: parts[1], midpoint: (parts[0] + parts[1]) / 2 };
+  }
+  return { minimum: 90, maximum: 90, midpoint: 90 };
+}
+
+function configuredRestSecondsForExercise(exercise = {}) {
+  return configuredRestRangeForExercise(exercise).midpoint;
 }
 
 // Average the latest three eligible submitted-session rest averages for this identity and style.
@@ -3388,6 +3397,7 @@ function exerciseRestEstimate(exercise, options = {}) {
   const workouts = Array.isArray(options.workouts) ? options.workouts : state.workouts;
   const excludedIds = new Set((options.excludeWorkoutIds || []).map(String));
   const style = effectiveLoadingStyle(exercise);
+  const configuredRest = configuredRestRangeForExercise(exercise);
   const sessionAverages = workoutsNewestFirst(workouts)
     .filter((workout) => !excludedIds.has(String(workout.id || "")))
     .filter((workout) => workoutMatchesTimingExercise(workout, exercise))
@@ -3398,7 +3408,7 @@ function exerciseRestEstimate(exercise, options = {}) {
         .filter((value) => Number.isFinite(value) && value >= 15 && value <= 600);
       return rests.length ? rests.reduce((sum, value) => sum + value, 0) / rests.length : null;
     })
-    .filter(Number.isFinite)
+    .filter((value) => Number.isFinite(value) && value >= configuredRest.minimum && value <= configuredRest.maximum)
     .slice(0, 3);
   if (sessionAverages.length) {
     return {
@@ -3407,7 +3417,7 @@ function exerciseRestEstimate(exercise, options = {}) {
       sessionCount: sessionAverages.length
     };
   }
-  return { seconds: configuredRestSecondsForExercise(exercise), source: "configured", sessionCount: 0 };
+  return { seconds: configuredRest.midpoint, source: "configured", sessionCount: 0 };
 }
 
 function recentRestSecondsForExercise(exercise, options = {}) {
@@ -3541,7 +3551,7 @@ function timingCorrectionSamples(workouts = state.workouts, now = new Date()) {
 }
 
 function timingGlobalFactor(samples = []) {
-  const latest = samples.slice(0, samples.length >= 5 ? 5 : samples.length >= 3 ? samples.length : 0);
+  const latest = samples.slice(0, Math.min(5, samples.length));
   if (!latest.length) return 1;
   const median = timingMedian(latest.map((sample) => sample.ratio));
   return latest.length < 5 ? 1 + (median - 1) * 0.5 : median;
@@ -4707,6 +4717,36 @@ function selectedCoachWeeklyPlan() {
   return normalizeCoachWeeklyPlan(state.settings.coachWeeklyPlan || {});
 }
 
+// Keep unsaved equalizer choices through app-shell refreshes, but never carry them into another week.
+function persistCoachWeekFormPreview() {
+  try {
+    if (!state.coachWeekFormPreview) {
+      window.sessionStorage?.removeItem(COACH_WEEK_PREVIEW_STORAGE_KEY);
+      return;
+    }
+    window.sessionStorage?.setItem(COACH_WEEK_PREVIEW_STORAGE_KEY, JSON.stringify({
+      weekStart: isoFromLocalDate(currentTrainingWeekStart()),
+      setup: normalizeCoachWeeklyPlan(state.coachWeekFormPreview)
+    }));
+  } catch (_) {
+    // Session storage is optional; the in-memory preview still protects ordinary rerenders.
+  }
+}
+
+function restoreCoachWeekFormPreview() {
+  try {
+    const saved = JSON.parse(window.sessionStorage?.getItem(COACH_WEEK_PREVIEW_STORAGE_KEY) || "null");
+    if (saved?.weekStart === isoFromLocalDate(currentTrainingWeekStart()) && saved.setup) {
+      state.coachWeekFormPreview = normalizeCoachWeeklyPlan(saved.setup);
+      return true;
+    }
+    window.sessionStorage?.removeItem(COACH_WEEK_PREVIEW_STORAGE_KEY);
+  } catch (_) {
+    window.sessionStorage?.removeItem?.(COACH_WEEK_PREVIEW_STORAGE_KEY);
+  }
+  return false;
+}
+
 function coachWeeklySourceFingerprint(setupInput = selectedCoachWeeklyPlan()) {
   const setup = normalizeCoachWeeklyPlan(setupInput);
   const source = JSON.stringify(canonicalSyncValue({
@@ -4911,6 +4951,43 @@ function rebalanceWeeklyTargets({ setup: setupInput, draggedMuscleId, requestedR
   return { targets, bleed: { nonPriority: nonPriorityBleed.donors, priority: priorityBleed.donors }, denied: false, reason: "" };
 }
 
+// Reduce over-capacity targets in the same strict order as the faders while preserving feasible 10-set floors.
+function fitCoachWeekTargetsToCapacity({ setup: setupInput, bankedSets = {}, remainingCapacity = 0 }) {
+  const setup = normalizeCoachWeeklyPlan(setupInput);
+  const banked = Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, Math.max(0, Number(bankedSets[muscle.id]) || 0)]));
+  const floors = Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, Math.max(0, HYPERTROPHY.minimumSets - banked[muscle.id])]));
+  const remaining = Object.fromEntries(muscleGroups.map((muscle) => [
+    muscle.id,
+    Math.max(floors[muscle.id], Math.max(0, Number(setup.targets[muscle.id]) || HYPERTROPHY.minimumSets) - banked[muscle.id])
+  ]));
+  const capacity = Math.max(0, Number(remainingCapacity) || 0);
+  const minimumDemand = Object.values(floors).reduce((sum, value) => sum + value, 0);
+  if (minimumDemand > capacity + 0.001) {
+    return {
+      targets: clonePlain(setup.targets),
+      denied: true,
+      adjusted: false,
+      reason: `The selected days hold about ${fmt(capacity)} remaining sets, but every 10-set floor needs ${fmt(minimumDemand)}. Add a day or increase workout time.`
+    };
+  }
+  let excess = Math.max(0, Object.values(remaining).reduce((sum, value) => sum + value, 0) - capacity);
+  const nonPriority = muscleGroups.map((muscle) => muscle.id).filter((id) => !setup.priorities.includes(id));
+  const priority = muscleGroups.map((muscle) => muscle.id).filter((id) => setup.priorities.includes(id));
+  const nonPriorityBleed = bleedWeeklyTargetPhase(remaining, floors, nonPriority, excess);
+  excess = nonPriorityBleed.remainingExcess;
+  const priorityBleed = bleedWeeklyTargetPhase(remaining, floors, priority, excess);
+  const targets = Object.fromEntries(muscleGroups.map((muscle) => [
+    muscle.id,
+    Math.round(Math.min(30, Math.max(HYPERTROPHY.minimumSets, banked[muscle.id] + remaining[muscle.id])) * 10) / 10
+  ]));
+  return {
+    targets,
+    denied: priorityBleed.remainingExcess > 0.001,
+    adjusted: muscleGroups.some((muscle) => Math.abs(targets[muscle.id] - setup.targets[muscle.id]) > 0.001),
+    reason: "Targets were auto-adjusted to the selected days and workout time while protecting weekly floors."
+  };
+}
+
 function coachWeeklyAttainment(setup, projected = {}) {
   const results = muscleGroups.map((muscle) => {
     const planned = Number(projected[muscle.id] || 0);
@@ -4979,6 +5056,37 @@ function topUpCoachWeeklySessionSets(sessions, projected, setBudgets, setup) {
         applyCoachStimulusCredits(projected, selected.item.exercise, 1);
         changed = true;
       }
+    }
+  });
+}
+
+// Fill logical unused session time with safe growth-zone work already present in the session.
+function fillCoachWeeklySessionTime(sessions, projected, setup) {
+  const minimumMinutes = Math.max(0, setup.averageMinutes - 5);
+  const maximumMinutes = setup.averageMinutes + COACH_TIME_TOLERANCE_MINUTES;
+  const maxSetsPerExercise = sessionPlanCaps(setup.averageMinutes).maxSets;
+  sessions.filter((session) => session.status === "planned" && session.items.length).forEach((session) => {
+    while (session.totalMinutes < minimumMinutes) {
+      const candidates = session.items
+        .filter((item) => (
+          item.sets < maxSetsPerExercise
+          && !["reset", "deload"].includes(item.planTarget?.kind)
+          && item.exercise.primaryMuscles.some((muscleId) => (Number(projected[muscleId]) || 0) < HYPERTROPHY.growthHigh)
+        ))
+        .map((item) => ({
+          item,
+          prospectiveMinutes: plannedCoachSessionMinutesWithSet(session.items, item, item.sets + 1),
+          priority: item.exercise.primaryMuscles.some((muscleId) => setup.priorities.includes(muscleId)),
+          growthGap: Math.max(...item.exercise.primaryMuscles.map((muscleId) => Math.max(0, HYPERTROPHY.growthHigh - (Number(projected[muscleId]) || 0))))
+        }))
+        .filter((candidate) => candidate.prospectiveMinutes <= maximumMinutes)
+        .sort((a, b) => Number(b.priority) - Number(a.priority) || b.growthGap - a.growthGap || a.item.sets - b.item.sets);
+      const selected = candidates[0];
+      if (!selected) break;
+      selected.item.sets += 1;
+      selected.item.minutes = plannedExerciseMinutes(selected.item);
+      session.totalMinutes = selected.prospectiveMinutes;
+      applyCoachStimulusCredits(projected, selected.item.exercise, 1);
     }
   });
 }
@@ -5104,6 +5212,11 @@ function buildCoachWeeklyPlan(setupInput = selectedCoachWeeklyPlan()) {
   });
 
   reconcileCoachSecondaryStimulus(sessions, projected, setBudgets);
+  fillCoachWeeklySessionTime(sessions, projected, setup);
+  plannedSessions.forEach((session) => {
+    session.items = orderCoachSessionItems(session.items);
+    session.totalMinutes = plannedCoachSessionMinutes(session.items);
+  });
 
   const remainingSets = muscleGroups.reduce((sum, muscle) => sum + Math.max(0, setup.targets[muscle.id] - (actualStats.find((stat) => stat.id === muscle.id)?.sets || 0)), 0);
   const missing = muscleGroups.filter((muscle) => setup.targets[muscle.id] > (projected[muscle.id] || 0) && !hasPrimaryExerciseForMuscle(muscle.id));
@@ -8000,6 +8113,11 @@ function renderCoachWeekMixer(setup, plan) {
       </div>
       <div class="coach-week-mixer-title"><strong>Weekly set equalizer</strong><small>Submitted work is locked. Drag the remaining target, then Generate.</small></div>
     </div>
+    <div class="coach-week-quick-picks" aria-label="Weekly target quick picks">
+      <span>Quick picks</span>
+      ${[10, 15, 20].map((target) => `<button class="ghost-mini" type="button" data-action="coach-week-quick-pick" data-target="${target}">All ${target}</button>`).join("")}
+      <button class="ghost-mini" type="button" data-action="coach-week-auto-fit">Fit capacity</button>
+    </div>
     <div class="coach-week-mixer-shell">
       <div class="coach-week-mixer-axis" aria-hidden="true">${axisTicks.map((tick) => `<span style="--tick:${tick}">${tick}</span>`).join("")}</div>
       <div class="coach-week-mixer-scroll" data-coach-week-mixer-scroll>
@@ -8082,7 +8200,7 @@ function renderCoachWeek() {
   const formSetup = state.coachWeekFormPreview ? normalizeCoachWeeklyPlan(state.coachWeekFormPreview) : setup;
   return `
     <details class="section form-panel collapsible-panel coach-week-setup" open>
-      <summary><span>Build the week</span><small>${formSetup.days.length} days - ${formSetup.averageMinutes} min average</small></summary>
+      <summary><span>Build the week</span><small data-coach-week-setup-summary>${formSetup.days.length} days - ${formSetup.averageMinutes} min average</small></summary>
       <form id="coach-week-form">
         <div class="field"><label>Training days</label><div class="coach-weekday-grid">${COACH_WEEKDAY_OPTIONS.map((option) => `<label class="choice-chip"><input type="checkbox" name="days" value="${option.day}" ${formSetup.days.includes(option.day) ? "checked" : ""}><span>${option.short}</span></label>`).join("")}</div></div>
         <div class="field"><label for="coach-week-minutes">Average workout time</label><select id="coach-week-minutes" name="averageMinutes">${COACH_TIMEFRAME_OPTIONS.map((option) => `<option value="${option.minutes}" ${formSetup.averageMinutes === option.minutes ? "selected" : ""}>${escapeHtml(option.label)}</option>`).join("")}</select></div>
@@ -8113,6 +8231,7 @@ async function commitCoachWeeklyPlan(setupInput, message) {
   scheduleRecordSync();
   // Clear the local preview only after the generated setup has been safely persisted and queued for sync.
   state.coachWeekFormPreview = null;
+  persistCoachWeekFormPreview();
   toast(message);
   await render();
 }
@@ -8186,8 +8305,31 @@ function markCoachWeekFormDirty(form) {
   });
   // Preserve current form values across background sync renders until Generate commits them.
   state.coachWeekFormPreview = context.setup;
+  persistCoachWeekFormPreview();
+  const summary = form.closest("details")?.querySelector("[data-coach-week-setup-summary]");
+  if (summary) summary.textContent = `${context.setup.days.length} days - ${context.setup.averageMinutes} min average`;
   updateCoachWeekCapacityProgressDom(form, context.setup, context.bankedSets, context.remainingCapacity);
   return context;
+}
+
+// Apply capacity fitting to the current controls without rerendering or moving the fader scroll position.
+function autoFitCoachWeekForm(form, context = coachWeekMixerFormContext(form)) {
+  const result = fitCoachWeekTargetsToCapacity({
+    setup: context.setup,
+    bankedSets: context.bankedSets,
+    remainingCapacity: context.remainingCapacity
+  });
+  const cost = form.querySelector("[data-coach-week-mixer-cost]");
+  if (result.denied) {
+    if (cost) cost.textContent = result.reason;
+    return result;
+  }
+  if (result.adjusted) updateCoachWeekMixerDom(form, result.targets, context.bankedSets, { nonPriority: [], priority: [] }, "");
+  state.coachWeekFormPreview = coachWeeklyPlanFromForm(form);
+  persistCoachWeekFormPreview();
+  updateCoachWeekCapacityProgressDom(form, state.coachWeekFormPreview, context.bankedSets, context.remainingCapacity);
+  if (cost && result.adjusted) cost.textContent = result.reason;
+  return result;
 }
 
 // Apply one requested fader position through the pure strict-phase rebalancer.
@@ -8204,6 +8346,7 @@ function applyCoachWeekFaderRequest(form, muscleId, requestedRemaining) {
     updateCoachWeekMixerDom(form, result.targets, context.bankedSets, result.bleed, muscleId);
     // Capture the redistributed hidden targets so a later background render restores this exact preview.
     state.coachWeekFormPreview = coachWeeklyPlanFromForm(form);
+    persistCoachWeekFormPreview();
     updateCoachWeekCapacityProgressDom(form, state.coachWeekFormPreview, context.bankedSets, context.remainingCapacity);
   }
   return result;
@@ -8341,6 +8484,12 @@ function updateTabbarScrollState() {
   tabbar.classList.add("is-scrolling");
   window.clearTimeout(tabbarScrollTimer);
   tabbarScrollTimer = window.setTimeout(() => tabbar.classList.remove("is-scrolling"), 180);
+}
+
+// Restore the bottom navigation after iOS changes the visual viewport for downloads or page restoration.
+function resetTabbarScrollState() {
+  window.clearTimeout(tabbarScrollTimer);
+  document.querySelector(".tabbar")?.classList.remove("is-scrolling");
 }
 
 // Keep both floating scroll controls synchronized with window and iOS visual-viewport movement.
@@ -9718,6 +9867,7 @@ async function downloadCoachDebugReport() {
   a.download = `trainwise-debug-${todayISO()}.json`;
   a.click();
   URL.revokeObjectURL(url);
+  window.setTimeout(resetTabbarScrollState, 0);
   announce("Coach debug report exported.", { tone: "good", detail: "Safe diagnostic file only; it is not a backup." });
 }
 
@@ -10881,6 +11031,24 @@ async function handleAction(action, target) {
       state.historyDate = "";
       await render({ animate: true });
     },
+    async "coach-week-quick-pick"() {
+      const form = target.closest("#coach-week-form");
+      const requestedTarget = Number(target.dataset.target);
+      if (!form || ![10, 15, 20].includes(requestedTarget)) return;
+      const context = markCoachWeekFormDirty(form);
+      const requestedTargets = Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, Math.max(requestedTarget, context.bankedSets[muscle.id] || 0)]));
+      updateCoachWeekMixerDom(form, requestedTargets, context.bankedSets, { nonPriority: [], priority: [] }, "");
+      const fittedContext = coachWeekMixerFormContext(form);
+      const result = autoFitCoachWeekForm(form, fittedContext);
+      toast(result.denied ? result.reason : result.adjusted ? `All ${requestedTarget} exceeded current capacity, so Coach protected floors and priorities.` : `All weekly targets set to ${requestedTarget}.`);
+    },
+    async "coach-week-auto-fit"() {
+      const form = target.closest("#coach-week-form");
+      if (!form) return;
+      const context = markCoachWeekFormDirty(form);
+      const result = autoFitCoachWeekForm(form, context);
+      toast(result.denied ? result.reason : result.adjusted ? result.reason : "Current targets already fit the selected capacity.");
+    },
     async "coach-view"() {
       state.coachView = target.dataset.view === "week" ? "week" : "today";
       await render({ animate: true });
@@ -11515,6 +11683,7 @@ document.addEventListener("visibilitychange", () => {
 });
 window.addEventListener?.("pageshow", () => {
   markUiAudioForResume();
+  resetTabbarScrollState();
 });
 window.addEventListener?.("focus", () => {
   if (uiAudioContext?.state !== "running") markUiAudioForResume();
@@ -11571,7 +11740,12 @@ document.addEventListener("change", async (event) => {
     const coachWeekForm = event.target.closest("#coach-week-form");
     if (coachWeekForm) {
       // Keep weekly edits local to the current form and expose that Generate is still required.
-      markCoachWeekFormDirty(coachWeekForm);
+      const context = markCoachWeekFormDirty(coachWeekForm);
+      if (event.target.matches("input[name='days'], #coach-week-minutes")) {
+        const result = autoFitCoachWeekForm(coachWeekForm, context);
+        if (result.denied) toast(result.reason);
+        else if (result.adjusted) toast(result.reason);
+      }
       return;
     }
     if (event.target.matches("[data-sound-effects-enabled]")) {
@@ -11859,7 +12033,10 @@ if (window.addEventListener) {
   window.addEventListener("scroll", handleViewportScroll, { passive: true });
   window.addEventListener("resize", updateScrollTopButton);
   window.visualViewport?.addEventListener("scroll", handleViewportScroll, { passive: true });
-  window.visualViewport?.addEventListener("resize", updateScrollTopButton);
+  window.visualViewport?.addEventListener("resize", () => {
+    updateScrollTopButton();
+    resetTabbarScrollState();
+  });
 }
 
 document.addEventListener("submit", async (event) => {
@@ -11929,6 +12106,7 @@ async function init() {
 
   restoreDraftRecovery();
   restoreCopiedCoachPlan();
+  restoreCoachWeekFormPreview();
   if (state.workoutDraft.length) ensureDraftSessionId();
   loadWorkoutTimer();
   startWorkoutTimerTicker();

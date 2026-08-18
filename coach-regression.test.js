@@ -24,6 +24,13 @@ class FixedDate extends NativeDate {
   }
 }
 
+const sessionData = {};
+const sessionStorage = {
+  getItem(key) { return Object.prototype.hasOwnProperty.call(sessionData, key) ? sessionData[key] : null; },
+  setItem(key, value) { sessionData[key] = String(value); },
+  removeItem(key) { delete sessionData[key]; }
+};
+
 const context = {
   console,
   crypto: { randomUUID: () => `id-${Math.random().toString(16).slice(2)}` },
@@ -43,6 +50,7 @@ const context = {
   localStorage: { getItem() { return null; }, setItem() {}, removeItem() {} },
   window: {
     location: { reload() {} },
+    sessionStorage,
     matchMedia: () => ({ matches: false, addEventListener() {}, removeEventListener() {} })
   },
   document: {
@@ -1542,6 +1550,7 @@ assert(shortRestTimeframe.setCount > 14, `Expected short-rest 1 hour plan to add
 const personalRest = runScenario(`
   ${resetAndHelpers}
   var row = resolveExerciseMeta("Dumbbell Row");
+  row.rest = "180-300 sec";
   state.workouts = [makeWorkout({ id: "back", label: "Back" }, 2, 2, {
     exercise: row.name,
     exerciseId: row.id,
@@ -1552,7 +1561,7 @@ const personalRest = runScenario(`
   ({ estimated: estimateExerciseMinutes(row, 2) });
 `);
 
-assert.strictEqual(personalRest.estimated, 6.5, `Expected two unclassified Standard sets with one 240-second rest to take 6.5 raw minutes, got ${personalRest.estimated}`);
+assert.strictEqual(personalRest.estimated, 6.5, `Expected valid in-range 240-second rest history to personalize the estimate to 6.5 raw minutes, got ${personalRest.estimated}`);
 
 const extraSetFairness = runScenario(`
   ${resetAndHelpers}
@@ -2160,8 +2169,8 @@ const weeklyExistingExerciseTopUp = runScenario(`
   ({ projectedAbs: plan.projected.abs, absSets: session.items.find((item) => item.exercise.id === "abs-only")?.sets || 0, itemCount: session.items.length, totalMinutes: session.totalMinutes });
 `);
 
-assert.strictEqual(weeklyExistingExerciseTopUp.projectedAbs, 14, `Expected available time to top up an existing exercise through its weekly target, got ${weeklyExistingExerciseTopUp.projectedAbs}.`);
-assert.strictEqual(weeklyExistingExerciseTopUp.absSets, 6, `Expected the existing Abs exercise to grow from its initial four-set block to six sets, got ${weeklyExistingExerciseTopUp.absSets}.`);
+assert.strictEqual(weeklyExistingExerciseTopUp.projectedAbs, 16, `Expected logical unused time to continue safe growth-zone work beyond the requested floor, got ${weeklyExistingExerciseTopUp.projectedAbs}.`);
+assert.strictEqual(weeklyExistingExerciseTopUp.absSets, 8, `Expected the existing Abs exercise to reach the per-exercise cap when no other safe work is available, got ${weeklyExistingExerciseTopUp.absSets}.`);
 assert.strictEqual(weeklyExistingExerciseTopUp.itemCount, 1, "Expected topping up sets to preserve the exercise count.");
 assert(weeklyExistingExerciseTopUp.totalMinutes <= 63, `Expected the topped-up session to remain within the selected time tolerance, got ${weeklyExistingExerciseTopUp.totalMinutes}.`);
 
@@ -2373,7 +2382,12 @@ const weeklyEqualizer = runScenario(`
   var prioritySetup = normalizeCoachWeeklyPlan({ priorities: ["chest", "biceps", "triceps"], targets: { ...allTen, chest: 20, biceps: 20, triceps: 20 } });
   var priorityPhase = rebalanceWeeklyTargets({ setup: prioritySetup, draggedMuscleId: "chest", requestedRemaining: 15, bankedSets: allTen, remainingCapacity: 30 });
   var deadlock = rebalanceWeeklyTargets({ setup: normalizeCoachWeeklyPlan({ targets: allTen }), draggedMuscleId: "chest", requestedRemaining: 10, bankedSets: {}, remainingCapacity: 90 });
-  ({ floorClamp, nonPriorityPhase, priorityPhase, deadlock });
+  var autoFit = fitCoachWeekTargetsToCapacity({
+    setup: normalizeCoachWeeklyPlan({ priorities: ["chest"], targets: Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, 20])) }),
+    bankedSets: Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, 5])),
+    remainingCapacity: 60
+  });
+  ({ floorClamp, nonPriorityPhase, priorityPhase, deadlock, autoFit });
 `);
 
 assert.strictEqual(weeklyEqualizer.floorClamp.denied, false, "Expected a below-floor drag to clamp rather than fail.");
@@ -2389,6 +2403,9 @@ assert.strictEqual(weeklyEqualizer.priorityPhase.targets.biceps, 17.5, "Expected
 assert.strictEqual(weeklyEqualizer.priorityPhase.targets.triceps, 17.5, "Expected Triceps to share priority-phase cost proportionally.");
 assert.deepEqual(weeklyEqualizer.priorityPhase.bleed.priority.map((item) => item.muscleId).sort(), ["biceps", "triceps"], "Expected phase-two bleed only after non-priorities reach their floors.");
 assert.strictEqual(weeklyEqualizer.deadlock.denied, true, "Expected a true all-floor capacity deadlock to be denied.");
+assert.strictEqual(weeklyEqualizer.autoFit.denied, false, "Expected reduced day/time capacity to auto-fit targets when all protected floors still fit.");
+assert.strictEqual(weeklyEqualizer.autoFit.targets.chest, 20, "Expected auto-fit to preserve a selected priority before reducing non-priority growth targets.");
+assert.strictEqual(Object.values(weeklyEqualizer.autoFit.targets).reduce((sum, value) => sum + value, 0), 110, "Expected auto-fit targets to consume the 60 remaining sets plus 50 already banked sets.");
 
 // Toggling Wednesday must change the exact remaining schedule and its projection without any alternate plan source.
 const weeklyExactDays = runScenario(`
@@ -2431,10 +2448,26 @@ const weeklyFaderStability = runScenario(`
 assert(weeklyFaderStability.firstRender.includes("2 days - 40 min average") && weeklyFaderStability.secondRender.includes("2 days - 40 min average"), "Expected session-local weekly controls to survive a background-style rerender.");
 assert(weeklyFaderStability.secondRender.includes("24 target") && weeklyFaderStability.secondRender.includes("Changes not generated yet."), "Expected the unsaved Chest fader and dirty state to remain visible after rerender.");
 assert(weeklyFaderStability.secondRender.includes("assets/muscles/chest.png") && weeklyFaderStability.secondRender.includes("assets/muscles/bicep.png"), "Expected fader knobs to use the corresponding muscle artwork.");
+assert(weeklyFaderStability.secondRender.includes('data-action="coach-week-quick-pick" data-target="10"') && weeklyFaderStability.secondRender.includes('data-target="15"') && weeklyFaderStability.secondRender.includes('data-target="20"'), "Expected mobile-safe all-10, all-15, and all-20 weekly quick picks.");
 assert.strictEqual(weeklyFaderStability.available.available, 20, "Expected the progress helper to report unassigned estimated capacity.");
 assert.strictEqual(weeklyFaderStability.available.label, "20 sets left", "Expected the white bar label to state how many sets remain.");
 assert.strictEqual(weeklyFaderStability.over.over, 10, "Expected over-capacity protected targets to be reported explicitly.");
 assert.strictEqual(weeklyFaderStability.over.label, "10 sets over capacity", "Expected constrained weeks to avoid a misleading zero-left label.");
+assert(appCode.includes("COACH_WEEK_PREVIEW_STORAGE_KEY") && appCode.includes("restoreCoachWeekFormPreview"), "Expected unsaved weekly fader choices to survive an app-shell refresh during the same week.");
+
+const weeklyFaderRefreshRecovery = runScenario(`
+  ${resetAndHelpers}
+  state.coachWeekFormPreview = normalizeCoachWeeklyPlan({ days: [5], averageMinutes: 40, priorities: ["chest"], targets: { chest: 24 } });
+  persistCoachWeekFormPreview();
+  state.coachWeekFormPreview = null;
+  var restored = restoreCoachWeekFormPreview();
+  ({ restored, days: state.coachWeekFormPreview.days, minutes: state.coachWeekFormPreview.averageMinutes, chest: state.coachWeekFormPreview.targets.chest });
+`);
+
+assert.strictEqual(weeklyFaderRefreshRecovery.restored, true, "Expected a same-week app-shell refresh to restore unsaved fader choices.");
+assert.deepEqual(weeklyFaderRefreshRecovery.days, [5], "Expected the exact unsaved workout-day selection to survive refresh.");
+assert.strictEqual(weeklyFaderRefreshRecovery.minutes, 40, "Expected the unsaved timeframe to survive refresh.");
+assert.strictEqual(weeklyFaderRefreshRecovery.chest, 24, "Expected the unsaved Chest fader target to survive refresh.");
 
 const weeklyStimulusAwareCapacity = runScenario(`
   ${resetAndHelpers}
@@ -2537,6 +2570,39 @@ const coachTimeRestIdentity = runScenario(`
 
 assert.strictEqual(coachTimeRestIdentity.rest, 105, "Expected latest three exact-ID same-style session averages to produce 105 seconds.");
 assert.strictEqual(coachTimeRestIdentity.source, "history", "Expected valid recent history to be identified as the rest source.");
+
+const coachTimeRejectsOutOfRangeRest = runScenario(`
+  ${resetAndHelpers}
+  state.settings.customExercises = [{ id: "rest-guard", name: "Rest Guard", primaryMuscles: ["quads"], secondaryMuscles: [], exerciseType: "isolation", loadingStyle: "standard", reps: "8-15", rest: "60-120 sec" }];
+  var target = normalizeExerciseDefinition(state.settings.customExercises[0]);
+  state.workouts = [{ id: "short-rest", date: "2026-06-16", exerciseId: "rest-guard", exercise: "Rest Guard", loadingStyle: "standard", setRows: [{ reps: 10, restSeconds: 31 }, { reps: 10, restSeconds: 31 }] }];
+  exerciseRestEstimate(target);
+`);
+
+assert.strictEqual(coachTimeRejectsOutOfRangeRest.seconds, 90, "Expected rest history below the configured range to fall back to its 90-second midpoint.");
+assert.strictEqual(coachTimeRejectsOutOfRangeRest.source, "configured", "Expected rejected rest history to report the configured fallback source.");
+
+const weeklyLogicalTimeFill = runScenario(`
+  ${resetAndHelpers}
+  state.settings.customExercises = [
+    { id: "fill-back", name: "Fill Back", primaryMuscles: ["back"], secondaryMuscles: ["biceps"], exerciseType: "compound", loadingStyle: "standard", reps: "8-15", rest: "60-120 sec", userCreated: true },
+    { id: "fill-squat", name: "Fill Squat", primaryMuscles: ["quads"], secondaryMuscles: ["hamstrings", "glutes"], exerciseType: "compound", loadingStyle: "standard", reps: "8-15", rest: "60-120 sec", userCreated: true },
+    { id: "fill-calf-a", name: "Fill Calf A", primaryMuscles: ["calves"], secondaryMuscles: [], exerciseType: "isolation", loadingStyle: "standard", reps: "8-15", rest: "60-120 sec", userCreated: true },
+    { id: "fill-glutes", name: "Fill Glutes", primaryMuscles: ["glutes"], secondaryMuscles: ["hamstrings"], exerciseType: "compound", loadingStyle: "standard", reps: "8-15", rest: "60-120 sec", userCreated: true },
+    { id: "fill-calf-b", name: "Fill Calf B", primaryMuscles: ["calves"], secondaryMuscles: [], exerciseType: "isolation", loadingStyle: "standard", reps: "8-15", rest: "60-120 sec", userCreated: true },
+    { id: "fill-legs", name: "Fill Legs", primaryMuscles: ["quads"], secondaryMuscles: [], exerciseType: "isolation", loadingStyle: "standard", reps: "8-15", rest: "60-120 sec", userCreated: true }
+  ];
+  var actual = { chest: 10, back: 8, shoulders: 10, biceps: 10, triceps: 10, quads: 4, hamstrings: 10, glutes: 5, calves: 0, abs: 10 };
+  state.workouts = muscleGroups.map((muscle) => makeWorkout(muscle, 3, actual[muscle.id], { exercise: "Previous " + muscle.label, exerciseId: "previous-" + muscle.id, secondaryMuscles: [] }));
+  var targets = Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, 10]));
+  var plan = buildCoachWeeklyPlan(normalizeCoachWeeklyPlan({ days: [5], averageMinutes: 60, priorities: [], targets }));
+  var session = plan.sessions.find((item) => item.status === "planned");
+  ({ minutes: session.totalMinutes, itemCount: session.items.length, sets: session.items.map((item) => item.sets) });
+`);
+
+assert(weeklyLogicalTimeFill.minutes >= 50 && weeklyLogicalTimeFill.minutes <= 63, `Expected a logical one-hour weekly session to estimate within 5-10 minutes of the selection, got ${weeklyLogicalTimeFill.minutes}.`);
+assert(weeklyLogicalTimeFill.itemCount <= 6, `Expected time fill to preserve the six-exercise cap, got ${weeklyLogicalTimeFill.itemCount}.`);
+assert(weeklyLogicalTimeFill.sets.some((sets) => sets > 4), `Expected remaining time to add safe sets to an existing exercise, got ${weeklyLogicalTimeFill.sets.join(", ")}.`);
 
 assert(!appCode.includes("if (coachWeekForm.isConnected) render();"), "Expected pending weekly form changes not to rerender and replace the committed plan before Generate.");
 
