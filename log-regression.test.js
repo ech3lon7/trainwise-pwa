@@ -197,9 +197,9 @@ assert(!appCode.includes('selectedExercise: "Push-up"'), "Expected Log startup n
 assert(!appCode.includes('showBanner("Unsaved draft restored."'), "Expected startup draft recovery not to show a top banner.");
 assert(appCode.includes("notifyMetricSaved"), "Expected metrics saves to use a dedicated bottom-only notification helper.");
 assert(!stylesCode.includes(".mobile-quick-toggle"), "Expected floating quick action button styling to be removed.");
-assert(indexCode.includes("v=1.5.86"), "Expected index shell references to use bumped app version.");
+assert(indexCode.includes("v=1.5.89"), "Expected index shell references to use bumped app version.");
 assert(!indexCode.includes('id="app" class="app-content" aria-live'), "Expected broad app aria-live to be removed in favor of targeted live regions.");
-assert(serviceWorkerCode.includes("trainwise-cache-v108"), "Expected service worker cache version bump.");
+assert(serviceWorkerCode.includes("trainwise-cache-v111"), "Expected service worker cache version bump.");
 // The mobile tab bar must anchor to the visible bottom edge and compact only during active scrolling.
 assert(/\.tabbar\s*\{[^}]*top:\s*auto;[^}]*bottom:\s*env\(safe-area-inset-bottom\)/s.test(stylesCode), "Expected the tab bar to use a stable bottom safe-area anchor instead of a dynamic viewport top offset.");
 assert(stylesCode.includes(".tabbar.is-scrolling") && appCode.includes("updateTabbarScrollState"), "Expected the tab bar to shrink during scrolling and restore after scrolling stops.");

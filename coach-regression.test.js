@@ -2209,6 +2209,13 @@ assert.strictEqual((weeklyCommittedPlanOwnsMixer.markup.match(/data-coach-week-f
 assert(weeklyCommittedPlanOwnsMixer.markup.includes('type="hidden" name="target-chest"'), "Expected faders to retain the existing hidden target form contract.");
 assert(!weeklyCommittedPlanOwnsMixer.markup.includes('type="number" name="target-chest"'), "Expected numeric target fields to be retired from the weekly UI.");
 
+const weeklyChangeHandlerStart = appCode.indexOf('const coachWeekForm = event.target.closest("#coach-week-form")');
+const weeklyChangeHandlerEnd = appCode.indexOf('if (event.target.matches("[data-sound-effects-enabled]"))', weeklyChangeHandlerStart);
+const weeklyChangeHandler = appCode.slice(weeklyChangeHandlerStart, weeklyChangeHandlerEnd);
+assert(weeklyChangeHandler.includes("markCoachWeekFormDirty(coachWeekForm)"), "Expected day/time edits to refresh the weekly capacity readout.");
+assert(!weeklyChangeHandler.includes("autoFitCoachWeekForm"), "Expected day/time edits not to redistribute weekly fader targets automatically.");
+assert(appCode.includes("Valid planned days can still be copied"), "Expected stale weekly information to remain copyable when the selected day is valid.");
+
 const weeklySourceFingerprint = runScenario(`
   ${resetAndHelpers}
   var setup = normalizeCoachWeeklyPlan({ days: [5, 6], averageMinutes: 60, priorities: ["glutes"], targets: { glutes: 20 } });
@@ -2247,6 +2254,21 @@ const weeklyGeneratedSnapshotStaysCommitted = runScenario(`
 assert.deepEqual(weeklyGeneratedSnapshotStaysCommitted.afterItems, weeklyGeneratedSnapshotStaysCommitted.beforeItems, "Expected newly submitted work to leave the generated remaining-week items unchanged until Generate is clicked.");
 assert.strictEqual(weeklyGeneratedSnapshotStaysCommitted.stale, true, "Expected newly submitted work to mark the committed weekly plan as needing regeneration.");
 
+const staleWorkoutStillAllowsDayCopy = runScenario(`
+  ${resetAndHelpers}
+  state.settings.customExercises = [{ id: "weekly-curl", name: "Weekly Curl", primaryMuscles: ["biceps"], secondaryMuscles: [], equipment: "dumbbells", reps: "8-15", rest: "60 sec", cue: "Curl.", userCreated: true }];
+  var setup = normalizeCoachWeeklyPlan({ days: [5, 6], averageMinutes: 40, priorities: ["biceps"], targets: { biceps: 20 } });
+  var generated = buildCoachWeeklyPlan(setup);
+  var plannedDate = generated.sessions.find((session) => session.status === "planned" && session.items.length)?.date;
+  state.settings.coachWeeklyPlan = normalizeCoachWeeklyPlan({ ...setup, sourceFingerprint: coachWeeklySourceFingerprint(setup), generatedPlan: compactCoachWeeklyPlanSnapshot(generated) });
+  state.workouts.push(makeWorkout(muscleGroups.find((muscle) => muscle.id === "chest"), 0, 2, { id: "completed-after-generation" }));
+  var displayed = displayedCoachWeeklyPlan();
+  ({ stale: displayed.stale, issue: coachWeekDayCopyIssue(displayed, plannedDate) });
+`);
+
+assert.strictEqual(staleWorkoutStillAllowsDayCopy.stale, true, "Expected submitted work to keep the informational stale marker.");
+assert.strictEqual(staleWorkoutStillAllowsDayCopy.issue, "", "Expected unrelated submitted work not to block copying a valid generated day.");
+
 const archivedGeneratedExerciseIsBlocked = runScenario(`
   ${resetAndHelpers}
   state.settings.customExercises = [{ id: "weekly-curl", name: "Weekly Curl", primaryMuscles: ["biceps"], secondaryMuscles: [], equipment: "dumbbells", reps: "8-15", rest: "60 sec", cue: "Curl.", userCreated: true }];
@@ -2254,12 +2276,14 @@ const archivedGeneratedExerciseIsBlocked = runScenario(`
   var generated = buildCoachWeeklyPlan(setup);
   state.settings.coachWeeklyPlan = normalizeCoachWeeklyPlan({ ...setup, sourceFingerprint: coachWeeklySourceFingerprint(setup), generatedPlan: compactCoachWeeklyPlanSnapshot(generated) });
   state.settings.customExercises[0] = { ...state.settings.customExercises[0], archivedAt: "2026-06-17T14:00:00.000Z", updatedAt: "2026-06-17T14:00:00.000Z" };
+  var plannedDate = generated.sessions.find((session) => session.status === "planned" && session.items.length)?.date;
   var displayed = displayedCoachWeeklyPlan();
-  ({ stale: displayed.stale, ids: displayed.sessions.flatMap((session) => session.items.map((item) => item.exercise.id)) });
+  ({ stale: displayed.stale, ids: displayed.sessions.flatMap((session) => session.items.map((item) => item.exercise.id)), issue: coachWeekDayCopyIssue(displayed, plannedDate) });
 `);
 
 assert.strictEqual(archivedGeneratedExerciseIsBlocked.stale, true, "Expected archiving a generated exercise to mark the weekly plan stale.");
 assert(!archivedGeneratedExerciseIsBlocked.ids.includes("weekly-curl"), "Expected archived generated exercises to be removed from actionable weekly recommendations.");
+assert(archivedGeneratedExerciseIsBlocked.issue.includes("archived, hidden, or missing exercise"), "Expected an inactive exercise to block only its affected generated day.");
 
 const weeklySecondaryStimulusBudget = runScenario(`
   ${resetAndHelpers}
@@ -2387,7 +2411,23 @@ const weeklyEqualizer = runScenario(`
     bankedSets: Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, 5])),
     remainingCapacity: 60
   });
-  ({ floorClamp, nonPriorityPhase, priorityPhase, deadlock, autoFit });
+  var reportTargets = { chest: 20, back: 20, shoulders: 20, biceps: 20, triceps: 20, quads: 18, hamstrings: 20, glutes: 17, calves: 18, abs: 18 };
+  var reportFit = fitCoachWeekTargetsToCapacity({
+    setup: normalizeCoachWeeklyPlan({ priorities: ["chest", "back", "shoulders", "biceps", "triceps"], targets: reportTargets }),
+    bankedSets: Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, 0])),
+    remainingCapacity: 106
+  });
+  var underCapacity = optimizeCoachWeekTargetsToCapacity({
+    setup: normalizeCoachWeeklyPlan({ priorities: ["chest", "biceps"], targets: allTen }),
+    bankedSets: Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, 0])),
+    remainingCapacity: 120
+  });
+  var optimizeWhileOver = optimizeCoachWeekTargetsToCapacity({
+    setup: normalizeCoachWeeklyPlan({ priorities: ["chest"], targets: Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, 20])) }),
+    bankedSets: Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, 0])),
+    remainingCapacity: 100
+  });
+  ({ floorClamp, nonPriorityPhase, priorityPhase, deadlock, autoFit, reportFit, underCapacity, optimizeWhileOver });
 `);
 
 assert.strictEqual(weeklyEqualizer.floorClamp.denied, false, "Expected a below-floor drag to clamp rather than fail.");
@@ -2406,6 +2446,18 @@ assert.strictEqual(weeklyEqualizer.deadlock.denied, true, "Expected a true all-f
 assert.strictEqual(weeklyEqualizer.autoFit.denied, false, "Expected reduced day/time capacity to auto-fit targets when all protected floors still fit.");
 assert.strictEqual(weeklyEqualizer.autoFit.targets.chest, 20, "Expected auto-fit to preserve a selected priority before reducing non-priority growth targets.");
 assert.strictEqual(Object.values(weeklyEqualizer.autoFit.targets).reduce((sum, value) => sum + value, 0), 110, "Expected auto-fit targets to consume the 60 remaining sets plus 50 already banked sets.");
+assert.strictEqual(weeklyEqualizer.reportFit.denied, false, "Expected the reported 106-set capacity to fit because all ten protected floors require only 100 sets.");
+assert(Math.abs(Object.values(weeklyEqualizer.reportFit.targets).reduce((sum, value) => sum + value, 0) - 106) < 0.001, "Expected Fix Over Capacity to reduce the report's 191 requested sets to exactly 106.");
+assert.strictEqual(weeklyEqualizer.underCapacity.denied, false, "Expected Optimize Under Capacity to accept available room.");
+assert.strictEqual(Object.values(weeklyEqualizer.underCapacity.targets).reduce((sum, value) => sum + value, 0), 120, "Expected Optimize Under Capacity to consume all 20 available sets.");
+assert.strictEqual(weeklyEqualizer.underCapacity.targets.chest, 20, "Expected prioritized Chest to fill toward 20 before non-priority growth work.");
+assert.strictEqual(weeklyEqualizer.underCapacity.targets.biceps, 20, "Expected prioritized Biceps to fill toward 20 before non-priority growth work.");
+assert.strictEqual(weeklyEqualizer.optimizeWhileOver.denied, true, "Expected the under-capacity optimizer never to conceal or lower an over-capacity request.");
+assert(!appCode.includes("state.coachWeekFormPreview = coachWeeklyPlanFromForm(form);\n  persistCoachWeekFormPreview();\n  updateCoachWeekCapacityProgressDom(form, state.coachWeekFormPreview"), "Expected capacity actions to store calculated targets directly instead of rereading potentially stale hidden inputs.");
+assert(/async "coach-week-fix-over"\(\)[\s\S]*?await render\(\);[\s\S]*?toast\(/.test(appCode), "Expected Fix Over Capacity to rerender from its authoritative fitted preview before reporting success.");
+assert(/async "coach-week-optimize-under"\(\)[\s\S]*?await render\(\);[\s\S]*?toast\(/.test(appCode), "Expected Optimize Under Capacity to rerender from its authoritative optimized preview before reporting success.");
+assert(appCode.includes('data-action="coach-week-fix-over">Fix Over Capacity') && appCode.includes('data-action="coach-week-optimize-under">Optimize Under Capacity'), "Expected separate one-way weekly capacity controls.");
+assert(!appCode.includes('data-action="coach-week-auto-fit">Fit capacity'), "Expected the ambiguous Fit capacity control to be removed.");
 
 // Toggling Wednesday must change the exact remaining schedule and its projection without any alternate plan source.
 const weeklyExactDays = runScenario(`

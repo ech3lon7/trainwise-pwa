@@ -3,7 +3,7 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 3;
 const STORES = ["workouts", "metrics", "settings", "syncQueue"];
-const APP_VERSION = "1.5.86";
+const APP_VERSION = "1.5.89";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 const DRAFT_RECOVERY_KEY = "trainwise-draft-recovery-v1";
 const DATED_STRENGTH_DRAFTS_KEY = "trainwise-strength-drafts-by-date-v1";
@@ -4988,6 +4988,51 @@ function fitCoachWeekTargetsToCapacity({ setup: setupInput, bankedSets = {}, rem
   };
 }
 
+// Add only unused capacity, keeping weekly floors and priority growth ahead of optional higher-volume work.
+function optimizeCoachWeekTargetsToCapacity({ setup: setupInput, bankedSets = {}, remainingCapacity = 0 }) {
+  const setup = normalizeCoachWeeklyPlan(setupInput);
+  const banked = Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, Math.max(0, Number(bankedSets[muscle.id]) || 0)]));
+  const targets = Object.fromEntries(muscleGroups.map((muscle) => [
+    muscle.id,
+    Math.min(30, Math.max(HYPERTROPHY.minimumSets, banked[muscle.id], Number(setup.targets[muscle.id]) || HYPERTROPHY.minimumSets))
+  ]));
+  const capacity = Math.max(0, Number(remainingCapacity) || 0);
+  const requested = muscleGroups.reduce((sum, muscle) => sum + Math.max(0, targets[muscle.id] - banked[muscle.id]), 0);
+  if (requested > capacity + 0.001) {
+    return { targets, denied: true, adjusted: false, reason: `Targets are ${fmt(requested - capacity, 1)} sets over capacity. Use Fix Over Capacity first.` };
+  }
+  let available = Math.max(0, capacity - requested);
+  const startingAvailable = available;
+  const priorityIds = muscleGroups.map((muscle) => muscle.id).filter((id) => setup.priorities.includes(id));
+  const nonPriorityIds = muscleGroups.map((muscle) => muscle.id).filter((id) => !setup.priorities.includes(id));
+  const addToward = (ids, ceiling) => {
+    while (available > 0.001) {
+      const id = ids
+        .filter((muscleId) => targets[muscleId] < ceiling - 0.001)
+        .sort((a, b) => targets[a] - targets[b] || muscleGroups.findIndex((muscle) => muscle.id === a) - muscleGroups.findIndex((muscle) => muscle.id === b))[0];
+      if (!id) break;
+      const increment = Math.min(1, available, ceiling - targets[id]);
+      targets[id] += increment;
+      available -= increment;
+    }
+  };
+  addToward(priorityIds, HYPERTROPHY.growthHigh);
+  addToward(nonPriorityIds, HYPERTROPHY.growthHigh);
+  addToward(priorityIds, 30);
+  addToward(nonPriorityIds, 30);
+  const added = startingAvailable - available;
+  return {
+    targets,
+    denied: false,
+    adjusted: added > 0.001,
+    reason: added > 0.001
+      ? `Added ${fmt(added, 1)} sets to use the available weekly capacity.`
+      : available > 0.001
+        ? `${fmt(available, 1)} sets remain, but every muscle is already at the 30-set cap.`
+        : "Current targets already use the selected capacity."
+  };
+}
+
 function coachWeeklyAttainment(setup, projected = {}) {
   const results = muscleGroups.map((muscle) => {
     const planned = Number(projected[muscle.id] || 0);
@@ -8116,7 +8161,8 @@ function renderCoachWeekMixer(setup, plan) {
     <div class="coach-week-quick-picks" aria-label="Weekly target quick picks">
       <span>Quick picks</span>
       ${[10, 15, 20].map((target) => `<button class="ghost-mini" type="button" data-action="coach-week-quick-pick" data-target="${target}">All ${target}</button>`).join("")}
-      <button class="ghost-mini" type="button" data-action="coach-week-auto-fit">Fit capacity</button>
+      <button class="ghost-mini" type="button" data-action="coach-week-fix-over">Fix Over Capacity</button>
+      <button class="ghost-mini" type="button" data-action="coach-week-optimize-under">Optimize Under Capacity</button>
     </div>
     <div class="coach-week-mixer-shell">
       <div class="coach-week-mixer-axis" aria-hidden="true">${axisTicks.map((tick) => `<span style="--tick:${tick}">${tick}</span>`).join("")}</div>
@@ -8208,7 +8254,7 @@ function renderCoachWeek() {
         <button class="primary-button" type="submit">Generate weekly plan</button>
       </form>
     </details>
-    ${plan.stale ? `<section class="section coach-week-capacity warn"><strong>Weekly plan needs regeneration</strong><p>Inputs, submitted workouts, loading styles, or the active exercise library changed. Generate again before copying a planned day.</p></section>` : ""}
+    ${plan.stale ? `<section class="section coach-week-capacity warn"><strong>Weekly plan uses earlier information</strong><p>Inputs, submitted workouts, loading styles, or the active exercise library changed. Valid planned days can still be copied; Generate when you want Coach to recalculate the week.</p></section>` : ""}
     <section class="section coach-week-capacity ${plan.capacity.fits ? "good" : "warn"}"><strong>${plan.capacity.fits ? "All weekly targets are planned" : "Some weekly targets cannot be planned"}</strong><p>${escapeHtml(plan.capacity.message)}</p></section>
     <details class="section chart-panel collapsible-panel" open><summary><span>Weekly distribution</span><small>${escapeHtml(coachWeekScheduleSummary(plan.setup))}</small></summary>${renderCoachWeekDistribution(plan)}</details>
     <section class="section coach-week-days">${plan.sessions.map(renderCoachWeekDay).join("")}</section>
@@ -8325,10 +8371,37 @@ function autoFitCoachWeekForm(form, context = coachWeekMixerFormContext(form)) {
     return result;
   }
   if (result.adjusted) updateCoachWeekMixerDom(form, result.targets, context.bankedSets, { nonPriority: [], priority: [] }, "");
-  state.coachWeekFormPreview = coachWeeklyPlanFromForm(form);
+  // Keep the calculated fit authoritative instead of depending on mutated hidden inputs being reread correctly.
+  state.coachWeekFormPreview = normalizeCoachWeeklyPlan({
+    ...context.setup,
+    targets: result.adjusted ? result.targets : context.setup.targets
+  });
   persistCoachWeekFormPreview();
   updateCoachWeekCapacityProgressDom(form, state.coachWeekFormPreview, context.bankedSets, context.remainingCapacity);
   if (cost && result.adjusted) cost.textContent = result.reason;
+  return result;
+}
+
+// Apply available capacity upward without allowing the optimizer to lower any current fader target.
+function optimizeCoachWeekForm(form, context = coachWeekMixerFormContext(form)) {
+  const result = optimizeCoachWeekTargetsToCapacity({
+    setup: context.setup,
+    bankedSets: context.bankedSets,
+    remainingCapacity: context.remainingCapacity
+  });
+  const cost = form.querySelector("[data-coach-week-mixer-cost]");
+  if (result.denied) {
+    if (cost) cost.textContent = result.reason;
+    return result;
+  }
+  if (result.adjusted) updateCoachWeekMixerDom(form, result.targets, context.bankedSets, { nonPriority: [], priority: [] }, "");
+  state.coachWeekFormPreview = normalizeCoachWeeklyPlan({
+    ...context.setup,
+    targets: result.adjusted ? result.targets : context.setup.targets
+  });
+  persistCoachWeekFormPreview();
+  updateCoachWeekCapacityProgressDom(form, state.coachWeekFormPreview, context.bankedSets, context.remainingCapacity);
+  if (cost) cost.textContent = result.reason;
   return result;
 }
 
@@ -8362,11 +8435,23 @@ function coachWeekRemainingFromPointer(fader, clientY) {
   return total - banked;
 }
 
+// Validate only the selected generated day so unrelated weekly changes do not block a safe copy.
+function coachWeekDayCopyIssue(plan, date) {
+  const session = plan.sessions.find((item) => item.date === date && item.status === "planned");
+  if (!session) return "That day has no planned exercises to copy.";
+  const savedSession = plan.setup.generatedPlan?.sessions?.find((item) => item.date === date);
+  if (savedSession && (savedSession.items || []).length !== session.items.length) {
+    return "That planned day includes an archived, hidden, or missing exercise. Generate again before copying it.";
+  }
+  if (!session.items.length) return "That day has no planned exercises to copy.";
+  return "";
+}
+
 function copyCoachWeekDayToLog(date) {
   const plan = displayedCoachWeeklyPlan();
-  if (plan.stale) throw new Error("Generate the weekly plan again before copying this day.");
+  const copyIssue = coachWeekDayCopyIssue(plan, date);
+  if (copyIssue) throw new Error(copyIssue);
   const session = plan.sessions.find((item) => item.date === date && item.status === "planned");
-  if (!session?.items.length) throw new Error("That day has no planned exercises to copy.");
   preserveVisibleDraft("coach-week-copy");
   loadWorkoutDateDraft(date);
   const copiedPlanId = `coach-week-${date}-${uid()}`;
@@ -11042,12 +11127,21 @@ async function handleAction(action, target) {
       const result = autoFitCoachWeekForm(form, fittedContext);
       toast(result.denied ? result.reason : result.adjusted ? `All ${requestedTarget} exceeded current capacity, so Coach protected floors and priorities.` : `All weekly targets set to ${requestedTarget}.`);
     },
-    async "coach-week-auto-fit"() {
+    async "coach-week-fix-over"() {
       const form = target.closest("#coach-week-form");
       if (!form) return;
       const context = markCoachWeekFormDirty(form);
       const result = autoFitCoachWeekForm(form, context);
-      toast(result.denied ? result.reason : result.adjusted ? result.reason : "Current targets already fit the selected capacity.");
+      if (!result.denied) await render();
+      toast(result.denied ? result.reason : result.adjusted ? "Over-capacity targets reduced to the available weekly capacity." : "Current targets are not over capacity.");
+    },
+    async "coach-week-optimize-under"() {
+      const form = target.closest("#coach-week-form");
+      if (!form) return;
+      const context = markCoachWeekFormDirty(form);
+      const result = optimizeCoachWeekForm(form, context);
+      if (!result.denied) await render();
+      toast(result.reason);
     },
     async "coach-view"() {
       state.coachView = target.dataset.view === "week" ? "week" : "today";
@@ -11739,13 +11833,8 @@ document.addEventListener("change", async (event) => {
   try {
     const coachWeekForm = event.target.closest("#coach-week-form");
     if (coachWeekForm) {
-      // Keep weekly edits local to the current form and expose that Generate is still required.
-      const context = markCoachWeekFormDirty(coachWeekForm);
-      if (event.target.matches("input[name='days'], #coach-week-minutes")) {
-        const result = autoFitCoachWeekForm(coachWeekForm, context);
-        if (result.denied) toast(result.reason);
-        else if (result.adjusted) toast(result.reason);
-      }
+      // Day/time edits update capacity only; faders move only through direct or explicit equalizer actions.
+      markCoachWeekFormDirty(coachWeekForm);
       return;
     }
     if (event.target.matches("[data-sound-effects-enabled]")) {
