@@ -3,7 +3,7 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 3;
 const STORES = ["workouts", "metrics", "settings", "syncQueue"];
-const APP_VERSION = "1.5.89";
+const APP_VERSION = "1.5.90";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 const DRAFT_RECOVERY_KEY = "trainwise-draft-recovery-v1";
 const DATED_STRENGTH_DRAFTS_KEY = "trainwise-strength-drafts-by-date-v1";
@@ -4989,7 +4989,7 @@ function fitCoachWeekTargetsToCapacity({ setup: setupInput, bankedSets = {}, rem
 }
 
 // Add only unused capacity, keeping weekly floors and priority growth ahead of optional higher-volume work.
-function optimizeCoachWeekTargetsToCapacity({ setup: setupInput, bankedSets = {}, remainingCapacity = 0 }) {
+function optimizeCoachWeekTargetsToCapacity({ setup: setupInput, bankedSets = {}, projectedSets = null, remainingCapacity = 0 }) {
   const setup = normalizeCoachWeeklyPlan(setupInput);
   const banked = Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, Math.max(0, Number(bankedSets[muscle.id]) || 0)]));
   const targets = Object.fromEntries(muscleGroups.map((muscle) => [
@@ -5005,6 +5005,17 @@ function optimizeCoachWeekTargetsToCapacity({ setup: setupInput, bankedSets = {}
   const startingAvailable = available;
   const priorityIds = muscleGroups.map((muscle) => muscle.id).filter((id) => setup.priorities.includes(id));
   const nonPriorityIds = muscleGroups.map((muscle) => muscle.id).filter((id) => !setup.priorities.includes(id));
+  const unmetProjectedPriorities = projectedSets ? priorityIds.filter((id) => (
+    (Number(projectedSets[id]) || 0) + 0.001 < targets[id]
+  )) : [];
+  if (unmetProjectedPriorities.length) {
+    return {
+      targets,
+      denied: false,
+      adjusted: false,
+      reason: `Reserved available capacity for unmet priorities: ${unmetProjectedPriorities.map(muscleLabel).join(", ")}. Generate to rebuild the sessions.`
+    };
+  }
   const addToward = (ids, ceiling) => {
     while (available > 0.001) {
       const id = ids
@@ -5063,12 +5074,13 @@ function coachWeeklyAttainment(setup, projected = {}) {
 function topUpCoachWeeklySessionSets(sessions, projected, setBudgets, setup) {
   const plannedSessions = sessions.filter((session) => session.status === "planned" && session.items.length);
   const maxSetsPerExercise = sessionPlanCaps(setup.averageMinutes).maxSets;
-  const phaseMuscles = [
-    muscleGroups,
-    muscleGroups.filter((muscle) => setup.priorities.includes(muscle.id)),
-    muscleGroups.filter((muscle) => !setup.priorities.includes(muscle.id))
-  ];
+  const priorityMuscles = muscleGroups.filter((muscle) => setup.priorities.includes(muscle.id));
+  const nonPriorityMuscles = muscleGroups.filter((muscle) => !setup.priorities.includes(muscle.id));
+  const phaseMuscles = [muscleGroups, priorityMuscles, nonPriorityMuscles];
   phaseMuscles.forEach((muscles, phaseIndex) => {
+    if (phaseIndex === 2 && priorityMuscles.some((muscle) => (
+      (Number(projected[muscle.id]) || 0) + 0.001 < (Number(setBudgets[muscle.id]) || 0)
+    ))) return;
     let changed = true;
     while (changed) {
       changed = false;
@@ -5105,6 +5117,123 @@ function topUpCoachWeeklySessionSets(sessions, projected, setBudgets, setup) {
   });
 }
 
+// Trade removable non-priority work for existing priority work when session limits leave a selected target short.
+function reallocateCoachWeeklyPriorityShortfalls(sessions, projected, setBudgets, setup, recoveryClearForDate = () => true) {
+  const plannedSessions = sessions.filter((session) => session.status === "planned" && session.items.length);
+  const maxSetsPerExercise = sessionPlanCaps(setup.averageMinutes).maxSets;
+  const maximumMinutes = setup.averageMinutes + COACH_TIME_TOLERANCE_MINUTES;
+  let changed = true;
+  while (changed) {
+    changed = false;
+    const shortfalls = muscleGroups
+      .filter((muscle) => setup.priorities.includes(muscle.id))
+      .map((muscle) => ({
+        muscle,
+        gap: Math.max(0, (Number(setBudgets[muscle.id]) || 0) - (Number(projected[muscle.id]) || 0))
+      }))
+      .filter((entry) => entry.gap > 0.001)
+      .sort((a, b) => a.gap - b.gap || muscleGroups.indexOf(a.muscle) - muscleGroups.indexOf(b.muscle));
+
+    for (const { muscle } of shortfalls) {
+      const receiverOptions = plannedSessions.flatMap((session) => session.items
+        .filter((item) => item.muscle.id === muscle.id && item.sets < maxSetsPerExercise)
+        .map((item) => ({ session, item })));
+      for (const receiver of receiverOptions) {
+        const directItems = receiver.session.items.map((item) => item === receiver.item ? { ...item, sets: item.sets + 1 } : item);
+        const directMinutes = plannedCoachSessionMinutes(directItems);
+        if (directMinutes <= maximumMinutes) {
+          receiver.item.sets += 1;
+          receiver.item.minutes = plannedExerciseMinutes(receiver.item);
+          receiver.session.totalMinutes = directMinutes;
+          applyCoachStimulusCredits(projected, receiver.item.exercise, 1);
+          changed = true;
+          break;
+        }
+        const donors = receiver.session.items
+          .filter((item) => !setup.priorities.includes(item.muscle.id) && item !== receiver.item)
+          .sort((a, b) => b.sets - a.sets);
+        for (const donor of donors) {
+          const removeSets = donor.sets > COACH_MIN_SETS_PER_EXERCISE ? 1 : COACH_MIN_SETS_PER_EXERCISE;
+          const nextDonorSets = donor.sets - removeSets;
+          const trialProjected = { ...projected };
+          applyCoachStimulusCredits(trialProjected, donor.exercise, -removeSets);
+          applyCoachStimulusCredits(trialProjected, receiver.item.exercise, 1);
+          const preservesProtectedWork = muscleGroups.every((candidate) => {
+            const next = Number(trialProjected[candidate.id]) || 0;
+            if (next + 0.001 < HYPERTROPHY.minimumSets) return false;
+            if (!setup.priorities.includes(candidate.id) || candidate.id === muscle.id) return true;
+            const before = Number(projected[candidate.id]) || 0;
+            const protectedTarget = Number(setBudgets[candidate.id]) || HYPERTROPHY.minimumSets;
+            return next + 0.001 >= Math.min(before, protectedTarget);
+          });
+          if (!preservesProtectedWork) continue;
+          const trialItems = receiver.session.items
+            .filter((item) => item !== donor || nextDonorSets > 0)
+            .map((item) => item === donor ? { ...item, sets: nextDonorSets } : item === receiver.item ? { ...item, sets: item.sets + 1 } : item);
+          const trialMinutes = plannedCoachSessionMinutes(trialItems);
+          if (trialMinutes > maximumMinutes) continue;
+          donor.sets = nextDonorSets;
+          receiver.item.sets += 1;
+          if (!donor.sets) receiver.session.items.splice(receiver.session.items.indexOf(donor), 1);
+          else donor.minutes = plannedExerciseMinutes(donor);
+          receiver.item.minutes = plannedExerciseMinutes(receiver.item);
+          receiver.session.totalMinutes = trialMinutes;
+          Object.assign(projected, trialProjected);
+          changed = true;
+          break;
+        }
+        if (changed) break;
+      }
+      if (!changed && !receiverOptions.length) {
+        for (const session of plannedSessions.filter((candidate) => recoveryClearForDate(muscle.id, candidate.date))) {
+          const usedExercises = session.usedExercises || new Set(session.items.map((item) => item.exercise.id));
+          const chosen = coachExerciseCandidates(muscle.id, usedExercises).find((candidate) => candidate.eligible && isActiveCoachExercise(candidate.exercise));
+          if (!chosen) continue;
+          const addSets = Math.max(COACH_MIN_SETS_PER_EXERCISE, Math.min(4, Math.ceil((Number(setBudgets[muscle.id]) || 0) - (Number(projected[muscle.id]) || 0))));
+          for (const donor of session.items.filter((item) => !setup.priorities.includes(item.muscle.id)).sort((a, b) => b.sets - a.sets)) {
+            const trialProjected = { ...projected };
+            applyCoachStimulusCredits(trialProjected, donor.exercise, -donor.sets);
+            applyCoachStimulusCredits(trialProjected, chosen.exercise, addSets);
+            const preservesProtectedWork = muscleGroups.every((candidate) => {
+              const next = Number(trialProjected[candidate.id]) || 0;
+              if (next + 0.001 < HYPERTROPHY.minimumSets) return false;
+              if (!setup.priorities.includes(candidate.id) || candidate.id === muscle.id) return true;
+              const before = Number(projected[candidate.id]) || 0;
+              const protectedTarget = Number(setBudgets[candidate.id]) || HYPERTROPHY.minimumSets;
+              return next + 0.001 >= Math.min(before, protectedTarget);
+            });
+            if (!preservesProtectedWork) continue;
+            const performanceSignal = coachExercisePerformanceSignal(chosen.exercise);
+            const replacement = {
+              muscle,
+              exercise: chosen.exercise,
+              sets: addSets,
+              minutes: estimateExerciseMinutes(chosen.exercise, addSets),
+              phase: "priority",
+              growthMode: (Number(setup.targets[muscle.id]) || 0) > HYPERTROPHY.growthHigh ? "aggressive" : "medium",
+              performanceSignal,
+              planTarget: coachPlanTargetForExercise(chosen.exercise, performanceSignal),
+              reason: `${muscle.label} replaces optional work to finish its selected weekly target.`
+            };
+            const trialItems = session.items.map((item) => item === donor ? replacement : item);
+            const trialMinutes = plannedCoachSessionMinutes(trialItems);
+            if (trialMinutes > maximumMinutes) continue;
+            session.items.splice(session.items.indexOf(donor), 1, replacement);
+            session.usedExercises?.delete(donor.exercise.id);
+            session.usedExercises?.add(chosen.exercise.id);
+            session.totalMinutes = trialMinutes;
+            Object.assign(projected, trialProjected);
+            changed = true;
+            break;
+          }
+          if (changed) break;
+        }
+      }
+      if (changed) break;
+    }
+  }
+}
+
 // Fill logical unused session time with safe growth-zone work already present in the session.
 function fillCoachWeeklySessionTime(sessions, projected, setup) {
   const minimumMinutes = Math.max(0, setup.averageMinutes - 5);
@@ -5112,10 +5241,14 @@ function fillCoachWeeklySessionTime(sessions, projected, setup) {
   const maxSetsPerExercise = sessionPlanCaps(setup.averageMinutes).maxSets;
   sessions.filter((session) => session.status === "planned" && session.items.length).forEach((session) => {
     while (session.totalMinutes < minimumMinutes) {
+      const unmetPriorityIds = new Set(setup.priorities.filter((muscleId) => (
+        (Number(projected[muscleId]) || 0) + 0.001 < (Number(setup.targets[muscleId]) || HYPERTROPHY.minimumSets)
+      )));
       const candidates = session.items
         .filter((item) => (
           item.sets < maxSetsPerExercise
           && !["reset", "deload"].includes(item.planTarget?.kind)
+          && (!unmetPriorityIds.size || item.exercise.primaryMuscles.some((muscleId) => unmetPriorityIds.has(muscleId)))
           && item.exercise.primaryMuscles.some((muscleId) => (Number(projected[muscleId]) || 0) < HYPERTROPHY.growthHigh)
         ))
         .map((item) => ({
@@ -5242,6 +5375,14 @@ function buildCoachWeeklyPlan(setupInput = selectedCoachWeeklyPlan()) {
   };
 
   ["floor", "priority", "optional"].forEach((phase) => {
+    if (phase === "floor") {
+      plannedSessions.forEach((session) => {
+        while (addWeeklyPhaseItem(session, phase)) {
+          // Filling the earliest viable day first preserves later two-day recovery slots for priority follow-up work.
+        }
+      });
+      return;
+    }
     let changed = true;
     while (changed) {
       changed = false;
@@ -5251,6 +5392,7 @@ function buildCoachWeeklyPlan(setupInput = selectedCoachWeeklyPlan()) {
     }
   });
   topUpCoachWeeklySessionSets(sessions, projected, setBudgets, setup);
+  reallocateCoachWeeklyPriorityShortfalls(sessions, projected, setBudgets, setup, recoveryClearForDate);
   plannedSessions.forEach((session) => {
     session.items = orderCoachSessionItems(session.items);
     delete session.usedExercises;
@@ -8384,9 +8526,11 @@ function autoFitCoachWeekForm(form, context = coachWeekMixerFormContext(form)) {
 
 // Apply available capacity upward without allowing the optimizer to lower any current fader target.
 function optimizeCoachWeekForm(form, context = coachWeekMixerFormContext(form)) {
+  const projectedSets = buildCoachWeeklyPlan(context.setup).projected;
   const result = optimizeCoachWeekTargetsToCapacity({
     setup: context.setup,
     bankedSets: context.bankedSets,
+    projectedSets,
     remainingCapacity: context.remainingCapacity
   });
   const cost = form.querySelector("[data-coach-week-mixer-cost]");

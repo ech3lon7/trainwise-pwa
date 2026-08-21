@@ -2427,7 +2427,28 @@ const weeklyEqualizer = runScenario(`
     bankedSets: Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, 0])),
     remainingCapacity: 100
   });
-  ({ floorClamp, nonPriorityPhase, priorityPhase, deadlock, autoFit, reportFit, underCapacity, optimizeWhileOver });
+  var reportPriorityTargets = { chest: 20, back: 15, shoulders: 20, biceps: 20, triceps: 20, quads: 11.4, hamstrings: 12.3, glutes: 11.7, calves: 11.7, abs: 20 };
+  var projectionGuard = optimizeCoachWeekTargetsToCapacity({
+    setup: normalizeCoachWeeklyPlan({ priorities: ["chest", "back", "shoulders", "biceps", "triceps", "abs"], targets: reportPriorityTargets }),
+    bankedSets: { chest: 9, back: 10, shoulders: 10, biceps: 4, triceps: 8, quads: 4, hamstrings: 6, glutes: 6, calves: 6, abs: 6 },
+    projectedSets: { chest: 20, back: 15, shoulders: 19.5, biceps: 20, triceps: 18.5, quads: 14, hamstrings: 13, glutes: 12.5, calves: 11.5, abs: 18.5 },
+    remainingCapacity: 95
+  });
+  var absExercise = { id: "abs-priority", name: "Abs Priority", primaryMuscles: ["abs"], secondaryMuscles: [], rest: "60 sec", loadingStyle: "standard", exerciseType: "isolation" };
+  var quadExercise = { id: "quad-donor", name: "Quad Donor", primaryMuscles: ["quads"], secondaryMuscles: [], rest: "60 sec", loadingStyle: "standard", exerciseType: "isolation" };
+  var reallocationSetup = normalizeCoachWeeklyPlan({ averageMinutes: 60, priorities: ["abs"], targets: { ...allTen, abs: 20, quads: 14 } });
+  var reallocationProjected = { ...allTen, abs: 18, quads: 14 };
+  var reallocationSessions = [{ status: "planned", totalMinutes: 30, items: [
+    { muscle: muscleGroups.find((muscle) => muscle.id === "abs"), exercise: absExercise, sets: 6 },
+    { muscle: muscleGroups.find((muscle) => muscle.id === "quads"), exercise: quadExercise, sets: 4 }
+  ] }];
+  reallocateCoachWeeklyPriorityShortfalls(reallocationSessions, reallocationProjected, reallocationSetup.targets, reallocationSetup);
+  var replacementProjected = { ...allTen, abs: 18, quads: 14 };
+  var replacementSessions = [{ status: "planned", date: todayISO(), totalMinutes: 15, usedExercises: new Set(["quad-donor"]), items: [
+    { muscle: muscleGroups.find((muscle) => muscle.id === "quads"), exercise: quadExercise, sets: 4 }
+  ] }];
+  reallocateCoachWeeklyPriorityShortfalls(replacementSessions, replacementProjected, reallocationSetup.targets, reallocationSetup);
+  ({ floorClamp, nonPriorityPhase, priorityPhase, deadlock, autoFit, reportFit, underCapacity, optimizeWhileOver, projectionGuard, reallocationProjected, reallocationSessions, replacementProjected, replacementSessions });
 `);
 
 assert.strictEqual(weeklyEqualizer.floorClamp.denied, false, "Expected a below-floor drag to clamp rather than fail.");
@@ -2453,6 +2474,14 @@ assert.strictEqual(Object.values(weeklyEqualizer.underCapacity.targets).reduce((
 assert.strictEqual(weeklyEqualizer.underCapacity.targets.chest, 20, "Expected prioritized Chest to fill toward 20 before non-priority growth work.");
 assert.strictEqual(weeklyEqualizer.underCapacity.targets.biceps, 20, "Expected prioritized Biceps to fill toward 20 before non-priority growth work.");
 assert.strictEqual(weeklyEqualizer.optimizeWhileOver.denied, true, "Expected the under-capacity optimizer never to conceal or lower an over-capacity request.");
+assert.strictEqual(weeklyEqualizer.projectionGuard.targets.back, 15, "Expected Optimize Under Capacity to preserve Back's explicit 15-set target while another priority is underplanned.");
+assert.strictEqual(weeklyEqualizer.projectionGuard.targets.abs, 20, "Expected an underplanned Abs projection to retain its explicit 20-set target for session reallocation.");
+assert(weeklyEqualizer.projectionGuard.reason.includes("Abs"), "Expected the optimizer to identify projected priority shortfalls instead of inflating a satisfied target.");
+assert.strictEqual(weeklyEqualizer.reallocationProjected.abs, 20, "Expected removable non-priority work to be reassigned until the Abs priority reaches its target.");
+assert(weeklyEqualizer.reallocationProjected.quads >= 10, "Expected priority reallocation to preserve the non-priority weekly floor.");
+assert.strictEqual(weeklyEqualizer.reallocationSessions[0].items.find((item) => item.muscle.id === "abs").sets, 8, "Expected the existing priority exercise to receive the reclaimed sets.");
+assert.strictEqual(weeklyEqualizer.replacementProjected.abs, 20, "Expected a missing priority item to replace optional non-priority work when a session is full.");
+assert.strictEqual(weeklyEqualizer.replacementSessions[0].items[0].muscle.id, "abs", "Expected the replacement session slot to belong to the unmet priority.");
 assert(!appCode.includes("state.coachWeekFormPreview = coachWeeklyPlanFromForm(form);\n  persistCoachWeekFormPreview();\n  updateCoachWeekCapacityProgressDom(form, state.coachWeekFormPreview"), "Expected capacity actions to store calculated targets directly instead of rereading potentially stale hidden inputs.");
 assert(/async "coach-week-fix-over"\(\)[\s\S]*?await render\(\);[\s\S]*?toast\(/.test(appCode), "Expected Fix Over Capacity to rerender from its authoritative fitted preview before reporting success.");
 assert(/async "coach-week-optimize-under"\(\)[\s\S]*?await render\(\);[\s\S]*?toast\(/.test(appCode), "Expected Optimize Under Capacity to rerender from its authoritative optimized preview before reporting success.");
