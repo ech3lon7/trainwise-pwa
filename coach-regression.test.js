@@ -2685,6 +2685,65 @@ assert(weeklyLogicalTimeFill.minutes >= 50 && weeklyLogicalTimeFill.minutes <= 6
 assert(weeklyLogicalTimeFill.itemCount <= 6, `Expected time fill to preserve the six-exercise cap, got ${weeklyLogicalTimeFill.itemCount}.`);
 assert(weeklyLogicalTimeFill.sets.some((sets) => sets > 4), `Expected remaining time to add safe sets to an existing exercise, got ${weeklyLogicalTimeFill.sets.join(", ")}.`);
 
+// Current-week and Coach calculations must never include submitted entries dated after today.
+const futureDatedEntriesExcluded = runScenario(`
+  ${resetAndHelpers}
+  state.workouts = [
+    makeWorkout(muscleGroups.find((muscle) => muscle.id === "chest"), 0, 3, { id: "today-chest" }),
+    { ...makeWorkout(muscleGroups.find((muscle) => muscle.id === "biceps"), 0, 9, { id: "future-biceps" }), date: "2026-06-24" }
+  ];
+  ({
+    weeklyIds: weeklyWorkouts().map((entry) => entry.id),
+    coachIds: coachWorkoutEntries().map((entry) => entry.id)
+  });
+`);
+
+assert.deepEqual(futureDatedEntriesExcluded.weeklyIds, ["today-chest"], "Expected the current training week to stop at today.");
+assert.deepEqual(futureDatedEntriesExcluded.coachIds, ["today-chest"], "Expected future workouts to stay out of Coach history and recency.");
+
+// Exercise selection should prefer useful secondary credit when it closes a selected priority gap.
+const targetAwareSecondarySelection = runScenario(`
+  ${resetAndHelpers}
+  state.settings.customExercises = [
+    { id: "row-only", name: "Row Only", primaryMuscles: ["back"], secondaryMuscles: [], exerciseType: "compound", loadingStyle: "standard", reps: "8-15", rest: "90 sec", userCreated: true },
+    { id: "pulldown-biceps", name: "Pulldown Biceps", primaryMuscles: ["back"], secondaryMuscles: ["biceps"], exerciseType: "compound", loadingStyle: "standard", reps: "8-15", rest: "90 sec", userCreated: true }
+  ];
+  state.workouts = [
+    { ...makeWorkout({ id: "back" }, 8, 3, { id: "row-history", exercise: "Row Only", exerciseId: "row-only", primaryMuscles: ["back"], secondaryMuscles: [] }) },
+    { ...makeWorkout({ id: "biceps" }, 3, 10, { id: "biceps-history", exercise: "Old Curl", exerciseId: "old-curl", primaryMuscles: ["biceps"], secondaryMuscles: [] }) }
+  ];
+  var needs = {
+    back: { floorGap: 0, priorityGap: 8 },
+    biceps: { floorGap: 0, priorityGap: 6 }
+  };
+  coachExerciseCandidates("back", new Set(), { stimulusNeeds: needs })[0].exercise.id;
+`);
+
+assert.strictEqual(targetAwareSecondarySelection, "pulldown-biceps", "Expected Coach to value secondary stimulus that closes an unmet priority target.");
+
+const weeklyPlanUsesTargetAwareSecondary = runScenario(`
+  ${resetAndHelpers}
+  state.settings.customExercises = [
+    ...state.settings.customExercises.filter((exercise) => exercise.id !== "custom-back" && exercise.id !== "custom-biceps"),
+    { id: "row-only", name: "Row Only", primaryMuscles: ["back"], secondaryMuscles: [], exerciseType: "compound", loadingStyle: "standard", reps: "8-15", rest: "90 sec", userCreated: true },
+    { id: "pulldown-biceps", name: "Pulldown Biceps", primaryMuscles: ["back"], secondaryMuscles: ["biceps"], exerciseType: "compound", loadingStyle: "standard", reps: "8-15", rest: "90 sec", userCreated: true },
+    { id: "curl", name: "Curl", primaryMuscles: ["biceps"], secondaryMuscles: [], exerciseType: "isolation", loadingStyle: "standard", reps: "8-15", rest: "90 sec", userCreated: true }
+  ];
+  state.workouts = muscleGroups.flatMap((muscle) => {
+    if (muscle.id === "back") return [makeWorkout(muscle, 3, 10, { id: "back-base", exercise: "Old Back", exerciseId: "old-back" })];
+    if (muscle.id === "biceps") return [makeWorkout(muscle, 1, 12, { id: "biceps-base", exercise: "Curl", exerciseId: "curl" })];
+    return [makeWorkout(muscle, 3, 10, { id: muscle.id + "-base" })];
+  });
+  state.workouts.push(makeWorkout({ id: "back" }, 8, 3, { id: "row-history", exercise: "Row Only", exerciseId: "row-only", primaryMuscles: ["back"], secondaryMuscles: [] }));
+  var targets = Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, ["back", "biceps"].includes(muscle.id) ? 20 : 10]));
+  var plan = buildCoachWeeklyPlan(normalizeCoachWeeklyPlan({ days: [3], averageMinutes: 60, priorities: ["back", "biceps"], targets }));
+  var session = plan.sessions.find((item) => item.status === "planned");
+  ({ exercises: session.items.map((item) => item.exercise.id), projectedBiceps: plan.projected.biceps });
+`);
+
+assert(weeklyPlanUsesTargetAwareSecondary.exercises.includes("pulldown-biceps"), `Expected the weekly plan to choose Back work that also closes Biceps priority volume, got ${weeklyPlanUsesTargetAwareSecondary.exercises.join(", ")}.`);
+assert(weeklyPlanUsesTargetAwareSecondary.projectedBiceps > 12, "Expected the selected compound to add secondary Biceps credit to the weekly projection.");
+
 assert(!appCode.includes("if (coachWeekForm.isConnected) render();"), "Expected pending weekly form changes not to rerender and replace the committed plan before Generate.");
 
 console.log("coach regression tests passed");

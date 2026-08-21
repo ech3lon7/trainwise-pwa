@@ -1,15 +1,15 @@
 "use strict";
 
-const CACHE_NAME = "trainwise-cache-v112";
+const CACHE_NAME = "trainwise-cache-v113";
 const ASSETS = [
   "./",
   "./index.html",
-  "./styles.css?v=1.5.89",
-  "./app.js?v=1.5.89",
-  "./manifest.webmanifest?v=1.5.89",
-  "./icon.svg?v=1.5.89",
-  "./icon-512.png?v=1.5.89",
-  "./apple-touch-icon.png?v=1.5.89",
+  "./styles.css?v=1.5.91",
+  "./app.js?v=1.5.91",
+  "./manifest.webmanifest?v=1.5.91",
+  "./icon.svg?v=1.5.91",
+  "./icon-512.png?v=1.5.91",
+  "./apple-touch-icon.png?v=1.5.91",
   "./assets/muscles/abs.png?v=1.5.43",
   "./assets/muscles/back.png?v=1.5.43",
   "./assets/muscles/bicep.png?v=1.5.43",
@@ -103,7 +103,12 @@ async function networkFirst(request) {
     return response;
   } catch {
     const cached = await caches.match(request, { ignoreSearch: true });
-    return cached || caches.match("./index.html") || new Response("TrainWise is offline and no cached shell is available.", {
+    if (cached) return cached;
+    if (request.mode === "navigate") {
+      const shell = await caches.match("./index.html");
+      if (shell) return shell;
+    }
+    return new Response("TrainWise is offline and this resource is not cached.", {
       status: 503,
       headers: { "Content-Type": "text/plain" }
     });

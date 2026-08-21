@@ -3,7 +3,7 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 3;
 const STORES = ["workouts", "metrics", "settings", "syncQueue"];
-const APP_VERSION = "1.5.90";
+const APP_VERSION = "1.5.91";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 const DRAFT_RECOVERY_KEY = "trainwise-draft-recovery-v1";
 const DATED_STRENGTH_DRAFTS_KEY = "trainwise-strength-drafts-by-date-v1";
@@ -12,6 +12,7 @@ const COPIED_COACH_PLAN_KEY = "trainwise-copied-coach-plan-v1";
 const COACH_WEEK_PREVIEW_STORAGE_KEY = "trainwise-coach-week-preview-v1";
 const SYNC_BOOTSTRAP_VERSION = 1;
 const SYNC_POLL_MS = 60000;
+const SYNC_PAGE_SIZE = 500;
 const SYNC_SAFE_PREFERENCES = ["hypertrophyProfile", "nutritionGoal", "maintenanceProfile", "dashboardWidgets", "dashboardWidgetOrder", "coachWeeklyPlan"];
 const COLLAPSE_ANIMATION_MS = 360;
 const COLLAPSE_REVEAL_MS = 1600;
@@ -28,6 +29,7 @@ let tabbarScrollTimer = null;
 let coachWeekFaderDrag = null;
 let recordSyncTimer = null;
 let recordSyncPromise = null;
+let recordSyncRerunRequested = false;
 let recordSyncLifecycleStarted = false;
 let workoutTimerTick = null;
 let uiAudioContext = null;
@@ -823,19 +825,23 @@ function isDBConnectionError(error) {
   return message.includes("transaction") || message.includes("database connection") || message.includes("closed");
 }
 
-async function runStoreRequest(name, mode, createRequest, retried = false) {
+async function runStoreTransaction(storeNames, mode, operation, retried = false) {
   const db = await ensureDB();
   try {
     return await new Promise((resolve, reject) => {
-      let request;
+      let tx;
+      let result;
       try {
-        request = createRequest(db.transaction(name, mode).objectStore(name));
+        tx = db.transaction(storeNames, mode);
+        const stores = Object.fromEntries(storeNames.map((name) => [name, tx.objectStore(name)]));
+        result = operation(stores, tx);
       } catch (error) {
         reject(error);
         return;
       }
-      request.onsuccess = () => resolve(request.result);
-      request.onerror = () => reject(request.error);
+      tx.oncomplete = () => resolve(result);
+      tx.onabort = () => reject(tx.error || new Error("Local database transaction was aborted."));
+      tx.onerror = () => reject(tx.error || new Error("Local database transaction failed."));
     });
   } catch (error) {
     if (!retried && isDBConnectionError(error)) {
@@ -843,10 +849,19 @@ async function runStoreRequest(name, mode, createRequest, retried = false) {
       try {
         db.close();
       } catch {}
-      return runStoreRequest(name, mode, createRequest, true);
+      return runStoreTransaction(storeNames, mode, operation, true);
     }
     throw error;
   }
+}
+
+async function runStoreRequest(name, mode, createRequest) {
+  let result;
+  await runStoreTransaction([name], mode, (stores) => {
+    const request = createRequest(stores[name]);
+    request.onsuccess = () => { result = request.result; };
+  });
+  return result;
 }
 
 async function dbAll(name) {
@@ -860,13 +875,8 @@ async function dbPut(name, value) {
 
 async function dbPutBatch(name, values) {
   if (!values.length) return;
-  const db = await ensureDB();
-  const tx = db.transaction(name, "readwrite");
-  const store = tx.objectStore(name);
-  for (const value of values) store.put(value);
-  await new Promise((resolve, reject) => {
-    tx.oncomplete = resolve;
-    tx.onerror = () => reject(tx.error);
+  await runStoreTransaction([name], "readwrite", (stores) => {
+    for (const value of values) stores[name].put(value);
   });
 }
 
@@ -979,6 +989,17 @@ function recentDays(days) {
   start.setDate(start.getDate() - days + 1);
   start.setHours(0, 0, 0, 0);
   return start;
+}
+
+// Keep current-period analysis bounded to the user's local calendar date.
+function dateIsOnOrBefore(value, endDate = todayISO()) {
+  const date = parseLocalDate(value);
+  const end = parseLocalDate(endDate);
+  return Number.isFinite(date.getTime()) && Number.isFinite(end.getTime()) && date <= end;
+}
+
+function entriesThroughToday(entries = []) {
+  return entries.filter((entry) => dateIsOnOrBefore(entry?.date));
 }
 
 function currentTrainingWeekStart(date = new Date()) {
@@ -1209,9 +1230,15 @@ function exerciseIdentity(exerciseOrName, fallbackMuscle = "chest") {
 function sameExerciseIdentity(entry, exerciseOrName) {
   const identity = exerciseIdentity(exerciseOrName);
   const entryId = String(entry?.exerciseId || "").trim();
-  if (identity.id && entryId && identity.id === entryId) return true;
+  if (identity.id && entryId) return identity.id === entryId;
   const targetName = normalizeName(identity.name || exerciseOrName);
-  return !!targetName && normalizeName(entry?.exercise) === targetName;
+  if (!targetName || normalizeName(entry?.exercise) !== targetName) return false;
+  const definitions = (Array.isArray(state.settings.customExercises) ? state.settings.customExercises : [])
+    .map(normalizeExerciseDefinition)
+    .filter(Boolean)
+    .filter((definition) => normalizeName(definition.name) === targetName);
+  if (definitions.length > 1) return false;
+  return !definitions.length || !identity.id || definitions[0].id === identity.id;
 }
 
 function exerciseHistoryForIdentity(exerciseOrName, workouts = state.workouts, newestFirst = true) {
@@ -1281,8 +1308,9 @@ function workoutMeta(entry) {
       primaryMuscles: entry.primaryMuscles,
       secondaryMuscles: Array.isArray(entry.secondaryMuscles) ? entry.secondaryMuscles : [],
       equipment: entry.equipment || "custom",
-      reps: entry.repRange || entry.reps || "8-15",
-      rest: entry.restRange || entry.rest || "60-120 sec",
+      reps: entry.repRange || (typeof entry.reps === "string" ? entry.reps : "8-15"),
+      rest: entry.restRange || (typeof entry.rest === "string" ? entry.rest : "60-120 sec"),
+      exerciseType: normalizeExerciseType(entry.exerciseType),
       loadingStyle: normalizeLoadingStyle(entry.loadingStyle),
       loadIncrement: normalizeLoadIncrement(entry.loadIncrement),
       progressionMode: normalizeProgressionMode(entry.progressionMode)
@@ -1319,6 +1347,24 @@ function normalizeSetRows(rows) {
     }))
     .filter((row) => row.reps > 0);
   return cleaned.length ? cleaned : [{ weight: 0, reps: 10, rir: 2, restSeconds: null }];
+}
+
+// Distinguish untouched placeholders from an intentional zero-load bodyweight set.
+function rawSetRowIsUntouched(row = {}) {
+  return String(row?.weight ?? "").trim() === ""
+    && Number(row?.reps) === 10
+    && Number(row?.rir) === 2
+    && String(row?.rest ?? row?.restSeconds ?? "").trim() === "";
+}
+
+function rawSetRowsAreUntouched(rows = []) {
+  return rows.length > 0 && rows.every((row) => (
+    rawSetRowIsUntouched(row)
+  ));
+}
+
+function rawSetRowsContainUntouched(rows = []) {
+  return rows.some((row) => rawSetRowIsUntouched(row));
 }
 
 function copiedRowSnapshot(row = {}) {
@@ -1900,7 +1946,7 @@ function progressionTargetForExercise(exerciseName) {
 
 function weeklyWorkouts(workouts = state.workouts) {
   const start = currentTrainingWeekStart();
-  return workouts.filter((entry) => parseLocalDate(entry.date) >= start);
+  return workouts.filter((entry) => parseLocalDate(entry.date) >= start && dateIsOnOrBefore(entry.date));
 }
 
 function getWeeklyVolume() {
@@ -2125,20 +2171,20 @@ function metricEntryForForm(date = state.metricDate || todayISO()) {
 function getAverage(field, days) {
   const start = recentDays(days);
   const values = canonicalMetricEntries()
-    .filter((entry) => parseLocalDate(entry.date) >= start && entry[field] > 0)
+    .filter((entry) => parseLocalDate(entry.date) >= start && dateIsOnOrBefore(entry.date) && entry[field] > 0)
     .map((entry) => entry[field]);
   if (!values.length) return 0;
   return values.reduce((sum, value) => sum + value, 0) / values.length;
 }
 
 function lastMetric(field) {
-  return canonicalMetricEntries().find((entry) => Number.isFinite(entry[field]) && entry[field] > 0);
+  return canonicalMetricEntries().find((entry) => dateIsOnOrBefore(entry.date) && Number.isFinite(entry[field]) && entry[field] > 0);
 }
 
 function weightTrend(days = 14) {
   const start = recentDays(days);
   const entries = canonicalMetricEntries()
-    .filter((entry) => parseLocalDate(entry.date) >= start && entry.bodyWeight > 0)
+    .filter((entry) => parseLocalDate(entry.date) >= start && dateIsOnOrBefore(entry.date) && entry.bodyWeight > 0)
     .sort((a, b) => a.date.localeCompare(b.date));
   if (entries.length < 2) return null;
   return entries[entries.length - 1].bodyWeight - entries[0].bodyWeight;
@@ -2200,8 +2246,11 @@ function maintenanceProfileHeightCm(profile = selectedMaintenanceProfile()) {
 }
 
 function maintenanceWeightPoint() {
-  const bodyWeightSeries = seriesFromMetrics("bodyWeight");
-  const average = latestRollingAverage(bodyWeightSeries, 7);
+  const start = recentDays(7);
+  const recentWeights = canonicalMetricEntries()
+    .filter((entry) => parseLocalDate(entry.date) >= start && dateIsOnOrBefore(entry.date) && entry.bodyWeight > 0)
+    .map((entry) => entry.bodyWeight);
+  const average = recentWeights.length ? recentWeights.reduce((sum, value) => sum + value, 0) / recentWeights.length : 0;
   const latest = lastMetric("bodyWeight")?.bodyWeight || 0;
   const value = average || latest;
   return {
@@ -2276,7 +2325,7 @@ function maintenanceSeriesFor(points = [], estimate = maintenanceEstimate()) {
 function metricEntriesForField(field, days) {
   const start = recentDays(days);
   return canonicalMetricEntries()
-    .filter((entry) => parseLocalDate(entry.date) >= start && Number.isFinite(entry[field]) && entry[field] > 0)
+    .filter((entry) => parseLocalDate(entry.date) >= start && dateIsOnOrBefore(entry.date) && Number.isFinite(entry[field]) && entry[field] > 0)
     .sort((a, b) => a.date.localeCompare(b.date));
 }
 
@@ -2761,7 +2810,7 @@ function coachPendingWorkoutEntries() {
 }
 
 function coachWorkoutEntries() {
-  return state.workouts;
+  return entriesThroughToday(state.workouts);
 }
 
 function coachWeeklyWorkouts(workouts = coachWorkoutEntries()) {
@@ -3202,6 +3251,16 @@ function scoreExerciseForMuscle(exercise, muscleId, options = {}) {
   const effortScore = last ? Math.max(0, 4 - (averageRir(last) ?? 2)) : 0;
   const signal = coachExercisePerformanceSignal(exercise, workouts);
   const performancePenalty = signal.status === "repeated-failure" ? 12 : signal.status === "isolated-failure" ? 5 : 0;
+  const stimulusNeeds = options.stimulusNeeds || {};
+  const stimulusPriorityScore = [...(exercise.primaryMuscles || []), ...(exercise.secondaryMuscles || [])]
+    .reduce((score, stimulatedMuscleId) => {
+      if (stimulatedMuscleId === muscleId) return score;
+      const credit = (exercise.primaryMuscles || []).includes(stimulatedMuscleId) ? 1 : 0.5;
+      const need = stimulusNeeds[stimulatedMuscleId] || {};
+      if (Number(need.floorGap) > 0) return score + credit * 12;
+      if (Number(need.priorityGap) > 0) return score + credit * 8;
+      return score;
+    }, 0);
   let progressionScore = 0;
   if (history.length >= 2) {
     const recent3 = history.slice(0, 3);
@@ -3211,7 +3270,7 @@ function scoreExerciseForMuscle(exercise, muscleId, options = {}) {
     if (recentE1rm > priorE1rm) progressionScore = 3;
     else if (recentE1rm === priorE1rm && prior3.length) progressionScore = 1;
   }
-  return familiarityScore + customScore + selectedScore + specificityScore + targetScore + effortScore + progressionScore - recencyPenalty - weeklyUsePenalty - performancePenalty;
+  return familiarityScore + customScore + selectedScore + specificityScore + targetScore + effortScore + progressionScore + stimulusPriorityScore - recencyPenalty - weeklyUsePenalty - performancePenalty;
 }
 
 function coachExerciseCandidates(muscleId, usedExerciseIds = new Set(), options = {}) {
@@ -3228,7 +3287,7 @@ function coachExerciseCandidates(muscleId, usedExerciseIds = new Set(), options 
       const signal = coachExercisePerformanceSignal(exercise, workouts);
       const weeklyFairnessBonus = Math.max(0, maxWeeklyUses - memory.weeklyUses) * 6;
       const lifetimeFairnessBonus = Math.min(6, Math.max(0, maxLifetimeUses - memory.history.length));
-      const baseScore = scoreExerciseForMuscle(exercise, muscleId, { workouts });
+      const baseScore = scoreExerciseForMuscle(exercise, muscleId, { workouts, stimulusNeeds: options.stimulusNeeds });
       return {
         exercise,
         memory,
@@ -5335,7 +5394,15 @@ function buildCoachWeeklyPlan(setupInput = selectedCoachWeeklyPlan()) {
       ));
     const muscle = candidates.find((candidate) => session.items.at(-1)?.muscle.id !== candidate.id) || candidates[0];
     if (!muscle) return false;
-    const exerciseCandidates = coachExerciseCandidates(muscle.id, session.usedExercises)
+    const stimulusNeeds = Object.fromEntries(muscleGroups.map((candidateMuscle) => {
+      const candidateTarget = Math.max(HYPERTROPHY.minimumSets, Number(setBudgets[candidateMuscle.id]) || HYPERTROPHY.minimumSets);
+      const current = projected[candidateMuscle.id] || 0;
+      return [candidateMuscle.id, {
+        floorGap: Math.max(0, HYPERTROPHY.minimumSets - current),
+        priorityGap: setup.priorities.includes(candidateMuscle.id) ? Math.max(0, candidateTarget - current) : 0
+      }];
+    }));
+    const exerciseCandidates = coachExerciseCandidates(muscle.id, session.usedExercises, { stimulusNeeds })
       .sort((a, b) => (plannedExerciseUses.get(a.exercise.id) || 0) - (plannedExerciseUses.get(b.exercise.id) || 0) || b.score - a.score);
     const chosen = exerciseCandidates.find((candidate) => candidate.eligible) || exerciseCandidates[0];
     if (!chosen || !isActiveCoachExercise(chosen.exercise)) return false;
@@ -5568,7 +5635,7 @@ function seriesFromWorkouts(exercise, mapper) {
 }
 
 function seriesFromMetrics(field) {
-  return canonicalMetricEntries()
+  return entriesThroughToday(canonicalMetricEntries())
     .filter((entry) => entry[field] > 0)
     .sort((a, b) => a.date.localeCompare(b.date))
     .map((entry) => ({
@@ -5660,7 +5727,7 @@ function niceAxisTicks(min, max, unit = "") {
 function chartXAxisTicks(points = []) {
   const visible = points.filter((point) => !point.hidden);
   if (!visible.length) return [];
-  if (visible.length === 1) return [{ label: visible[0].label, x: 50 }];
+  if (visible.length === 1) return [{ label: visible[0].label, x: Number.isFinite(visible[0].x) ? visible[0].x : 50 }];
   const indexes = [...new Set([0, Math.floor((visible.length - 1) / 2), visible.length - 1])];
   return indexes.map((index) => ({
     label: visible[index].label,
@@ -6692,8 +6759,18 @@ function volumeRecordTrophySlot(draft, recordStats) {
   return `<span class="record-trophy-slot" data-record-slot="volume" data-draft-id="${escapeHtml(draft.draftId)}">${volumeRecordTrophyMarkupForDraft(draft, recordStats)}</span>`;
 }
 
+function setRowsForDisplay(rows = []) {
+  const source = Array.isArray(rows) && rows.length ? rows : [{ weight: "", reps: 10, rir: 2, restSeconds: null }];
+  return source.map((row) => ({
+    weight: row?.weight === "" || row?.weight === null || row?.weight === undefined ? "" : Math.max(0, parseNum(row.weight)),
+    reps: Math.max(1, parseNum(row?.reps)),
+    rir: row?.rir === "" || row?.rir === null || row?.rir === undefined ? null : Math.min(RIR_MAX, Math.max(RIR_MIN, parseNum(row.rir))),
+    restSeconds: parseRestSeconds(row?.restSeconds ?? row?.rest ?? row?.restTime)
+  }));
+}
+
 function renderSetRows(draft = draftExerciseFromState()) {
-  const rows = normalizeSetRows(draft.setRows);
+  const rows = setRowsForDisplay(draft.setRows);
   const recordStats = exerciseRecordStats(draft.exercise, draft.editingWorkoutId);
   return rows.map((row, index) => {
     const previousLabel = previousSetLabel(draft.exercise, index, draft.editingWorkoutId);
@@ -9390,8 +9467,6 @@ function workoutSubmissionTimingMetadata(drafts, timer, workoutsBeforeSubmission
     exercise: resolveExerciseMeta(draft.exercise, draft.targetMuscle),
     sets: normalizeSetRows(draft.setRows).length
   }));
-  state.draftSessionId = uid();
-  discardStaleWorkoutTimer();
   const counts = timingSetCounts(items);
   return {
     timingSessionId: finalizedTimer.timingSessionId,
@@ -9409,7 +9484,79 @@ function workoutSubmissionTimingMetadata(drafts, timer, workoutsBeforeSubmission
   };
 }
 
+// Commit local workout changes and their cloud queue records as one durable unit.
+async function commitWorkoutSave(entries, staleWorkoutIds = []) {
+  return commitWorkoutRestore(entries, staleWorkoutIds);
+}
+
+async function commitWorkoutRestore(entries = [], deletedIds = []) {
+  const restoredIds = new Set(entries.map((entry) => entry.id));
+  const tombstoneIds = deletedIds.filter((id) => !restoredIds.has(id));
+  const syncEntries = [
+    ...entries.map((entry) => syncQueueEntryForChange("workout", entry.id, entry)),
+    ...tombstoneIds.map((id) => syncQueueEntryForChange("workout", id, null, { deleted: true }))
+  ].filter(Boolean);
+  const storeNames = syncEntries.length ? ["workouts", "syncQueue"] : ["workouts"];
+  await runStoreTransaction(storeNames, "readwrite", (stores) => {
+    deletedIds.forEach((id) => stores.workouts.delete(id));
+    entries.forEach((entry) => stores.workouts.put(entry));
+    syncEntries.forEach((entry) => stores.syncQueue.put(entry));
+  });
+  mergeSyncQueueEntries(syncEntries);
+}
+
+async function commitWorkoutDelete(id) {
+  await commitWorkoutRestore([], [id]);
+}
+
+// Replace a daily metric and queue its canonical cloud record in the same transaction.
+async function commitMetricSave(entry, duplicateIds = []) {
+  const syncEntry = syncQueueEntryForChange("metric", entry.date, entry);
+  const storeNames = syncEntry ? ["metrics", "syncQueue"] : ["metrics"];
+  await runStoreTransaction(storeNames, "readwrite", (stores) => {
+    stores.metrics.put(entry);
+    duplicateIds.forEach((id) => stores.metrics.delete(id));
+    if (syncEntry) stores.syncQueue.put(syncEntry);
+  });
+  mergeSyncQueueEntries(syncEntry ? [syncEntry] : []);
+}
+
+async function commitMetricDelete(ids = [], date = "") {
+  const syncEntry = date ? syncQueueEntryForChange("metric", date, null, { deleted: true }) : null;
+  const storeNames = syncEntry ? ["metrics", "syncQueue"] : ["metrics"];
+  await runStoreTransaction(storeNames, "readwrite", (stores) => {
+    ids.forEach((id) => stores.metrics.delete(id));
+    if (syncEntry) stores.syncQueue.put(syncEntry);
+  });
+  mergeSyncQueueEntries(syncEntry ? [syncEntry] : []);
+}
+
+async function commitMetricRestore(entries = []) {
+  const dates = [...new Set(entries.map((entry) => entry.date).filter(Boolean))];
+  const syncEntries = dates.map((date) => syncQueueEntryForChange("metric", date, mergeMetricEntries(entries, date))).filter(Boolean);
+  const storeNames = syncEntries.length ? ["metrics", "syncQueue"] : ["metrics"];
+  await runStoreTransaction(storeNames, "readwrite", (stores) => {
+    entries.forEach((entry) => stores.metrics.put(entry));
+    syncEntries.forEach((entry) => stores.syncQueue.put(entry));
+  });
+  mergeSyncQueueEntries(syncEntries);
+}
+
 async function saveWorkout(form) {
+  const draftsWithUntouchedRows = [...form.querySelectorAll(".exercise-draft")].filter((section) => {
+    const existing = state.workoutDraft.find((item) => item.draftId === section.dataset.draftId);
+    if (section.dataset.editingWorkoutId || existing?.editingWorkoutId) return false;
+    const rows = [...section.querySelectorAll(".set-row")].map((row) => ({
+      weight: row.querySelector('[data-set-field="weight"]')?.value,
+      reps: row.querySelector('[data-set-field="reps"]')?.value,
+      rir: row.querySelector('[data-set-field="rir"]')?.value,
+      rest: row.querySelector('[data-set-field="rest"]')?.value
+    }));
+    return rawSetRowsContainUntouched(rows);
+  });
+  if (draftsWithUntouchedRows.length) {
+    throw new Error("Complete or remove every untouched set row before lock-in. Use 0 lb for intentional bodyweight work.");
+  }
   readWorkoutDraftFromForm();
   const data = Object.fromEntries(new FormData(form));
   const drafts = ensureWorkoutDraft();
@@ -9434,7 +9581,12 @@ async function saveWorkout(form) {
       primaryMuscles: [...meta.primaryMuscles],
       secondaryMuscles: [...meta.secondaryMuscles],
       equipment: meta.equipment,
+      exerciseType: exerciseTimingType(meta),
+      repRange: meta.reps,
+      restRange: meta.rest,
       loadingStyle: effectiveLoadingStyle(meta),
+      loadIncrement: normalizeLoadIncrement(meta.loadIncrement),
+      progressionMode: normalizeProgressionMode(meta.progressionMode),
       setRows,
       sets: setRows.length,
       reps: best?.reps || 1,
@@ -9454,11 +9606,8 @@ async function saveWorkout(form) {
 
   const staleWorkoutIds = staleWorkoutIdsForSavedDraft(data.date, entries);
   const undoPayload = workoutSaveUndoPayload(entries, staleWorkoutIds);
+  await commitWorkoutSave(entries, staleWorkoutIds);
   setUndoAction(hadExisting ? "Undo workout update" : "Undo workout lock-in", undoPayload);
-  await dbPutBatch("workouts", entries);
-  await Promise.all(staleWorkoutIds.map((id) => dbDelete("workouts", id)));
-  for (const entry of entries) await queueSyncChange("workout", entry.id, entry);
-  for (const id of staleWorkoutIds) await queueSyncChange("workout", id, null, { deleted: true });
   scheduleRecordSync();
   if (submissionTiming) persistWorkoutTimer(null);
   const first = entries[0];
@@ -9501,9 +9650,7 @@ async function saveMetric(form) {
   const existing = metricForDate(date);
   const entry = metricEntryFromFormData(data, existing);
   const duplicateIds = metricDuplicateIdsForDate(date, entry.id);
-  await dbPut("metrics", entry);
-  await Promise.all(duplicateIds.map((id) => dbDelete("metrics", id)));
-  await queueSyncChange("metric", date, entry);
+  await commitMetricSave(entry, duplicateIds);
   scheduleRecordSync();
   await loadState();
   state.metricDate = date;
@@ -10158,6 +10305,7 @@ function normalizeBackupWorkout(entry) {
     primaryMuscles: primaryMuscles.length ? primaryMuscles : [...meta.primaryMuscles],
     secondaryMuscles,
     equipment: String(entry.equipment || meta.equipment || "custom"),
+    exerciseType: normalizeExerciseType(entry.exerciseType) || exerciseTimingType(meta),
     repRange: String(entry.repRange || meta.reps || "8-15"),
     restRange: String(entry.restRange || entry.rest || meta.rest || "60-120 sec"),
     loadingStyle: workoutLoadingStyle({ ...entry, loadingStyle: entry.loadingStyle || effectiveLoadingStyle(meta) }),
@@ -10222,23 +10370,30 @@ function normalizeBackupPayload(payload) {
 
 async function importPayload(payload) {
   const normalized = payload?.normalized ? payload.normalized : normalizeBackupPayload(payload);
-  await Promise.all(STORES.filter((store) => store !== "settings").map((store) => dbClear(store)));
-  for (const entry of normalized.workouts) await dbPut("workouts", entry);
-  for (const entry of normalized.metrics) await dbPut("metrics", entry);
-  await saveSetting("hypertrophyProfile", normalized.settings.hypertrophyProfile);
-  await saveSetting("nutritionGoal", normalized.settings.nutritionGoal);
-  await saveSetting("maintenanceProfile", normalized.settings.maintenanceProfile);
-  await saveSetting("dayTemplates", normalized.settings.dayTemplates);
-  await saveSetting("customExercises", normalized.settings.customExercises);
-  await saveSetting("dashboardWidgets", normalized.settings.dashboardWidgets);
-  await saveSetting("dashboardWidgetOrder", normalized.settings.dashboardWidgetOrder);
-  await saveSetting("coachWeeklyPlan", normalized.settings.coachWeeklyPlan);
-  await saveSetting("lastBackupAt", normalized.settings.lastBackupAt);
-  await saveSetting("lastCloudPushAt", normalized.settings.lastCloudPushAt);
-  await saveSetting("lastCloudPullAt", normalized.settings.lastCloudPullAt);
-  await saveSetting("syncRecordMeta", {});
-  await saveSetting("syncCursor", "");
-  await saveSetting("syncBootstrapVersion", 0);
+  const importedSettings = {
+    hypertrophyProfile: normalized.settings.hypertrophyProfile,
+    nutritionGoal: normalized.settings.nutritionGoal,
+    maintenanceProfile: normalized.settings.maintenanceProfile,
+    dayTemplates: normalized.settings.dayTemplates,
+    customExercises: normalized.settings.customExercises,
+    dashboardWidgets: normalized.settings.dashboardWidgets,
+    dashboardWidgetOrder: normalized.settings.dashboardWidgetOrder,
+    coachWeeklyPlan: normalized.settings.coachWeeklyPlan,
+    lastBackupAt: normalized.settings.lastBackupAt,
+    lastCloudPushAt: normalized.settings.lastCloudPushAt,
+    lastCloudPullAt: normalized.settings.lastCloudPullAt,
+    syncRecordMeta: {},
+    syncCursor: "",
+    syncBootstrapVersion: 0
+  };
+  await runStoreTransaction(STORES, "readwrite", (stores) => {
+    stores.workouts.clear();
+    stores.metrics.clear();
+    stores.syncQueue.clear();
+    normalized.workouts.forEach((entry) => stores.workouts.put(entry));
+    normalized.metrics.forEach((entry) => stores.metrics.put(entry));
+    Object.entries(importedSettings).forEach(([key, value]) => stores.settings.put({ key, value }));
+  });
   await loadState();
   await render();
 }
@@ -10265,8 +10420,8 @@ async function confirmPendingImport() {
   const pending = state.pendingImport;
   if (!pending) return;
   const previous = exportPayload();
-  setUndoAction("Undo import", { type: "import", previous });
   await importPayload({ normalized: pending.summary.normalized });
+  setUndoAction("Undo import", { type: "import", previous });
   if (pending.sourceType === "cloud") await saveSetting("lastCloudPullAt", new Date().toISOString());
   state.pendingImport = null;
   scheduleRecordSync();
@@ -10284,25 +10439,23 @@ async function undoLastAction() {
   if (!undo?.payload) throw new Error("Nothing to undo.");
   const { payload } = undo;
   if (payload.type === "delete-workout" && payload.entry) {
-    await dbPut("workouts", payload.entry);
-    await queueSyncChange("workout", payload.entry.id, payload.entry);
+    await commitWorkoutRestore([payload.entry]);
   } else if (payload.type === "save-workout") {
     const restoredEntries = [...(payload.previousEntries || []), ...(payload.staleEntries || [])];
-    await Promise.all((payload.savedEntryIds || []).map((id) => dbDelete("workouts", id)));
-    await dbPutBatch("workouts", restoredEntries);
-    for (const id of payload.savedEntryIds || []) await queueSyncChange("workout", id, null, { deleted: true });
-    for (const entry of restoredEntries) await queueSyncChange("workout", entry.id, entry);
+    await commitWorkoutRestore(restoredEntries, payload.savedEntryIds || []);
     clearWorkoutDraft(payload.date || todayISO());
   } else if (payload.type === "delete-metrics" && Array.isArray(payload.entries)) {
-    for (const entry of payload.entries) await dbPut("metrics", entry);
-    for (const entry of payload.entries) await queueSyncChange("metric", entry.date, entry);
+    await commitMetricRestore(payload.entries);
   } else if (payload.type === "custom-exercises" && Array.isArray(payload.previous)) {
     await saveSetting("customExercises", payload.previous);
     await queueAllLocalSyncRecords();
   } else if (payload.type === "clear-all") {
-    await Promise.all(["workouts", "metrics"].map((store) => dbClear(store)));
-    for (const entry of payload.workouts || []) await dbPut("workouts", entry);
-    for (const entry of payload.metrics || []) await dbPut("metrics", entry);
+    await runStoreTransaction(["workouts", "metrics"], "readwrite", (stores) => {
+      stores.workouts.clear();
+      stores.metrics.clear();
+      (payload.workouts || []).forEach((entry) => stores.workouts.put(entry));
+      (payload.metrics || []).forEach((entry) => stores.metrics.put(entry));
+    });
   } else if (payload.type === "clear-draft" && payload.recovery) {
     restoreDraftRecovery(payload.recovery);
   } else if (payload.type === "import" && payload.previous) {
@@ -10479,12 +10632,12 @@ function shouldQueueRecordSync() {
   return Boolean(state.settings.supabaseUrl || Number(state.settings.syncBootstrapVersion) >= SYNC_BOOTSTRAP_VERSION);
 }
 
-async function queueSyncChange(recordType, recordId, payload, { deleted = false, force = false } = {}) {
+function syncQueueEntryForChange(recordType, recordId, payload, { deleted = false, force = false } = {}) {
   if (!recordId || (!force && !shouldQueueRecordSync())) return null;
   const id = syncRecordKey(recordType, recordId);
   const existing = state.syncQueue.find((entry) => entry.id === id);
   const meta = syncRecordMeta(recordType, recordId);
-  return persistSyncQueueEntry({
+  return {
     id,
     recordType,
     recordId: String(recordId),
@@ -10495,7 +10648,25 @@ async function queueSyncChange(recordType, recordId, payload, { deleted = false,
     remoteRecord: existing?.remoteRecord || null,
     createdAt: existing?.createdAt || new Date().toISOString(),
     updatedAt: new Date().toISOString()
-  });
+  };
+}
+
+function remoteSyncRecordNeedsApply(remote) {
+  const meta = syncRecordMeta(remote.recordType, remote.recordId);
+  if (!Object.prototype.hasOwnProperty.call(meta, "revision")) return true;
+  if (Number(remote.revision) !== Number(meta.revision)) return Number(remote.revision) > Number(meta.revision);
+  return meta.fingerprint !== syncPayloadFingerprint(remote.payload, Boolean(remote.deletedAt));
+}
+
+function mergeSyncQueueEntries(entries = []) {
+  if (!entries.length) return;
+  const ids = new Set(entries.map((entry) => entry.id));
+  state.syncQueue = [...state.syncQueue.filter((entry) => !ids.has(entry.id)), ...entries];
+}
+
+async function queueSyncChange(recordType, recordId, payload, options = {}) {
+  const entry = syncQueueEntryForChange(recordType, recordId, payload, options);
+  return entry ? persistSyncQueueEntry(entry) : null;
 }
 
 async function queueAllLocalSyncRecords({ force = false } = {}) {
@@ -10548,15 +10719,23 @@ async function fetchRemoteSyncRecords(config, { full = false } = {}) {
   const select = "record_type,record_id,payload,revision,updated_at,deleted_at,source_device_id";
   const cursor = full ? "" : String(state.settings.syncCursor || "");
   const filter = cursor ? `&updated_at=gte.${encodeURIComponent(cursor)}` : "";
-  const response = await fetch(`${config.url}/rest/v1/fitness_sync_records?select=${select}${filter}&order=updated_at.asc`, {
-    headers: {
-      apikey: config.key,
-      Authorization: `Bearer ${config.session.access_token}`
-    }
-  });
-  const json = await response.json();
-  if (!response.ok) throw new Error(json.message || "Could not pull synchronized records.");
-  return Array.isArray(json) ? json.map(normalizeRemoteSyncRecord) : [];
+  const records = [];
+  let offset = 0;
+  while (true) {
+    const response = await fetch(`${config.url}/rest/v1/fitness_sync_records?select=${select}${filter}&order=updated_at.asc,record_type.asc,record_id.asc&limit=${SYNC_PAGE_SIZE}&offset=${offset}`, {
+      headers: {
+        apikey: config.key,
+        Authorization: `Bearer ${config.session.access_token}`
+      }
+    });
+    const json = await response.json();
+    if (!response.ok) throw new Error(json.message || "Could not pull synchronized records.");
+    const page = Array.isArray(json) ? json.map(normalizeRemoteSyncRecord) : [];
+    records.push(...page);
+    if (page.length < SYNC_PAGE_SIZE) break;
+    offset += page.length;
+  }
+  return records;
 }
 
 async function updateSyncCursor(records = []) {
@@ -10568,36 +10747,44 @@ async function updateSyncCursor(records = []) {
 
 async function pullRecordSync(config, { full = false } = {}) {
   const remoteRecords = await fetchRemoteSyncRecords(config, { full });
+  let stateChanged = false;
   for (const remote of remoteRecords) {
     const id = syncRecordKey(remote.recordType, remote.recordId);
     const pending = state.syncQueue.find((entry) => entry.id === id);
     if (pending && remote.revision !== Number(pending.baseRevision || 0)) {
       await persistSyncQueueEntry(syncConflictFromRemote(pending, remote));
+      stateChanged = true;
       continue;
     }
-    if (!pending) await applyRemoteSyncRecord(remote);
+    if (!pending && remoteSyncRecordNeedsApply(remote)) {
+      await applyRemoteSyncRecord(remote);
+      stateChanged = true;
+    }
   }
   await updateSyncCursor(remoteRecords);
-  return remoteRecords;
+  return { records: remoteRecords, stateChanged };
 }
 
 async function bootstrapRecordSync(config) {
-  if (Number(state.settings.syncBootstrapVersion) >= SYNC_BOOTSTRAP_VERSION) return;
+  if (Number(state.settings.syncBootstrapVersion) >= SYNC_BOOTSTRAP_VERSION) return false;
   const remoteRecords = await fetchRemoteSyncRecords(config, { full: true });
   const remoteByKey = new Map(remoteRecords.map((record) => [syncRecordKey(record.recordType, record.recordId), record]));
   const localRecords = buildLocalSyncRecords();
   const localByKey = new Map(localRecords.map((record) => [syncRecordKey(record.recordType, record.recordId), record]));
+  let stateChanged = false;
 
   for (const remote of remoteRecords) {
     const id = syncRecordKey(remote.recordType, remote.recordId);
     const local = localByKey.get(id);
     if (!local) {
       await applyRemoteSyncRecord(remote);
+      stateChanged = true;
     } else if (syncPayloadFingerprint(local.payload) === syncPayloadFingerprint(remote.payload, Boolean(remote.deletedAt))) {
       await saveSyncRecordMeta(remote.recordType, remote.recordId, remote.revision, remote.payload, Boolean(remote.deletedAt));
     } else {
       const pending = await queueSyncChange(local.recordType, local.recordId, local.payload, { force: true });
       await persistSyncQueueEntry(syncConflictFromRemote(pending, remote));
+      stateChanged = true;
     }
   }
 
@@ -10610,6 +10797,7 @@ async function bootstrapRecordSync(config) {
   state.settings.syncBootstrapVersion = SYNC_BOOTSTRAP_VERSION;
   await dbPut("settings", { key: "syncBootstrapVersion", value: SYNC_BOOTSTRAP_VERSION });
   await updateSyncCursor(remoteRecords);
+  return stateChanged;
 }
 
 async function applyQueuedSyncChange(config, entry, deviceId) {
@@ -10671,7 +10859,10 @@ function syncSyncStatusDom() {
 }
 
 async function performRecordSync({ pull = true, push = true, reconcile = false, notify = false } = {}) {
-  if (recordSyncPromise) return recordSyncPromise;
+  if (recordSyncPromise) {
+    recordSyncRerunRequested = true;
+    return recordSyncPromise;
+  }
   recordSyncPromise = (async () => {
     if (!recordSyncConfigured()) {
       state.syncStatus = "idle";
@@ -10689,16 +10880,19 @@ async function performRecordSync({ pull = true, push = true, reconcile = false, 
     try {
       const config = await supabaseConfigWithFreshSession();
       await ensureSyncDeviceId();
-      await bootstrapRecordSync(config);
-      if (pull) await pullRecordSync(config);
+      let stateChanged = await bootstrapRecordSync(config);
+      if (pull) {
+        const pullResult = await pullRecordSync(config);
+        stateChanged = stateChanged || pullResult.stateChanged;
+      }
       if (reconcile) await queueAllLocalSyncRecords();
       if (push) await flushRecordSyncQueue(config);
-      await loadState();
+      if (stateChanged) await loadState();
       state.syncStatus = syncConflictCount() ? "conflict" : "synced";
       const syncedAt = new Date().toISOString();
       state.settings.lastRecordSyncAt = syncedAt;
       await dbPut("settings", { key: "lastRecordSyncAt", value: syncedAt });
-      if (!notify && state.activeTab !== "log") await render();
+      if (!notify && state.activeTab !== "log" && stateChanged) await render();
       if (notify) announce(syncConflictCount() ? "Sync needs review." : "Cloud sync complete.", { tone: syncConflictCount() ? "warn" : "good" });
       return true;
     } catch (error) {
@@ -10709,6 +10903,10 @@ async function performRecordSync({ pull = true, push = true, reconcile = false, 
     } finally {
       recordSyncPromise = null;
       syncSyncStatusDom();
+      if (recordSyncRerunRequested) {
+        recordSyncRerunRequested = false;
+        scheduleRecordSync({ immediate: true });
+      }
     }
   })();
   return recordSyncPromise;
@@ -10829,12 +11027,16 @@ async function refreshAppShell() {
 
 async function clearAll() {
   if (!confirm("Clear all local workout and nutrition data? Export a backup first if you need it.")) return;
-  setUndoAction("Restore local data", {
+  const undoPayload = {
     type: "clear-all",
     workouts: state.workouts.filter((entry) => !isSampleEntry(entry)),
     metrics: state.metrics.filter((entry) => !isSampleEntry(entry))
+  };
+  await runStoreTransaction(["workouts", "metrics"], "readwrite", (stores) => {
+    stores.workouts.clear();
+    stores.metrics.clear();
   });
-  await Promise.all(["workouts", "metrics"].map((store) => dbClear(store)));
+  setUndoAction("Restore local data", undoPayload);
   await loadState();
   announce("Local data cleared.", { tone: "warn", action: "undo-last-action", actionLabel: "Undo" });
   await render();
@@ -11671,9 +11873,8 @@ async function handleAction(action, target) {
     async "delete-workout"() {
       if (!confirm("Delete this workout? This cannot be undone.")) return;
       const entry = state.workouts.find((workout) => workout.id === target.dataset.id);
+      await commitWorkoutDelete(target.dataset.id);
       if (entry) setUndoAction("Restore lift", { type: "delete-workout", entry });
-      await dbDelete("workouts", target.dataset.id);
-      await queueSyncChange("workout", target.dataset.id, null, { deleted: true });
       scheduleRecordSync();
       if (state.editingWorkoutId === target.dataset.id) clearWorkoutDraft();
       await loadState();
@@ -11687,9 +11888,8 @@ async function handleAction(action, target) {
         : [target.dataset.id].filter(Boolean);
       const entries = state.metrics.filter((entry) => ids.includes(entry.id));
       const metricDate = target.dataset.date || entries[0]?.date || "";
+      await commitMetricDelete(ids, metricDate);
       if (entries.length) setUndoAction("Restore nutrition", { type: "delete-metrics", entries });
-      await Promise.all(ids.map((id) => dbDelete("metrics", id)));
-      if (metricDate) await queueSyncChange("metric", metricDate, null, { deleted: true });
       scheduleRecordSync();
       await loadState();
       announce("Metric deleted.", { tone: "warn", sound: "warning", action: "undo-last-action", actionLabel: "Undo" });

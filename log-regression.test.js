@@ -197,9 +197,9 @@ assert(!appCode.includes('selectedExercise: "Push-up"'), "Expected Log startup n
 assert(!appCode.includes('showBanner("Unsaved draft restored."'), "Expected startup draft recovery not to show a top banner.");
 assert(appCode.includes("notifyMetricSaved"), "Expected metrics saves to use a dedicated bottom-only notification helper.");
 assert(!stylesCode.includes(".mobile-quick-toggle"), "Expected floating quick action button styling to be removed.");
-assert(indexCode.includes("v=1.5.90"), "Expected index shell references to use bumped app version.");
+assert(indexCode.includes("v=1.5.91"), "Expected index shell references to use bumped app version.");
 assert(!indexCode.includes('id="app" class="app-content" aria-live'), "Expected broad app aria-live to be removed in favor of targeted live regions.");
-assert(serviceWorkerCode.includes("trainwise-cache-v112"), "Expected service worker cache version bump.");
+assert(serviceWorkerCode.includes("trainwise-cache-v113"), "Expected service worker cache version bump.");
 // The mobile tab bar must anchor to the visible bottom edge and compact only during active scrolling.
 assert(/\.tabbar\s*\{[^}]*top:\s*auto;[^}]*bottom:\s*env\(safe-area-inset-bottom\)/s.test(stylesCode), "Expected the tab bar to use a stable bottom safe-area anchor instead of a dynamic viewport top offset.");
 assert(stylesCode.includes(".tabbar.is-scrolling") && appCode.includes("updateTabbarScrollState"), "Expected the tab bar to shrink during scrolling and restore after scrolling stops.");
@@ -1591,6 +1591,20 @@ assert.strictEqual(
   "Expected sync fingerprints to ignore JSON object key order."
 );
 
+const remoteRevisionGuard = runScenario(`
+  ${reset}
+  state.settings.syncRecordMeta = {
+    "workout:remote-one": { revision: 3, fingerprint: syncPayloadFingerprint({ id: "remote-one", notes: "same" }) }
+  };
+  ({
+    same: remoteSyncRecordNeedsApply({ recordType: "workout", recordId: "remote-one", revision: 3, payload: { id: "remote-one", notes: "same" } }),
+    newer: remoteSyncRecordNeedsApply({ recordType: "workout", recordId: "remote-one", revision: 4, payload: { id: "remote-one", notes: "new" } })
+  });
+`);
+
+assert.strictEqual(remoteRevisionGuard.same, false, "Expected an already-applied remote revision not to rewrite local state or rerender the screen.");
+assert.strictEqual(remoteRevisionGuard.newer, true, "Expected a newer remote revision to apply normally.");
+
 assert(supabaseSchemaCode.includes("fitness_sync_records"), "Expected record-level Supabase sync table schema.");
 assert(supabaseSchemaCode.includes("apply_fitness_sync_change"), "Expected revision-aware Supabase sync function.");
 assert(appCode.includes("const DB_VERSION = 3"), "Expected IndexedDB migration for persistent sync queue storage.");
@@ -1598,14 +1612,25 @@ assert(appCode.includes('createObjectStore("syncQueue"'), "Expected offline sync
 assert(appCode.includes('data-action="push-supabase-sync"'), "Expected manual Push to use record-level sync.");
 assert(appCode.includes('data-action="pull-supabase-sync"'), "Expected manual Pull to use record-level sync.");
 assert(!appCode.includes('data-action="push-supabase">'), "Expected snapshot Push control to be retired from the active UI.");
-assert(appCode.includes('queueSyncChange("workout", entry.id, entry)'), "Expected locked and updated workouts to enter record sync.");
-assert(appCode.includes('queueSyncChange("workout", id, null, { deleted: true })'), "Expected deleted workouts to synchronize as tombstones.");
-assert(appCode.includes('queueSyncChange("metric", date, entry)'), "Expected saved nutrition to enter record sync by date.");
-assert(appCode.includes('queueSyncChange("metric", metricDate, null, { deleted: true })'), "Expected deleted nutrition to synchronize as a date tombstone.");
+assert(appCode.includes('syncQueueEntryForChange("workout", entry.id, entry)'), "Expected locked and updated workouts to enter record sync atomically.");
+assert(appCode.includes('syncQueueEntryForChange("workout", id, null, { deleted: true })'), "Expected deleted workouts to synchronize as atomic tombstones.");
+assert(appCode.includes('syncQueueEntryForChange("metric", entry.date, entry)'), "Expected saved nutrition to enter record sync atomically by date.");
+assert(appCode.includes('syncQueueEntryForChange("metric", date, null, { deleted: true })'), "Expected deleted nutrition to synchronize as an atomic date tombstone.");
 assert(appCode.includes('queueSyncChange("exercise", exercise.id, exercise)'), "Expected saved exercises to enter record sync.");
 assert(appCode.includes('queueSyncChange("template", template.id, template)'), "Expected saved templates to enter record sync.");
 assert(appCode.includes("scheduleRecordSync();"), "Expected completed local mutations to schedule automatic synchronization.");
-assert(appCode.includes('saveSetting("syncBootstrapVersion", 0)'), "Expected backup imports to reset sync bootstrap metadata before merging.");
+assert(appCode.includes('syncBootstrapVersion: 0'), "Expected backup imports to reset sync bootstrap metadata before merging.");
+assert(appCode.includes("SYNC_PAGE_SIZE"), "Expected remote record sync to page through datasets larger than one API response.");
+assert(appCode.includes("recordSyncRerunRequested"), "Expected a local save during active sync to request an immediate follow-up pass.");
+assert(appCode.includes('if (!notify && state.activeTab !== "log" && stateChanged) await render();'), "Expected background sync to rebuild the screen only when remote state actually changed.");
+assert(supabaseSchemaCode.includes('drop policy if exists "fitness_snapshots_insert_own"'), "Expected the snapshot insert policy schema to be safely rerunnable.");
+assert(supabaseSchemaCode.includes('drop policy if exists "fitness_snapshots_select_own"'), "Expected the snapshot select policy schema to be safely rerunnable.");
+assert(serviceWorkerCode.includes('request.mode === "navigate"'), "Expected offline HTML fallback to apply only to page navigations.");
+
+const appVersion = (appCode.match(/const APP_VERSION = "([^"]+)"/) || [])[1];
+assert(appVersion, "Expected an app version constant.");
+assert(serviceWorkerCode.includes(`./app.js?v=${appVersion}`), "Expected service-worker app precache version to match APP_VERSION.");
+assert(serviceWorkerCode.includes(`./styles.css?v=${appVersion}`), "Expected service-worker CSS precache version to match APP_VERSION.");
 
 const archivedExerciseBehavior = runScenario(`
   ${reset}
@@ -2000,16 +2025,16 @@ const maintenanceSettingsAndTrends = runScenario(`
     heightFeet: 5,
     heightInches: 10,
     activityLevel: "moderate",
-    lastReviewedAt: "2026-06-17T12:00:00.000Z"
+    lastReviewedAt: new Date().toISOString()
   };
   state.metrics = [
-    { id: "m1", date: "2026-06-11", bodyWeight: 178, calories: 2500, protein: 170 },
-    { id: "m2", date: "2026-06-12", bodyWeight: 179, calories: 2600, protein: 170 },
-    { id: "m3", date: "2026-06-13", bodyWeight: 180, calories: 2700, protein: 170 },
-    { id: "m4", date: "2026-06-14", bodyWeight: 181, calories: 2800, protein: 170 },
-    { id: "m5", date: "2026-06-15", bodyWeight: 182, calories: 2900, protein: 170 },
-    { id: "m6", date: "2026-06-16", bodyWeight: 183, calories: 3000, protein: 170 },
-    { id: "m7", date: "2026-06-17", bodyWeight: 184, calories: 3100, protein: 170 }
+    { id: "m1", date: shiftISODate(todayISO(), -6), bodyWeight: 178, calories: 2500, protein: 170 },
+    { id: "m2", date: shiftISODate(todayISO(), -5), bodyWeight: 179, calories: 2600, protein: 170 },
+    { id: "m3", date: shiftISODate(todayISO(), -4), bodyWeight: 180, calories: 2700, protein: 170 },
+    { id: "m4", date: shiftISODate(todayISO(), -3), bodyWeight: 181, calories: 2800, protein: 170 },
+    { id: "m5", date: shiftISODate(todayISO(), -2), bodyWeight: 182, calories: 2900, protein: 170 },
+    { id: "m6", date: shiftISODate(todayISO(), -1), bodyWeight: 183, calories: 3000, protein: 170 },
+    { id: "m7", date: todayISO(), bodyWeight: 184, calories: 3100, protein: 170 }
   ];
   var form = renderMaintenanceProfileForm();
   var trends = renderTrends();
@@ -2700,5 +2725,108 @@ const inferredLegacyExerciseFormTypes = runScenario(`
 assert.strictEqual(inferredLegacyExerciseFormTypes.compound, "compound", "Expected the Exercise form to label legacy exercises with secondary muscles as Compound.");
 assert.strictEqual(inferredLegacyExerciseFormTypes.isolation, "isolation", "Expected the Exercise form to label legacy exercises without secondary muscles as Isolation.");
 assert.strictEqual(inferredLegacyExerciseFormTypes.manualOverride, "isolation", "Expected a manual Exercise type to override automatic classification.");
+
+const strictExerciseIdentity = runScenario(`
+  ${reset}
+  state.settings.customExercises = [
+    { id: "curl-a", name: "Cable Curl", primaryMuscles: ["biceps"], secondaryMuscles: [] },
+    { id: "curl-b", name: "Cable Curl", primaryMuscles: ["biceps"], secondaryMuscles: [] }
+  ];
+  ({
+    conflictingIds: sameExerciseIdentity({ exerciseId: "curl-b", exercise: "Cable Curl" }, state.settings.customExercises[0]),
+    exactId: sameExerciseIdentity({ exerciseId: "curl-a", exercise: "Cable Curl" }, state.settings.customExercises[0]),
+    ambiguousLegacy: sameExerciseIdentity({ exercise: "Cable Curl" }, state.settings.customExercises[0])
+  });
+`);
+
+assert.strictEqual(strictExerciseIdentity.conflictingIds, false, "Expected different non-empty exercise IDs never to merge by name.");
+assert.strictEqual(strictExerciseIdentity.exactId, true, "Expected matching exercise IDs to remain identical.");
+assert.strictEqual(strictExerciseIdentity.ambiguousLegacy, false, "Expected ambiguous legacy names not to merge into a current exercise.");
+
+const frozenWorkoutMetadata = runScenario(`
+  ${reset}
+  var meta = workoutMeta({
+    exerciseId: "frozen-curl",
+    exercise: "Frozen Curl",
+    primaryMuscles: ["biceps"],
+    secondaryMuscles: ["shoulders"],
+    exerciseType: "isolation",
+    repRange: "20-30",
+    restRange: "60 sec",
+    loadingStyle: "high-rep",
+    loadIncrement: 0.5,
+    progressionMode: "rep-first",
+    reps: 25
+  });
+  ({ type: exerciseTimingType(meta), reps: meta.reps, rest: meta.rest, increment: meta.loadIncrement, progression: meta.progressionMode });
+`);
+
+assert.strictEqual(frozenWorkoutMetadata.type, "isolation", "Expected historical workout type to remain frozen despite secondary muscles.");
+assert.strictEqual(frozenWorkoutMetadata.reps, "20-30", "Expected historical rep range not to collapse to the best-set rep count.");
+assert.strictEqual(frozenWorkoutMetadata.rest, "60 sec", "Expected historical rest range to remain available for diagnostics.");
+assert.strictEqual(frozenWorkoutMetadata.increment, 0.5, "Expected historical load increment to remain available for diagnostics.");
+assert.strictEqual(frozenWorkoutMetadata.progression, "rep-first", "Expected historical progression mode to remain available for diagnostics.");
+
+const calendarWeightAverage = runScenario(`
+  ${reset}
+  state.metrics = [
+    { id: "recent-a", date: todayISO(), bodyWeight: 180 },
+    { id: "recent-b", date: shiftISODate(todayISO(), -3), bodyWeight: 178 },
+    { id: "old", date: shiftISODate(todayISO(), -10), bodyWeight: 150 },
+    { id: "future", date: shiftISODate(todayISO(), 2), bodyWeight: 250 }
+  ];
+  maintenanceWeightPoint();
+`);
+
+assert.strictEqual(calendarWeightAverage.value, 179, "Expected maintenance weight to average only entries from the latest seven calendar days.");
+assert.strictEqual(calendarWeightAverage.source, "7d avg body weight", "Expected a calendar-window average to keep the 7d label.");
+
+const timingMetadataIsPure = runScenario(`
+  ${reset}
+  state.draftDate = todayISO();
+  state.draftSessionId = "draft-before-save";
+  state.workoutDraft = [{ draftId: "draft-row", exercise: "Bench Press", targetMuscle: "chest", setRows: [{ weight: 100, reps: 10, rir: 2 }] }];
+  state.workoutTimer = {
+    timingSessionId: "timer-one",
+    draftSessionId: "draft-before-save",
+    draftDate: todayISO(),
+    startedAt: new Date(Date.now() - 600000).toISOString(),
+    accumulatedActiveSeconds: 600,
+    runningSince: ""
+  };
+  var metadata = workoutSubmissionTimingMetadata(state.workoutDraft, state.workoutTimer, [], new Date().toISOString());
+  ({ draftSessionId: state.draftSessionId, timerExists: Boolean(state.workoutTimer), timingSessionId: metadata.timingSessionId });
+`);
+
+assert.strictEqual(timingMetadataIsPure.draftSessionId, "draft-before-save", "Expected timing metadata calculation not to rotate the draft before persistence succeeds.");
+assert.strictEqual(timingMetadataIsPure.timerExists, true, "Expected timing metadata calculation not to discard the timer before persistence succeeds.");
+
+const untouchedRows = runScenario(`
+  ({
+    untouched: rawSetRowsAreUntouched([{ weight: "", reps: "10", rir: "2", rest: "" }]),
+    bodyweightEntered: rawSetRowsAreUntouched([{ weight: "0", reps: "10", rir: "2", rest: "" }]),
+    repsChanged: rawSetRowsAreUntouched([{ weight: "", reps: "12", rir: "2", rest: "" }]),
+    mixedRowsContainUntouched: rawSetRowsContainUntouched([
+      { weight: "100", reps: "10", rir: "2", rest: "" },
+      { weight: "", reps: "10", rir: "2", rest: "" }
+    ])
+  });
+`);
+
+assert.strictEqual(untouchedRows.untouched, true, "Expected untouched default rows to be detectable before lock-in.");
+assert.strictEqual(untouchedRows.bodyweightEntered, false, "Expected an explicit zero load to count as intentional bodyweight work.");
+assert.strictEqual(untouchedRows.repsChanged, false, "Expected edited reps to count as an intentional set.");
+assert.strictEqual(untouchedRows.mixedRowsContainUntouched, true, "Expected a remaining placeholder row to block lock-in even when another row was edited.");
+const untouchedRowMarkup = runScenario('renderSetRows({ draftId: "untouched-render", exercise: "Bench Press", setRows: defaultSetRows(1) })');
+assert(untouchedRowMarkup.includes('data-set-field="weight" type="number" inputmode="decimal" min="0" step="0.5" value=""'), "Expected untouched placeholder weights to stay blank in the rendered Log row.");
+
+assert(appCode.includes("async function runStoreTransaction"), "Expected a shared transaction-completion helper for durable multi-store writes.");
+assert(appCode.includes("await commitWorkoutSave(entries, staleWorkoutIds)"), "Expected workout rows, stale deletes, and sync records to commit atomically.");
+assert(appCode.includes("await commitMetricSave(entry, duplicateIds)"), "Expected nutrition replacement and its sync record to commit atomically.");
+assert(appCode.includes('await runStoreTransaction(STORES, "readwrite"'), "Expected backup import to replace local stores in one transaction.");
+assert(!appCode.includes('await dbPutBatch("workouts", entries);'), "Expected workout saving not to use a partial multi-operation persistence path.");
+assert(appCode.includes("await commitWorkoutDelete(target.dataset.id)"), "Expected workout deletion and its cloud tombstone to commit atomically.");
+assert(appCode.includes("await commitMetricDelete(ids, metricDate)"), "Expected nutrition deletion and its cloud tombstone to commit atomically.");
+assert(appCode.includes("await commitWorkoutRestore(restoredEntries, payload.savedEntryIds || [])"), "Expected workout Undo to restore local rows and sync state atomically.");
 
 console.log("log regression tests passed");
