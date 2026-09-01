@@ -1918,6 +1918,117 @@ assert.notStrictEqual(highRepPerformanceTrack.status, "isolated-failure", "Expec
 assert.strictEqual(highRepPerformanceTrack.historyCount, 2, "Expected high-rep performance comparisons to ignore standard-loading history.");
 assert(highRepPerformanceTrack.target.includes("12.5"), `Expected high-rep progression to preserve the configured half-pound load, got ${highRepPerformanceTrack.target}`);
 
+const highRepProgressionGuard = runScenario(`
+  ${resetAndHelpers}
+  var highRep = normalizeExerciseDefinition({
+    id: "guard-high", name: "Guard High Rep", primaryMuscles: ["calves"], secondaryMuscles: [],
+    reps: "8-15", loadingStyle: "high-rep", progressionMode: "normal", loadIncrement: 2.5
+  });
+  var autoStandard = normalizeExerciseDefinition({
+    id: "guard-auto", name: "Guard Auto", primaryMuscles: ["calves"], secondaryMuscles: [],
+    reps: "8-15", loadingStyle: "auto", progressionMode: "normal", loadIncrement: 2.5
+  });
+  state.settings.customExercises = [highRep, autoStandard];
+  state.workouts = [{
+    id: "guard-20", date: dateDaysAgo(2), exercise: highRep.name, exerciseId: highRep.id,
+    primaryMuscles: ["calves"], secondaryMuscles: [], loadingStyle: "high-rep",
+    setRows: [{ weight: 10, reps: 20, rir: 2 }, { weight: 10, reps: 20, rir: 2 }]
+  }];
+  var holdProgression = progressionTargetForExercise(highRep.name);
+  var holdTarget = coachPlanTargetForExercise(highRep, coachExercisePerformanceSignal(highRep));
+  var holdRows = plannedSetRowsFromPreviousSession(highRep, 2, holdTarget);
+  var emptyRows = plannedSetRowsFromPreviousSession({ ...highRep, id: "empty-high", name: "Empty High" }, 2, null);
+  var debugItem = coachDebugPlanSummary({
+    mode: "session",
+    sessionPlan: { items: [{ muscle: { id: "calves", label: "Calves" }, exercise: highRep, sets: 2, minutes: 5, phase: "growth", growthMode: "medium", reason: "Test", planTarget: holdTarget }] }
+  }).items[0];
+  ({
+    highRange: effectiveRepRange({ loadingStyle: "high-rep", reps: "8-15" }),
+    autoRange: effectiveRepRange(autoStandard),
+    holdProgression,
+    holdRows,
+    emptyRows,
+    autoRow: adjustedCoachPlanRow({ weight: 10, reps: 10, rir: 2 }, autoStandard, null),
+    debugItem
+  });
+`);
+
+assert.deepEqual(highRepProgressionGuard.highRange, { low: 20, high: 30, label: "20-30" }, "Expected explicit High-rep to enforce the 20-30 Coach range even when stored reps conflict.");
+assert.deepEqual(highRepProgressionGuard.autoRange, { low: 8, high: 15, label: "8-15" }, "Expected Auto / 8-15 to remain a Standard track rather than being silently reclassified.");
+assert.strictEqual(highRepProgressionGuard.holdProgression.increaseLoad, false, "Expected 20 reps at 2 RIR not to earn a High-rep load increase.");
+assert.strictEqual(highRepProgressionGuard.holdProgression.loadIncreaseBlockReason, "RIR-adjusted top-set capacity is 22/30 reps", "Expected the High-rep load hold to explain the exact capacity shortfall.");
+assert(highRepProgressionGuard.holdProgression.target.includes("10 lb x 21-30"), `Expected the same load to progress within 20-30, got ${highRepProgressionGuard.holdProgression.target}.`);
+assert(highRepProgressionGuard.holdRows.every((row) => row.weight === 10 && row.reps >= 20 && row.reps <= 30), "Expected copied High-rep hold rows to stay at the same load and within 20-30.");
+assert(highRepProgressionGuard.emptyRows.every((row) => row.reps === 20), "Expected a High-rep exercise without history to copy baseline rows at 20 reps, not the generic 10-rep default.");
+assert.strictEqual(highRepProgressionGuard.autoRow.reps, 10, "Expected Auto / 8-15 copied rows to preserve existing Standard behavior.");
+assert.strictEqual(highRepProgressionGuard.debugItem.configuredLoadingStyle, "high-rep", "Expected Coach debug output to expose the configured loading style.");
+assert.strictEqual(highRepProgressionGuard.debugItem.effectiveLoadingStyle, "high-rep", "Expected Coach debug output to expose the effective loading style.");
+assert.strictEqual(highRepProgressionGuard.debugItem.effectiveRepRange, "20-30", "Expected Coach debug output to expose the guarded High-rep range.");
+assert.strictEqual(highRepProgressionGuard.debugItem.planTarget.loadIncreaseBlockReason, "RIR-adjusted top-set capacity is 22/30 reps", "Expected Coach debug output to explain why load progression was held.");
+
+const highRepRirAdjustedLoadIncrease = runScenario(`
+  ${resetAndHelpers}
+  var exercise = normalizeExerciseDefinition({
+    id: "guard-increase", name: "Guard Increase", primaryMuscles: ["calves"], secondaryMuscles: [],
+    reps: "20-30", loadingStyle: "high-rep", progressionMode: "normal", loadIncrement: 2.5
+  });
+  state.settings.customExercises = [exercise];
+  state.workouts = [{
+    id: "guard-28", date: dateDaysAgo(2), exercise: exercise.name, exerciseId: exercise.id,
+    primaryMuscles: ["calves"], secondaryMuscles: [], loadingStyle: "high-rep",
+    setRows: [{ weight: 10, reps: 28, rir: 2 }, { weight: 10, reps: 22, rir: 1 }]
+  }];
+  var progression = progressionTargetForExercise(exercise.name);
+  var planTarget = coachPlanTargetForExercise(exercise, coachExercisePerformanceSignal(exercise));
+  var copiedRows = plannedSetRowsFromPreviousSession(exercise, 2, planTarget);
+  ({ progression, planTarget, copiedRows });
+`);
+
+assert.strictEqual(highRepRirAdjustedLoadIncrease.progression.increaseLoad, true, "Expected 28 reps at 2 RIR to qualify as RIR-adjusted 30-rep capacity when every set remains in range.");
+assert.strictEqual(highRepRirAdjustedLoadIncrease.progression.loadIncreaseBlockReason, "", "Expected no blocking reason after a valid High-rep load increase.");
+assert(highRepRirAdjustedLoadIncrease.progression.target.includes("12.5 lb x 20-26"), `Expected the new load target to remain in 20-30, got ${highRepRirAdjustedLoadIncrease.progression.target}.`);
+assert(highRepRirAdjustedLoadIncrease.copiedRows.every((row) => row.weight === 12.5 && row.reps === 20), "Expected copied rows to match the RIR-adjusted load increase and reset to 20 reps.");
+
+const highRepBackoffGuard = runScenario(`
+  ${resetAndHelpers}
+  var exercise = normalizeExerciseDefinition({
+    id: "guard-backoff", name: "Guard Backoff", primaryMuscles: ["calves"], secondaryMuscles: [],
+    reps: "20-30", loadingStyle: "high-rep", progressionMode: "normal", loadIncrement: 2.5
+  });
+  state.settings.customExercises = [exercise];
+  state.workouts = [{
+    id: "guard-backoff-session", date: dateDaysAgo(2), exercise: exercise.name, exerciseId: exercise.id,
+    primaryMuscles: ["calves"], secondaryMuscles: [], loadingStyle: "high-rep",
+    setRows: [{ weight: 10, reps: 28, rir: 2 }, { weight: 0, reps: 19, rir: 1 }]
+  }];
+  var progression = progressionTargetForExercise(exercise.name);
+  var resetRow = adjustedCoachPlanRow({ weight: 10, reps: 12, rir: 0 }, exercise, { kind: "reset", loadMultiplier: 0.95 });
+  ({ progression, resetRow });
+`);
+
+assert.strictEqual(highRepBackoffGuard.progression.increaseLoad, false, "Expected one working set below 20 to block a High-rep load increase.");
+assert.strictEqual(highRepBackoffGuard.progression.loadIncreaseBlockReason, "One or more working sets finished below 20 reps", "Expected the below-range working set to be reported as the exact blocker.");
+assert.strictEqual(highRepBackoffGuard.resetRow.reps, 20, "Expected High-rep reset rows to preserve the 20-rep minimum while reducing load.");
+
+const highRepEightRepLoadIsNotProgress = runScenario(`
+  ${resetAndHelpers}
+  var exercise = normalizeExerciseDefinition({
+    id: "guard-eight", name: "Guard Eight", primaryMuscles: ["calves"], secondaryMuscles: [],
+    reps: "20-30", loadingStyle: "high-rep", progressionMode: "normal", loadIncrement: 2.5
+  });
+  state.settings.customExercises = [exercise];
+  state.workouts = [
+    { id: "guard-eight-latest", date: dateDaysAgo(2), exercise: exercise.name, exerciseId: exercise.id, primaryMuscles: ["calves"], loadingStyle: "high-rep", setRows: [{ weight: 15, reps: 8, rir: 1 }] },
+    { id: "guard-eight-prior", date: dateDaysAgo(5), exercise: exercise.name, exerciseId: exercise.id, primaryMuscles: ["calves"], loadingStyle: "high-rep", setRows: [{ weight: 10, reps: 20, rir: 2 }] }
+  ];
+  var signal = coachExercisePerformanceSignal(exercise);
+  ({ status: signal.status, reasons: signal.progressEvidence?.reasons || [], target: coachPlanTargetForExercise(exercise, signal) });
+`);
+
+assert.notStrictEqual(highRepEightRepLoadIsNotProgress.status, "progressing", "Expected a new High-rep load performed for only 8 reps not to count as progression.");
+assert(!highRepEightRepLoadIsNotProgress.reasons.some((reason) => reason.includes("load PR")), "Expected an 8-rep High-rep load not to create a qualifying load-PR signal.");
+assert(["reset", "deload"].includes(highRepEightRepLoadIsNotProgress.target.kind), "Expected below-range High-rep work to hold or reduce load rather than prescribe another increase.");
+
 const standardToHighRepConversion = runScenario(`
   ${resetAndHelpers}
   state.settings.customExercises = [{

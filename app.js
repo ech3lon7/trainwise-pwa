@@ -3,7 +3,7 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 3;
 const STORES = ["workouts", "metrics", "settings", "syncQueue"];
-const APP_VERSION = "1.5.91";
+const APP_VERSION = "1.5.92";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 const DRAFT_RECOVERY_KEY = "trainwise-draft-recovery-v1";
 const DATED_STRENGTH_DRAFTS_KEY = "trainwise-strength-drafts-by-date-v1";
@@ -1092,6 +1092,15 @@ function repRangeForLoadingStyle(reps, loadingStyle) {
   return normalized;
 }
 
+// Keep explicit High-rep prescriptions inside 20-30 while leaving Auto ranges user-defined.
+function effectiveRepRange(exercise = {}) {
+  const definition = typeof exercise === "object" && exercise !== null ? exercise : { reps: exercise };
+  const configuredStyle = normalizeLoadingStyle(definition.loadingStyle);
+  const normalized = normalizeRepRangeInput(definition.reps) || "8-15";
+  const range = configuredStyle === "high-rep" ? { low: 20, high: 30 } : parseRepRange(normalized);
+  return { ...range, label: `${range.low}-${range.high}` };
+}
+
 function workoutLoadingStyle(workout = {}) {
   return effectiveLoadingStyle(workout);
 }
@@ -1874,7 +1883,7 @@ function progressiveOverloadIndicator(exerciseName, entries = exerciseHistoryEnt
 function convertSetRowToLoadingStyle(row, exercise, sourceStyle, targetStyle = effectiveLoadingStyle(exercise)) {
   const source = normalizeSetRows([row])[0];
   if (!source || sourceStyle === targetStyle || source.weight <= 0 || source.reps <= 0) return source;
-  const range = parseRepRange(exercise.reps);
+  const range = effectiveRepRange(exercise);
   const targetReps = Math.round((range.low + range.high) / 2);
   const targetRir = 2;
   const estimatedMaxReps = source.reps + Math.max(0, Number(source.rir) || 0);
@@ -1904,6 +1913,8 @@ function progressionTargetForExercise(exerciseName) {
       top: sourceTop,
       indicator: { symbol: "=", tone: "flat", label: `${loadingStyleLabel(loadingStyle)} baseline` },
       increaseLoad: false,
+      loadIncreaseEligible: false,
+      loadIncreaseBlockReason: "Loading-style transition baseline must be established",
       progressionMode: normalizeProgressionMode(meta.progressionMode),
       styleConversion: true,
       sourceLoadingStyle: sourceStyle,
@@ -1914,17 +1925,25 @@ function progressionTargetForExercise(exerciseName) {
   }
   const top = bestSet(latest);
   if (!top) return null;
-  const range = parseRepRange(meta.reps);
-  const workingRows = setRowsFromWorkout(latest).filter((row) => row.weight > 0 && row.reps > 0);
+  const range = effectiveRepRange(meta);
+  const workingRows = setRowsFromWorkout(latest).filter((row) => row.reps > 0);
   const estimatedCapacity = top.reps + Math.max(0, Number(top.rir) || 0);
   const backoffSetsHeldRange = workingRows.length > 0 && workingRows.every((row) => row.reps >= range.low);
-  const increaseLoad = estimatedCapacity >= range.high && backoffSetsHeldRange;
-  const nextRep = Math.min(range.high, top.reps + 1);
   const loadStep = effectiveLoadIncrement(meta, top.weight);
   const indicator = progressiveOverloadIndicator(exerciseName, history.filter((workout) => workoutLoadingStyle(workout) === loadingStyle));
   const progressionMode = normalizeProgressionMode(meta.progressionMode);
-  const constrainedLoad = increaseLoad && progressionMode !== "normal";
-  const target = increaseLoad && progressionMode === "normal"
+  const capacityReached = estimatedCapacity >= range.high;
+  const loadIncreaseEligible = capacityReached && backoffSetsHeldRange && progressionMode === "normal";
+  const loadIncreaseBlockReason = !capacityReached
+    ? `RIR-adjusted top-set capacity is ${fmt(estimatedCapacity)}/${fmt(range.high)} reps`
+    : !backoffSetsHeldRange
+      ? `One or more working sets finished below ${fmt(range.low)} reps`
+      : progressionMode !== "normal"
+        ? `Exercise progression mode is ${progressionMode}`
+        : "";
+  const nextRep = Math.max(range.low, Math.min(range.high, top.reps + 1));
+  const constrainedLoad = capacityReached && backoffSetsHeldRange && progressionMode !== "normal";
+  const target = loadIncreaseEligible
     ? `${fmtLoad(top.weight + loadStep)} lb x ${fmt(range.low)}-${fmt(Math.max(range.low, Math.min(range.high, top.reps - 2)))}`
     : `${fmtLoad(top.weight)} lb x ${fmt(nextRep)}-${fmt(range.high)}`;
   const modeCue = constrainedLoad
@@ -1937,7 +1956,10 @@ function progressionTargetForExercise(exerciseName) {
     latest,
     top,
     indicator,
-    increaseLoad: increaseLoad && progressionMode === "normal",
+    increaseLoad: loadIncreaseEligible,
+    loadIncreaseEligible,
+    loadIncreaseBlockReason,
+    effectiveRepRange: range.label,
     progressionMode,
     target,
     body: `Last time you hit ${fmtLoad(top.weight)} lb x ${fmt(top.reps)} on ${exerciseName}. I'm setting ${target} as the next target - keep ${HYPERTROPHY.idealRirMin}-${HYPERTROPHY.idealRirMax} clean reps in reserve.${loadingStyle === "high-rep" ? " This is a high-rep track, so rep quality comes before a load jump." : ""}${modeCue}`
@@ -2865,14 +2887,16 @@ function exerciseProgressEvidence(current, priorHistory = [], options = {}) {
     const priorReps = bestRepsByWeight.get(recordWeightKey(row.weight)) || 0;
     return priorReps > 0 && row.reps > priorReps;
   });
-  const weightPrRows = rows.filter((row) => row.weight > priorMaxWeight && row.reps >= 8);
+  const range = options.effectiveRange || parseRepRange(options.repRange || "8-15");
+  const minimumLoadPrReps = options.loadingStyle === "high-rep" ? range.low : 8;
+  const weightPrRows = rows.filter((row) => row.weight > priorMaxWeight && row.reps >= minimumLoadPrReps);
   const e1rmImproved = priorBestE1rm > 0 && latestE1rm > priorBestE1rm * 1.01;
   const topSetPr = priorTopSetScore > 0 && latestTopSet && latestTopSet.score > priorTopSetScore * 1.005;
   const reasons = [];
   if (topSetPr && options.loadingStyle !== "high-rep") reasons.push("top set PR");
   if (e1rmImproved && options.loadingStyle !== "high-rep") reasons.push("estimated 1RM improved");
   if (repPrRows.length) reasons.push("rep PR at matched load");
-  if (weightPrRows.length) reasons.push("new 8+ rep load PR");
+  if (weightPrRows.length) reasons.push(`new ${minimumLoadPrReps}+ rep load PR`);
   return {
     progressed: reasons.length > 0,
     reasons,
@@ -2891,7 +2915,7 @@ function exerciseUnderperformed(current, previous, options = {}) {
   const previousE1rm = e1rm(previous);
   const e1rmDrop = previousE1rm > 0 && currentE1rm < previousE1rm * (1 - COACH_PERFORMANCE_DROP_THRESHOLD);
   const repDrops = comparableRepDrop(current, previous);
-  const range = parseRepRange(options.repRange || "8-15");
+  const range = options.effectiveRange || parseRepRange(options.repRange || "8-15");
   const missedRange = setRowsFromWorkout(current).some((row) => row.reps > 0 && row.reps < range.low);
   const broadRepRegression = repDrops >= 3;
   const failureRir = (averageRir(current) ?? HYPERTROPHY.idealRirMin) <= 0;
@@ -2966,7 +2990,8 @@ function coachExercisePerformanceSignal(exercise, workouts = coachWorkoutEntries
   }
   const latest = history[0];
   const previous = history[1];
-  const latestProgress = exerciseProgressEvidence(latest, history.slice(1), { loadingStyle });
+  const effectiveRange = effectiveRepRange(exercise);
+  const latestProgress = exerciseProgressEvidence(latest, history.slice(1), { loadingStyle, effectiveRange });
   if (latestProgress.progressed) {
     return {
       status: "progressing",
@@ -2978,10 +3003,10 @@ function coachExercisePerformanceSignal(exercise, workouts = coachWorkoutEntries
       message: coachPerformanceMessage(exercise, "progressing", latestProgress.reasons.join(", "))
     };
   }
-  const performanceOptions = { progressEvidence: latestProgress, repRange: exercise.reps, loadingStyle };
+  const performanceOptions = { progressEvidence: latestProgress, effectiveRange, loadingStyle };
   const latestUnder = exerciseUnderperformed(latest, previous, performanceOptions);
-  const previousProgress = history.length >= 3 ? exerciseProgressEvidence(previous, history.slice(2), { loadingStyle }) : null;
-  const previousUnder = history.length >= 3 && exerciseUnderperformed(previous, history[2], { progressEvidence: previousProgress, repRange: exercise.reps, loadingStyle });
+  const previousProgress = history.length >= 3 ? exerciseProgressEvidence(previous, history.slice(2), { loadingStyle, effectiveRange }) : null;
+  const previousUnder = history.length >= 3 && exerciseUnderperformed(previous, history[2], { progressEvidence: previousProgress, effectiveRange, loadingStyle });
   if (latestUnder && previousUnder) {
     return {
       status: "repeated-failure",
@@ -3060,13 +3085,15 @@ function roundLoadTarget(weight, exercise = null) {
 function coachPlanTargetForExercise(exercise, signal = coachExercisePerformanceSignal(exercise)) {
   const latest = signal.latest || exerciseHistoryForDefinition(exercise)[0];
   const top = latest ? bestSet(latest) : null;
-  const range = parseRepRange(exercise.reps);
+  const range = effectiveRepRange(exercise);
   if (!top) {
     return {
       kind: "baseline",
-      label: `Target ${exercise.reps} reps`,
+      label: `Target ${range.label} reps`,
       detail: `${HYPERTROPHY.idealRirMin}-${HYPERTROPHY.idealRirMax} RIR`,
       tone: "",
+      loadIncreaseEligible: false,
+      loadIncreaseBlockReason: "No submitted baseline",
       message: ""
     };
   }
@@ -3079,6 +3106,8 @@ function coachPlanTargetForExercise(exercise, signal = coachExercisePerformanceS
       tone: "warn",
       loadMultiplier: 0.9,
       repOffset: 0,
+      loadIncreaseEligible: false,
+      loadIncreaseBlockReason: "Repeated-failure safeguard",
       message: signal.message
     };
   }
@@ -3091,6 +3120,8 @@ function coachPlanTargetForExercise(exercise, signal = coachExercisePerformanceS
       tone: "warn",
       loadMultiplier: 0.95,
       repOffset: 0,
+      loadIncreaseEligible: false,
+      loadIncreaseBlockReason: "Isolated-failure safeguard",
       message: signal.message
     };
   }
@@ -3103,14 +3134,19 @@ function coachPlanTargetForExercise(exercise, signal = coachExercisePerformanceS
       tone: progression.indicator.tone,
       loadMultiplier: 1,
       repOffset: progression.increaseLoad ? 0 : 1,
+      increaseLoad: progression.increaseLoad,
+      loadIncreaseEligible: progression.loadIncreaseEligible,
+      loadIncreaseBlockReason: progression.loadIncreaseBlockReason,
       message: signal.message
     };
   }
   return {
     kind: "baseline",
-    label: `Target ${exercise.reps} reps`,
+    label: `Target ${range.label} reps`,
     detail: `${HYPERTROPHY.idealRirMin}-${HYPERTROPHY.idealRirMax} RIR`,
     tone: "",
+    loadIncreaseEligible: false,
+    loadIncreaseBlockReason: "No comparable progression baseline",
     message: signal.message
   };
 }
@@ -6397,16 +6433,22 @@ function previousSetLabel(exercise, index, excludeId = state.editingWorkoutId) {
 
 function adjustedCoachPlanRow(row, exercise, planTarget = null) {
   const next = { ...row };
-  if (!planTarget) return next;
   const meta = exerciseIdentity(exercise);
-  const range = parseRepRange(meta.reps);
+  const range = effectiveRepRange(meta);
+  const strictHighRep = normalizeLoadingStyle(meta.loadingStyle) === "high-rep";
+  if (strictHighRep) next.reps = Math.max(range.low, Math.min(range.high, Number(next.reps) || range.low));
+  if (!planTarget) return next;
   if (["deload", "reset"].includes(planTarget.kind) && next.weight > 0) {
     next.weight = roundLoadTarget(next.weight * (planTarget.loadMultiplier || 1), meta);
+    if (strictHighRep) next.reps = Math.max(range.low, Math.min(range.high, next.reps));
     next.rir = 2;
     return next;
   }
   if (planTarget.kind === "progression") {
-    if (next.reps < range.high) {
+    if (planTarget.increaseLoad && next.weight > 0) {
+      next.weight = roundLoadTarget(next.weight + effectiveLoadIncrement(meta, next.weight), meta);
+      next.reps = range.low;
+    } else if (next.reps < range.high) {
       next.reps += 1;
     } else if (next.weight > 0) {
       next.weight = roundLoadTarget(next.weight + effectiveLoadIncrement(meta, next.weight), meta);
@@ -6423,7 +6465,7 @@ function plannedSetRowsFromPreviousSession(exercise, setCount, planTarget = null
   const targetStyle = phase.targetStyle;
   const last = phase.history[0] || phase.transitionSource || null;
   const previousRows = last ? setRowsFromWorkout(last) : [];
-  if (!previousRows.length) return defaultSetRows(count);
+  if (!previousRows.length) return defaultSetRows(count).map((row) => adjustedCoachPlanRow(row, exercise, planTarget));
   const sourceStyle = workoutLoadingStyle(last);
   return Array.from({ length: count }, (_, index) => {
     const source = previousRows[index] || previousRows[previousRows.length - 1];
@@ -9889,11 +9931,16 @@ function coachDebugPlanSummary(plan) {
       phase: item.phase,
       growthMode: item.growthMode,
       reason: item.reason,
+      configuredLoadingStyle: normalizeLoadingStyle(item.exercise?.loadingStyle),
+      effectiveLoadingStyle: effectiveLoadingStyle(item.exercise || {}),
+      effectiveRepRange: effectiveRepRange(item.exercise || {}).label,
       planTarget: item.planTarget ? {
         kind: item.planTarget.kind,
         label: item.planTarget.label,
         detail: item.planTarget.detail,
         tone: item.planTarget.tone,
+        loadIncreaseEligible: Boolean(item.planTarget.loadIncreaseEligible),
+        loadIncreaseBlockReason: item.planTarget.loadIncreaseBlockReason || "",
         message: item.planTarget.message || ""
       } : null,
       performanceSignal: item.performanceSignal ? {
@@ -10119,8 +10166,12 @@ function coachDebugWeeklyPlan() {
         exercise: item.exercise.name,
         muscle: item.muscle.id,
         sets: item.sets,
+        configuredLoadingStyle: normalizeLoadingStyle(item.exercise.loadingStyle),
         loadingStyle: effectiveLoadingStyle(item.exercise),
+        effectiveRepRange: effectiveRepRange(item.exercise).label,
         planTarget: item.planTarget?.label || "",
+        loadIncreaseEligible: Boolean(item.planTarget?.loadIncreaseEligible),
+        loadIncreaseBlockReason: item.planTarget?.loadIncreaseBlockReason || "",
         performanceStatus: item.performanceSignal?.status || "neutral"
       }))
     }))
@@ -10149,7 +10200,9 @@ function coachTimeEstimatorDebug(plan = buildTodayPlan(selectedCoachTimeframeMin
         exercise: item.exercise.name,
         sets: item.sets,
         exerciseType: exerciseTimingType(item.exercise),
+        configuredLoadingStyle: normalizeLoadingStyle(item.exercise.loadingStyle),
         effectiveLoadingStyle: effectiveLoadingStyle(item.exercise),
+        effectiveRepRange: effectiveRepRange(item.exercise).label,
         restSeconds: rest.seconds,
         restSource: rest.source,
         rawSeconds: estimateExerciseRawSeconds(item.exercise, item.sets)
