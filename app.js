@@ -3,7 +3,7 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 3;
 const STORES = ["workouts", "metrics", "settings", "syncQueue"];
-const APP_VERSION = "1.5.92";
+const APP_VERSION = "1.5.93";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 const DRAFT_RECOVERY_KEY = "trainwise-draft-recovery-v1";
 const DATED_STRENGTH_DRAFTS_KEY = "trainwise-strength-drafts-by-date-v1";
@@ -240,6 +240,7 @@ const state = {
   copiedCoachPlan: null,
   previewNextCoachPlan: false,
   settingsOpenPanels: [],
+  collapsiblePanelOpenState: {},
   draggingDraftId: null,
   dragPendingDraftId: null,
   appBanner: null,
@@ -1616,16 +1617,21 @@ function allTimeRecords(workouts = state.workouts, metrics = state.metrics) {
   for (const workout of submitted) {
     const key = workout.exerciseId ? `id:${workout.exerciseId}` : `name:${normalizeName(workout.exercise)}`;
     const group = exerciseGroups.get(key) || { exercise: workout.exercise, exerciseId: workout.exerciseId || "", sessions: [] };
-    group.exercise = workout.exercise || group.exercise;
     group.sessions.push(workout);
     exerciseGroups.set(key, group);
   }
   const exercises = [...exerciseGroups.values()].map((group) => {
-    const rows = group.sessions.flatMap((workout) => setRowsFromWorkout(workout).map((row, index) => ({ workout, row, index, date: workout.date, exercise: group.exercise })));
-    const sessions = group.sessions.map((workout) => ({ workout, date: workout.date, exercise: group.exercise, value: workoutVolume(workout) }));
-    const meta = workoutMeta(group.sessions[group.sessions.length - 1] || {});
+    // Prefer the current stable-ID definition after a rename, then fall back to the newest historical session.
+    const currentDefinition = group.exerciseId
+      ? (state.settings.customExercises || []).map(normalizeExerciseDefinition).filter(Boolean).find((exercise) => exercise.id === group.exerciseId)
+      : null;
+    const newestSession = workoutsNewestFirst([...group.sessions])[0] || null;
+    const recordExercise = currentDefinition?.name || newestSession?.exercise || group.exercise;
+    const rows = group.sessions.flatMap((workout) => setRowsFromWorkout(workout).map((row, index) => ({ workout, row, index, date: workout.date, exercise: recordExercise })));
+    const sessions = group.sessions.map((workout) => ({ workout, date: workout.date, exercise: recordExercise, value: workoutVolume(workout) }));
+    const meta = currentDefinition || workoutMeta(newestSession || {});
     return {
-      exercise: group.exercise,
+      exercise: recordExercise,
       exerciseId: group.exerciseId,
       primaryMuscles: [...(meta.primaryMuscles || [])],
       sessionCount: group.sessions.length,
@@ -7588,10 +7594,12 @@ function miniSparkline(points, color = "#35d58c") {
   const values = points.map((point) => point.value);
   const min = Math.min(...values);
   const max = Math.max(...values);
-  const range = max - min || 1;
+  const flat = max === min;
+  const range = flat ? 1 : max - min;
+  // Center flat and single-point histories so they read as stable instead of appearing pinned low.
   const coords = points.map((point, index) => {
-    const x = 6 + (index / Math.max(points.length - 1, 1)) * 88;
-    const y = 82 - ((point.value - min) / range) * 64;
+    const x = points.length === 1 ? 50 : 6 + (index / (points.length - 1)) * 88;
+    const y = flat ? 50 : 82 - ((point.value - min) / range) * 64;
     return `${x},${y}`;
   }).join(" ");
   return `
@@ -9313,7 +9321,45 @@ function animateCollapsiblePanel(panel, opening) {
 }
 
 function initializeCollapsiblePanels(root = els.app) {
-  root.querySelectorAll(COLLAPSIBLE_SELECTOR).forEach((panel) => ensureCollapseContent(panel));
+  root.querySelectorAll(COLLAPSIBLE_SELECTOR).forEach((panel) => {
+    const rememberedOpen = rememberedCollapsiblePanelState(panel);
+    if (typeof rememberedOpen === "boolean") panel.open = rememberedOpen;
+    ensureCollapseContent(panel);
+  });
+}
+
+// Build a stable session key from explicit data first, then the panel's screen, classes, and summary label.
+function collapsiblePanelStateKey(panel) {
+  if (!panel || panel.matches?.("details[data-settings-panel]")) return "";
+  const explicit = String(panel.dataset?.collapseKey || panel.dataset?.dashboardWidget || panel.dataset?.muscle || "").trim();
+  const ignoredClasses = new Set(["section", "card", "chart-panel", "form-panel", "collapsible-panel", "coverage-row", "inline-disclosure", "collapse-enhanced"]);
+  const classes = [...(panel.classList || [])]
+    .filter((name) => !ignoredClasses.has(name) && !name.startsWith("is-"))
+    .sort()
+    .join(".");
+  const summary = panel.querySelector?.(":scope > summary");
+  const summaryLabel = summary?.querySelector?.("span")?.textContent || summary?.textContent || "";
+  const identity = explicit || classes || normalizeName(summaryLabel);
+  return identity ? `${state.activeTab}:${identity}` : "";
+}
+
+// Read non-Settings collapse state without overriding the template's default on a panel's first render.
+function rememberedCollapsiblePanelState(panel) {
+  const key = collapsiblePanelStateKey(panel);
+  if (!key || !Object.prototype.hasOwnProperty.call(state.collapsiblePanelOpenState || {}, key)) return null;
+  return Boolean(state.collapsiblePanelOpenState[key]);
+}
+
+// Record the requested state before animation so any intervening render preserves the user's intent.
+function rememberCollapsiblePanelState(panel, open) {
+  if (!panel) return;
+  if (panel.matches?.("details[data-settings-panel]")) {
+    setSettingsPanelOpen(panel.dataset?.settingsPanel || "", open);
+    return;
+  }
+  const key = collapsiblePanelStateKey(panel);
+  if (!key) return;
+  state.collapsiblePanelOpenState = { ...(state.collapsiblePanelOpenState || {}), [key]: Boolean(open) };
 }
 
 function handleCollapsibleSummaryClick(event) {
@@ -9325,6 +9371,7 @@ function handleCollapsibleSummaryClick(event) {
   event.preventDefault();
   const pendingTarget = panel.dataset.collapseTarget;
   const opening = pendingTarget ? pendingTarget !== "true" : !panel.open;
+  rememberCollapsiblePanelState(panel, opening);
   playUiCue(opening ? "expand" : "collapse");
   animateCollapsiblePanel(panel, opening);
 }
@@ -10681,6 +10728,52 @@ async function removeSyncQueueEntry(id) {
   state.syncQueue = state.syncQueue.filter((entry) => entry.id !== id);
 }
 
+// Compare the full local queue version so a completed upload cannot delete a newer same-ID edit.
+function syncQueueEntryMatchesAttempt(current, attempted) {
+  if (!current || !attempted || current.id !== attempted.id) return false;
+  return String(current.updatedAt || "") === String(attempted.updatedAt || "")
+    && Number(current.baseRevision || 0) === Number(attempted.baseRevision || 0)
+    && Boolean(current.deleted) === Boolean(attempted.deleted)
+    && syncPayloadFingerprint(current.payload, Boolean(current.deleted)) === syncPayloadFingerprint(attempted.payload, Boolean(attempted.deleted));
+}
+
+// Settle one upload atomically: delete its exact queue version or retain and rebase a newer local version.
+async function settlePushedSyncQueueEntry(attempted, remoteRevision = 0) {
+  let removed = false;
+  let retained = null;
+  let retainedBeforeRebase = null;
+  await runStoreTransaction(["syncQueue"], "readwrite", (stores) => {
+    const request = stores.syncQueue.get(attempted.id);
+    request.onsuccess = () => {
+      const current = request.result;
+      if (syncQueueEntryMatchesAttempt(current, attempted)) {
+        stores.syncQueue.delete(attempted.id);
+        removed = true;
+        return;
+      }
+      if (current) {
+        retainedBeforeRebase = current;
+        retained = {
+          ...current,
+          baseRevision: Math.max(Number(current.baseRevision) || 0, Number(remoteRevision) || 0),
+          status: "pending",
+          remoteRecord: null
+        };
+        stores.syncQueue.put(retained);
+      }
+    };
+  });
+  const inMemory = state.syncQueue.find((entry) => entry.id === attempted.id);
+  if (removed && syncQueueEntryMatchesAttempt(inMemory, attempted)) {
+    state.syncQueue = state.syncQueue.filter((entry) => entry.id !== attempted.id);
+  } else if (retained && syncQueueEntryMatchesAttempt(inMemory, retained)) {
+    state.syncQueue = [...state.syncQueue.filter((entry) => entry.id !== retained.id), retained];
+  } else if (retained && inMemory && syncQueueEntryMatchesAttempt(inMemory, retainedBeforeRebase)) {
+    state.syncQueue = [...state.syncQueue.filter((entry) => entry.id !== retained.id), retained];
+  }
+  return removed;
+}
+
 function shouldQueueRecordSync() {
   return Boolean(state.settings.supabaseUrl || Number(state.settings.syncBootstrapVersion) >= SYNC_BOOTSTRAP_VERSION);
 }
@@ -10888,7 +10981,7 @@ async function flushRecordSyncQueue(config) {
     if (!remote) throw new Error("Cloud sync returned no saved record.");
     await saveSyncRecordMeta(entry.recordType, entry.recordId, remote.revision, entry.payload, entry.deleted);
     await updateSyncCursor([remote]);
-    await removeSyncQueueEntry(entry.id);
+    await settlePushedSyncQueueEntry(entry, remote.revision);
   }
 }
 

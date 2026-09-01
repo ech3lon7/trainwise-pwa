@@ -197,9 +197,9 @@ assert(!appCode.includes('selectedExercise: "Push-up"'), "Expected Log startup n
 assert(!appCode.includes('showBanner("Unsaved draft restored."'), "Expected startup draft recovery not to show a top banner.");
 assert(appCode.includes("notifyMetricSaved"), "Expected metrics saves to use a dedicated bottom-only notification helper.");
 assert(!stylesCode.includes(".mobile-quick-toggle"), "Expected floating quick action button styling to be removed.");
-assert(indexCode.includes("v=1.5.92"), "Expected index shell references to use bumped app version.");
+assert(indexCode.includes("v=1.5.93"), "Expected index shell references to use bumped app version.");
 assert(!indexCode.includes('id="app" class="app-content" aria-live'), "Expected broad app aria-live to be removed in favor of targeted live regions.");
-assert(serviceWorkerCode.includes("trainwise-cache-v114"), "Expected service worker cache version bump.");
+assert(serviceWorkerCode.includes("trainwise-cache-v115"), "Expected service worker cache version bump.");
 // The mobile tab bar must anchor to the visible bottom edge and compact only during active scrolling.
 assert(/\.tabbar\s*\{[^}]*top:\s*auto;[^}]*bottom:\s*env\(safe-area-inset-bottom\)/s.test(stylesCode), "Expected the tab bar to use a stable bottom safe-area anchor instead of a dynamic viewport top offset.");
 assert(stylesCode.includes(".tabbar.is-scrolling") && appCode.includes("updateTabbarScrollState"), "Expected the tab bar to shrink during scrolling and restore after scrolling stops.");
@@ -2828,5 +2828,75 @@ assert(!appCode.includes('await dbPutBatch("workouts", entries);'), "Expected wo
 assert(appCode.includes("await commitWorkoutDelete(target.dataset.id)"), "Expected workout deletion and its cloud tombstone to commit atomically.");
 assert(appCode.includes("await commitMetricDelete(ids, metricDate)"), "Expected nutrition deletion and its cloud tombstone to commit atomically.");
 assert(appCode.includes("await commitWorkoutRestore(restoredEntries, payload.savedEntryIds || [])"), "Expected workout Undo to restore local rows and sync state atomically.");
+
+// A completed upload may remove only the exact queue version it sent, never a newer local edit with the same record ID.
+const syncQueueVersionGuard = runScenario(`
+  var attempted = {
+    id: "metric:2026-06-22", recordType: "metric", recordId: "2026-06-22",
+    payload: { calories: 2200 }, deleted: false, baseRevision: 4, updatedAt: "2026-06-22T12:00:00.000Z"
+  };
+  ({
+    same: syncQueueEntryMatchesAttempt({ ...attempted, payload: { calories: 2200 } }, attempted),
+    newer: syncQueueEntryMatchesAttempt({ ...attempted, payload: { calories: 2350 }, updatedAt: "2026-06-22T12:00:01.000Z" }, attempted)
+  });
+`);
+
+assert.strictEqual(syncQueueVersionGuard.same, true, "Expected the exact uploaded queue version to be removable.");
+assert.strictEqual(syncQueueVersionGuard.newer, false, "Expected a newer same-ID queue version to survive completion of an older upload.");
+assert(appCode.includes("await settlePushedSyncQueueEntry(entry, remote.revision)"), "Expected record sync to settle queue entries with a compare-before-delete transaction.");
+
+// Collapse intent is stored immediately so rerenders and the delayed close animation cannot reopen the panel.
+const globalCollapseState = runScenario(`
+  state.activeTab = "exercises";
+  state.collapsiblePanelOpenState = {};
+  state.settingsOpenPanels = ["supabase-sync"];
+  var panel = {
+    dataset: { collapseKey: "exercise-database" },
+    matches(selector) { return selector === "details.collapsible-panel"; },
+    classList: [],
+    querySelector() { return null; }
+  };
+  var settingsPanel = {
+    dataset: { settingsPanel: "supabase-sync" },
+    matches(selector) { return selector === "details[data-settings-panel]"; },
+    classList: [],
+    querySelector() { return null; }
+  };
+  rememberCollapsiblePanelState(panel, false);
+  rememberCollapsiblePanelState(settingsPanel, false);
+  ({ panelOpen: rememberedCollapsiblePanelState(panel), settingsOpen: isSettingsPanelOpen("supabase-sync") });
+`);
+
+assert.strictEqual(globalCollapseState.panelOpen, false, "Expected a non-Settings collapsed panel to remain closed across rerenders.");
+assert.strictEqual(globalCollapseState.settingsOpen, false, "Expected Settings collapse intent to persist before the animation finishes.");
+
+// Exercise record groups prefer the current definition name while retaining historical sessions by stable ID.
+const renamedExerciseRecord = runScenario(`
+  ${reset}
+  state.settings.customExercises = [{
+    id: "rename-press", name: "Incline Dumbbell Press", primaryMuscles: ["chest"], secondaryMuscles: ["triceps"],
+    equipment: "dumbbells", reps: "8-15", rest: "90-180 sec"
+  }];
+  state.workouts = [
+    makeWorkout({ id: "new-name", date: "2026-06-15", exerciseId: "rename-press", exercise: "Incline Dumbbell Press" }),
+    makeWorkout({ id: "old-name", date: "2026-06-01", exerciseId: "rename-press", exercise: "Incline DB Press" })
+  ];
+  var record = allTimeRecords().exercises.find((entry) => entry.exerciseId === "rename-press");
+  ({ name: record.exercise, primaryMuscles: record.primaryMuscles });
+`);
+
+assert.strictEqual(renamedExerciseRecord.name, "Incline Dumbbell Press", "Expected Exercise Records to show the current library name after a rename.");
+assert.deepEqual(renamedExerciseRecord.primaryMuscles, ["chest"], "Expected renamed Exercise Records to use the current definition metadata.");
+
+// Flat and single-point history sparklines sit in the visual center instead of appearing as a bottom-edge decline.
+const centeredMiniSparklines = runScenario(`
+  ({
+    single: miniSparkline([{ value: 100 }]),
+    flat: miniSparkline([{ value: 100 }, { value: 100 }])
+  });
+`);
+
+assert(centeredMiniSparklines.single.includes('points="50,50"'), "Expected a single-point sparkline marker to be centered.");
+assert(centeredMiniSparklines.flat.includes('points="6,50 94,50"'), "Expected a flat sparkline to be centered vertically.");
 
 console.log("log regression tests passed");
