@@ -2623,6 +2623,67 @@ assert(!weeklyExactDays.markup.includes("allocated"), "Expected the distribution
 assert(weeklyExactDays.markup.includes("banked") && weeklyExactDays.markup.includes("projected") && weeklyExactDays.markup.includes("target"), "Expected the distribution to expose one coherent committed plan summary.");
 assert(!appCode.includes("coachWeeklyAdjustmentOptions") && !appCode.includes("Coach adjustment"), "Expected the competing adjustment advisor plan source to be retired.");
 
+// Generated weekly credits must become the committed fader targets so the equalizer and distribution cannot disagree.
+const weeklyGeneratedTargetsBecomeAuthoritative = runScenario(`
+  ${resetAndHelpers}
+  var requestedTargets = Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, muscle.id === "shoulders" ? 20 : muscle.id === "back" ? 12.8 : 10]));
+  var setup = normalizeCoachWeeklyPlan({ days: [1, 2, 4, 5, 6], averageMinutes: 75, priorities: ["shoulders"], targets: requestedTargets });
+  var projected = Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, muscle.id === "shoulders" ? 18 : muscle.id === "back" ? 14 : 10]));
+  var generated = {
+    setup,
+    sessions: [],
+    actualStats: muscleGroups.map((muscle) => ({ ...muscle, sets: 0 })),
+    projected,
+    setBudgets: requestedTargets,
+    missing: [],
+    attainment: coachWeeklyAttainment(setup, projected),
+    capacity: { totalMinutes: 375, estimatedSetCapacity: 120, allocatedSetCapacity: 120, requestedSets: 120, fits: false, message: "Requested targets did not all fit." }
+  };
+  var finalized = finalizeCoachWeeklyGeneratedPlan(setup, generated);
+  ({
+    shoulderTarget: finalized.setup.targets.shoulders,
+    shoulderProjected: finalized.projected.shoulders,
+    backTarget: finalized.setup.targets.back,
+    backProjected: finalized.projected.back,
+    unmet: finalized.attainment.unmet.length,
+    adjustments: finalized.targetAdjustments,
+    markup: renderCoachWeekDistribution(finalized)
+  });
+`);
+
+assert.strictEqual(weeklyGeneratedTargetsBecomeAuthoritative.shoulderTarget, 18, "Expected an unschedulable 20-set Shoulder request to commit the generated 18-set target.");
+assert.strictEqual(weeklyGeneratedTargetsBecomeAuthoritative.shoulderProjected, 18, "Expected the committed Shoulder target and projection to agree.");
+assert.strictEqual(weeklyGeneratedTargetsBecomeAuthoritative.backTarget, 14, "Expected incidental secondary stimulus to be reflected in the committed Back target.");
+assert.strictEqual(weeklyGeneratedTargetsBecomeAuthoritative.backProjected, 14, "Expected the committed Back target and projection to agree.");
+assert.strictEqual(weeklyGeneratedTargetsBecomeAuthoritative.unmet, 0, "Expected a committed generated plan to contain no target/display shortfalls.");
+assert(weeklyGeneratedTargetsBecomeAuthoritative.adjustments.some((item) => item.id === "shoulders" && item.requested === 20 && item.committed === 18), "Expected the Shoulder adjustment to remain explainable.");
+assert(weeklyGeneratedTargetsBecomeAuthoritative.markup.includes("18 projected / 18 target"), "Expected Weekly distribution to render the same Shoulder values as the committed fader.");
+
+// An impossible floor remains a hard error rather than being relabeled as a feasible lower target.
+const weeklyGeneratedTargetsProtectFloor = runScenario(`
+  ${resetAndHelpers}
+  var setup = normalizeCoachWeeklyPlan({ days: [3], averageMinutes: 30, targets: Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, 10])) });
+  var projected = Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, muscle.id === "chest" ? 8 : 10]));
+  var generated = {
+    setup,
+    sessions: [],
+    actualStats: muscleGroups.map((muscle) => ({ ...muscle, sets: 0 })),
+    projected,
+    setBudgets: setup.targets,
+    missing: [],
+    attainment: coachWeeklyAttainment(setup, projected),
+    capacity: { totalMinutes: 30, estimatedSetCapacity: 20, allocatedSetCapacity: 20, requestedSets: 100, fits: false, message: "Floor shortfall." }
+  };
+  try {
+    finalizeCoachWeeklyGeneratedPlan(setup, generated);
+    "no error";
+  } catch (error) {
+    error.message;
+  }
+`);
+
+assert(weeklyGeneratedTargetsProtectFloor.includes("10-set floor") && weeklyGeneratedTargetsProtectFloor.includes("Chest"), `Expected an impossible floor to block generation with a precise explanation, got: ${weeklyGeneratedTargetsProtectFloor}`);
+
 // Fader previews must survive unrelated renders, use muscle artwork, and report live remaining capacity.
 const weeklyFaderStability = runScenario(`
   ${resetAndHelpers}

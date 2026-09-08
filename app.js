@@ -3,7 +3,7 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 3;
 const STORES = ["workouts", "metrics", "settings", "syncQueue"];
-const APP_VERSION = "1.5.93";
+const APP_VERSION = "1.5.94";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 const DRAFT_RECOVERY_KEY = "trainwise-draft-recovery-v1";
 const DATED_STRENGTH_DRAFTS_KEY = "trainwise-strength-drafts-by-date-v1";
@@ -5171,6 +5171,53 @@ function coachWeeklyAttainment(setup, projected = {}) {
   };
 }
 
+// Commit the generated credit totals as the feasible fader targets while keeping every 10-set floor non-negotiable.
+function finalizeCoachWeeklyGeneratedPlan(setupInput, generatedPlan) {
+  const requestedSetup = normalizeCoachWeeklyPlan(setupInput);
+  const projected = Object.fromEntries(muscleGroups.map((muscle) => [
+    muscle.id,
+    Math.round(Math.max(0, Number(generatedPlan.projected?.[muscle.id]) || 0) * 10) / 10
+  ]));
+  const floorUnmet = muscleGroups.filter((muscle) => projected[muscle.id] + 0.001 < HYPERTROPHY.minimumSets);
+  if (floorUnmet.length) {
+    throw new Error(`Coach cannot safely generate the 10-set floor for ${floorUnmet.map((muscle) => muscle.label).join(", ")}. Add a selected training day or increase the average workout time.`);
+  }
+  const targets = Object.fromEntries(muscleGroups.map((muscle) => [
+    muscle.id,
+    Math.min(30, Math.max(HYPERTROPHY.minimumSets, projected[muscle.id]))
+  ]));
+  const setup = normalizeCoachWeeklyPlan({ ...requestedSetup, targets, generatedPlan: null });
+  const targetAdjustments = muscleGroups
+    .map((muscle) => ({
+      id: muscle.id,
+      label: muscle.label,
+      requested: requestedSetup.targets[muscle.id],
+      committed: targets[muscle.id]
+    }))
+    .filter((item) => Math.abs(item.requested - item.committed) > 0.001);
+  const actual = Object.fromEntries((generatedPlan.actualStats || []).map((stat) => [stat.id, Number(stat.sets) || 0]));
+  const requestedSets = muscleGroups.reduce((sum, muscle) => sum + Math.max(0, targets[muscle.id] - (actual[muscle.id] || 0)), 0);
+  const attainment = coachWeeklyAttainment(setup, projected);
+  return {
+    ...generatedPlan,
+    setup,
+    projected,
+    setBudgets: clonePlain(targets),
+    missing: [],
+    attainment,
+    targetAdjustments,
+    capacity: {
+      ...generatedPlan.capacity,
+      allocatedSetCapacity: requestedSets,
+      requestedSets,
+      fits: true,
+      message: targetAdjustments.length
+        ? `Coach adjusted ${targetAdjustments.length} target${targetAdjustments.length === 1 ? "" : "s"} to the exact credits the generated schedule can deliver.`
+        : "Coach scheduled every requested weekly target."
+    }
+  };
+}
+
 // Use remaining session time to finish weekly targets through exercises already placed on that day.
 function topUpCoachWeeklySessionSets(sessions, projected, setBudgets, setup) {
   const plannedSessions = sessions.filter((session) => session.status === "planned" && session.items.length);
@@ -5508,6 +5555,9 @@ function buildCoachWeeklyPlan(setupInput = selectedCoachWeeklyPlan()) {
   });
 
   reconcileCoachSecondaryStimulus(sessions, projected, setBudgets);
+  // Re-run target repair because secondary-stimulus trimming can reopen a priority gap after the first repair pass.
+  topUpCoachWeeklySessionSets(sessions, projected, setBudgets, setup);
+  reallocateCoachWeeklyPriorityShortfalls(sessions, projected, setBudgets, setup, recoveryClearForDate);
   fillCoachWeeklySessionTime(sessions, projected, setup);
   plannedSessions.forEach((session) => {
     session.items = orderCoachSessionItems(session.items);
@@ -5575,7 +5625,8 @@ function compactCoachWeeklyPlanSnapshot(plan) {
     setBudgets: clonePlain(plan.setBudgets || {}),
     missingIds: plan.missing.map((muscle) => muscle.id),
     capacity: clonePlain(plan.capacity),
-    attainment: clonePlain(plan.attainment)
+    attainment: clonePlain(plan.attainment),
+    targetAdjustments: clonePlain(plan.targetAdjustments || [])
   };
 }
 
@@ -5628,6 +5679,7 @@ function displayedCoachWeeklyPlan(setupInput = selectedCoachWeeklyPlan()) {
     missing: (snapshot.missingIds || []).map((id) => muscleGroups.find((muscle) => muscle.id === id)).filter(Boolean),
     capacity: clonePlain(snapshot.capacity || {}),
     attainment: clonePlain(snapshot.attainment || {}),
+    targetAdjustments: clonePlain(snapshot.targetAdjustments || []),
     stale: invalidExercise || !setup.sourceFingerprint || setup.sourceFingerprint !== currentFingerprint
   };
 }
@@ -8508,6 +8560,13 @@ function renderCoachWeekDay(session) {
   `;
 }
 
+// Summarize only the targets changed by generation so automatic feasibility adjustments remain transparent.
+function coachWeeklyTargetAdjustmentMessage(adjustments = []) {
+  const visible = adjustments.slice(0, 4).map((item) => `${item.label} ${fmt(item.requested, 1)} to ${fmt(item.committed, 1)}`);
+  const remainder = Math.max(0, adjustments.length - visible.length);
+  return `${visible.join(", ")}${remainder ? `, and ${remainder} more` : ""}.`;
+}
+
 function renderCoachWeek() {
   const setup = selectedCoachWeeklyPlan();
   const plan = displayedCoachWeeklyPlan(setup);
@@ -8524,6 +8583,7 @@ function renderCoachWeek() {
       </form>
     </details>
     ${plan.stale ? `<section class="section coach-week-capacity warn"><strong>Weekly plan uses earlier information</strong><p>Inputs, submitted workouts, loading styles, or the active exercise library changed. Valid planned days can still be copied; Generate when you want Coach to recalculate the week.</p></section>` : ""}
+    ${plan.targetAdjustments?.length ? `<section class="section coach-week-capacity warn"><strong>Targets adjusted to the generated schedule</strong><p>${escapeHtml(coachWeeklyTargetAdjustmentMessage(plan.targetAdjustments))}</p></section>` : ""}
     <section class="section coach-week-capacity ${plan.capacity.fits ? "good" : "warn"}"><strong>${plan.capacity.fits ? "All weekly targets are planned" : "Some weekly targets cannot be planned"}</strong><p>${escapeHtml(plan.capacity.message)}</p></section>
     <details class="section chart-panel collapsible-panel" open><summary><span>Weekly distribution</span><small>${escapeHtml(coachWeekScheduleSummary(plan.setup))}</small></summary>${renderCoachWeekDistribution(plan)}</details>
     <section class="section coach-week-days">${plan.sessions.map(renderCoachWeekDay).join("")}</section>
@@ -8533,9 +8593,10 @@ function renderCoachWeek() {
 async function commitCoachWeeklyPlan(setupInput, message) {
   // Reject an empty explicit schedule so Generate never restores a weekday the user turned off.
   if (!Array.isArray(setupInput?.days) || !setupInput.days.length) throw new Error("Select at least one training day.");
-  const setup = normalizeCoachWeeklyPlan({ ...setupInput, generatedAt: new Date().toISOString(), generatedPlan: null, sourceFingerprint: "" });
+  const requestedSetup = normalizeCoachWeeklyPlan({ ...setupInput, generatedAt: new Date().toISOString(), generatedPlan: null, sourceFingerprint: "" });
+  const generatedPlan = finalizeCoachWeeklyGeneratedPlan(requestedSetup, buildCoachWeeklyPlan(requestedSetup));
+  const setup = normalizeCoachWeeklyPlan({ ...generatedPlan.setup, generatedAt: requestedSetup.generatedAt, generatedPlan: null, sourceFingerprint: "" });
   const sourceFingerprint = coachWeeklySourceFingerprint(setup);
-  const generatedPlan = buildCoachWeeklyPlan(setup);
   const committed = normalizeCoachWeeklyPlan({
     ...setup,
     sourceFingerprint,
