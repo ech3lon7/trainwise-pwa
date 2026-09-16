@@ -8,12 +8,14 @@ create table if not exists public.fitness_snapshots (
 
 alter table public.fitness_snapshots enable row level security;
 
+drop policy if exists "fitness_snapshots_insert_own" on public.fitness_snapshots;
 create policy "fitness_snapshots_insert_own"
 on public.fitness_snapshots
 for insert
 to authenticated
 with check (auth.uid() = user_id);
 
+drop policy if exists "fitness_snapshots_select_own" on public.fitness_snapshots;
 create policy "fitness_snapshots_select_own"
 on public.fitness_snapshots
 for select
