@@ -2506,6 +2506,25 @@ assert(weeklyAttainmentWarning.priorityMet < weeklyAttainmentWarning.priorityTot
 assert(weeklyAttainmentWarning.message.includes("Floors planned:") && weeklyAttainmentWarning.message.includes("Priority targets planned:"), "Expected weekly status to report floor and priority-target attainability.");
 assert(weeklyAttainmentWarning.markup.includes("Some weekly targets cannot be planned"), "Expected Coach Week UI to clearly warn when the generated schedule misses targets.");
 
+// Over-capacity quick picks must still allow incremental reductions without moving other targets.
+const overCapacityReductions = JSON.parse(runScenario(`
+  ${resetAndHelpers}
+  var targets = Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, 15]));
+  var results = [];
+  for (var requested of [14, 12, 5]) {
+    var result = rebalanceWeeklyTargets({ setup: normalizeCoachWeeklyPlan({ targets, priorities: ["chest"] }), draggedMuscleId: "chest", requestedRemaining: requested, remainingCapacity: 60 });
+    results.push(result);
+    targets = result.targets;
+  }
+  var bankedReduction = rebalanceWeeklyTargets({ setup: normalizeCoachWeeklyPlan({ targets: { ...targets, chest: 20 } }), draggedMuscleId: "chest", requestedRemaining: 3, bankedSets: { chest: 12 }, remainingCapacity: 0 });
+  JSON.stringify({ results, bankedReduction });
+`));
+assert.deepStrictEqual(overCapacityReductions.results.map((result) => result.denied), [false, false, false]);
+assert.deepStrictEqual(overCapacityReductions.results.map((result) => result.targets.chest), [14, 12, 10]);
+assert(overCapacityReductions.results.every((result) => result.targets.back === 15 && result.bleed.priority.length === 0 && result.bleed.nonPriority.length === 0));
+assert.strictEqual(overCapacityReductions.bankedReduction.targets.chest, 15);
+assert.strictEqual(overCapacityReductions.bankedReduction.denied, false);
+
 // The equalizer must clamp floors and debit non-priorities before other priorities.
 const weeklyEqualizer = runScenario(`
   ${resetAndHelpers}

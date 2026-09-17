@@ -3,7 +3,7 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 3;
 const STORES = ["workouts", "metrics", "settings", "syncQueue"];
-const APP_VERSION = "1.5.97";
+const APP_VERSION = "1.5.98";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 const DRAFT_RECOVERY_KEY = "trainwise-draft-recovery-v1";
 const DATED_STRENGTH_DRAFTS_KEY = "trainwise-strength-drafts-by-date-v1";
@@ -5287,6 +5287,16 @@ function rebalanceWeeklyTargets({ setup: setupInput, draggedMuscleId, requestedR
     return [muscle.id, Math.min(maximums[muscle.id], Math.max(floors[muscle.id], current))];
   }));
   const originalTargets = clonePlain(setup.targets);
+  // Allow incremental reductions even when the remaining week cannot accommodate every floor.
+  const requested = Math.min(maximums[draggedMuscleId], Math.max(floors[draggedMuscleId], Number(requestedRemaining) || 0));
+  if (requested < remaining[draggedMuscleId]) {
+    return {
+      targets: { ...originalTargets, [draggedMuscleId]: Math.round((banked[draggedMuscleId] + requested) * 10) / 10 },
+      bleed: { nonPriority: [], priority: [] },
+      denied: false,
+      reason: ""
+    };
+  }
   const capacity = Math.max(0, Number(remainingCapacity) || 0);
   const minimumDemand = Object.values(floors).reduce((sum, value) => sum + value, 0);
   if (minimumDemand > capacity + 0.001) {
@@ -12412,7 +12422,8 @@ async function handleAction(action, target) {
       const context = markCoachWeekFormDirty(form);
       const requestedTargets = Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, Math.max(requestedTarget, context.bankedSets[muscle.id] || 0)]));
       updateCoachWeekMixerDom(form, requestedTargets, context.bankedSets, { nonPriority: [], priority: [] }, "");
-      const fittedContext = coachWeekMixerFormContext(form);
+      // Retain the quick pick and refresh its capacity warning even when automatic fitting is denied.
+      const fittedContext = markCoachWeekFormDirty(form);
       const result = autoFitCoachWeekForm(form, fittedContext);
       toast(result.denied ? result.reason : result.adjusted ? `All ${requestedTarget} exceeded current capacity, so Coach protected floors and priorities.` : `All weekly targets set to ${requestedTarget}.`);
     },
