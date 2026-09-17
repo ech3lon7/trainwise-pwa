@@ -2623,8 +2623,56 @@ assert(!weeklyExactDays.markup.includes("allocated"), "Expected the distribution
 assert(weeklyExactDays.markup.includes("banked") && weeklyExactDays.markup.includes("projected") && weeklyExactDays.markup.includes("target"), "Expected the distribution to expose one coherent committed plan summary.");
 assert(!appCode.includes("coachWeeklyAdjustmentOptions") && !appCode.includes("Coach adjustment"), "Expected the competing adjustment advisor plan source to be retired.");
 
-// Generated weekly credits must become the committed fader targets so the equalizer and distribution cannot disagree.
-const weeklyGeneratedTargetsBecomeAuthoritative = runScenario(`
+// High-confidence singular/plural duplicates must be surfaced and cannot occupy two slots in one generated session.
+const weeklyExerciseDefinitionConflict = runScenario(`
+  ${resetAndHelpers}
+  var singularCurl = {
+    id: "hamstring-curl-singular",
+    name: "Hamstring Dumbell Curl",
+    primaryMuscles: ["hamstrings"],
+    secondaryMuscles: [],
+    equipment: "Dumbell",
+    reps: "20-30",
+    loadingStyle: "high-rep",
+    exerciseType: "isolation",
+    rest: "35 sec",
+    userCreated: true
+  };
+  var pluralCurl = {
+    id: "hamstring-curl-plural",
+    name: "Hamstring Dumbell Curls",
+    primaryMuscles: ["glutes"],
+    secondaryMuscles: [],
+    equipment: "Dumbell",
+    reps: "20-30",
+    loadingStyle: "high-rep",
+    exerciseType: "isolation",
+    rest: "35 sec",
+    userCreated: true
+  };
+  state.settings.customExercises = state.settings.customExercises
+    .filter((exercise) => !["custom-hamstrings", "custom-glutes"].includes(exercise.id))
+    .concat([singularCurl, pluralCurl]);
+  state.workouts = muscleGroups
+    .filter((muscle) => !["hamstrings", "glutes"].includes(muscle.id))
+    .map((muscle) => makeWorkout(muscle, 2, 10));
+  var targets = Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, 10]));
+  var plan = buildCoachWeeklyPlan(normalizeCoachWeeklyPlan({ days: [3], averageMinutes: 75, priorities: ["hamstrings", "glutes"], targets }));
+  var plannedConflictIds = plan.sessions
+    .flatMap((session) => session.items)
+    .map((item) => item.exercise.id)
+    .filter((id) => [singularCurl.id, pluralCurl.id].includes(id));
+  var conflicts = coachExerciseDefinitionConflicts();
+  ({ plannedConflictIds, conflicts, markup: renderCoachWeek() });
+`);
+
+assert.strictEqual(weeklyExerciseDefinitionConflict.conflicts.length, 1, "Expected the singular/plural Hamstring Curl definitions to be reported as one conflict.");
+assert.deepEqual(weeklyExerciseDefinitionConflict.conflicts[0].exerciseIds.sort(), ["hamstring-curl-plural", "hamstring-curl-singular"], "Expected the conflict to identify both stored exercise IDs.");
+assert(weeklyExerciseDefinitionConflict.plannedConflictIds.length <= 1, `Expected one session not to schedule both conflicting definitions, got ${weeklyExerciseDefinitionConflict.plannedConflictIds.join(", ")}.`);
+assert(weeklyExerciseDefinitionConflict.markup.includes("Exercise library conflict") && weeklyExerciseDefinitionConflict.markup.includes("Hamstring Dumbell Curl"), "Expected Coach Week to surface the exercise-library conflict for review.");
+
+// Generate must preserve requested fader targets while reporting the independently scheduled projection.
+const weeklyGeneratedTargetsRemainRequested = runScenario(`
   ${resetAndHelpers}
   var requestedTargets = Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, muscle.id === "shoulders" ? 20 : muscle.id === "back" ? 12.8 : 10]));
   var setup = normalizeCoachWeeklyPlan({ days: [1, 2, 4, 5, 6], averageMinutes: 75, priorities: ["shoulders"], targets: requestedTargets });
@@ -2647,17 +2695,190 @@ const weeklyGeneratedTargetsBecomeAuthoritative = runScenario(`
     backProjected: finalized.projected.back,
     unmet: finalized.attainment.unmet.length,
     adjustments: finalized.targetAdjustments,
+    fits: finalized.capacity.fits,
+    message: finalized.capacity.message,
     markup: renderCoachWeekDistribution(finalized)
   });
 `);
 
-assert.strictEqual(weeklyGeneratedTargetsBecomeAuthoritative.shoulderTarget, 18, "Expected an unschedulable 20-set Shoulder request to commit the generated 18-set target.");
-assert.strictEqual(weeklyGeneratedTargetsBecomeAuthoritative.shoulderProjected, 18, "Expected the committed Shoulder target and projection to agree.");
-assert.strictEqual(weeklyGeneratedTargetsBecomeAuthoritative.backTarget, 14, "Expected incidental secondary stimulus to be reflected in the committed Back target.");
-assert.strictEqual(weeklyGeneratedTargetsBecomeAuthoritative.backProjected, 14, "Expected the committed Back target and projection to agree.");
-assert.strictEqual(weeklyGeneratedTargetsBecomeAuthoritative.unmet, 0, "Expected a committed generated plan to contain no target/display shortfalls.");
-assert(weeklyGeneratedTargetsBecomeAuthoritative.adjustments.some((item) => item.id === "shoulders" && item.requested === 20 && item.committed === 18), "Expected the Shoulder adjustment to remain explainable.");
-assert(weeklyGeneratedTargetsBecomeAuthoritative.markup.includes("18 projected / 18 target"), "Expected Weekly distribution to render the same Shoulder values as the committed fader.");
+assert.strictEqual(weeklyGeneratedTargetsRemainRequested.shoulderTarget, 20, "Expected Generate to preserve the requested 20-set Shoulder target.");
+assert.strictEqual(weeklyGeneratedTargetsRemainRequested.shoulderProjected, 18, "Expected the generated Shoulder projection to remain independently visible.");
+assert.strictEqual(weeklyGeneratedTargetsRemainRequested.backTarget, 12.8, "Expected incidental Back stimulus not to rewrite its requested target.");
+assert.strictEqual(weeklyGeneratedTargetsRemainRequested.backProjected, 14, "Expected incidental Back stimulus to remain visible in the projection.");
+assert.strictEqual(weeklyGeneratedTargetsRemainRequested.unmet, 1, "Expected the generated plan to retain the real Shoulder shortfall.");
+assert.deepEqual(weeklyGeneratedTargetsRemainRequested.adjustments, [], "Expected Generate not to create automatic fader adjustments.");
+assert.strictEqual(weeklyGeneratedTargetsRemainRequested.fits, false, "Expected capacity status to retain the generated schedule shortfall.");
+assert.strictEqual(weeklyGeneratedTargetsRemainRequested.message, "Requested targets did not all fit.", "Expected Generate to retain the schedule's truthful capacity explanation.");
+assert(weeklyGeneratedTargetsRemainRequested.markup.includes("18 projected / 20 target"), "Expected Weekly distribution to distinguish projected and requested Shoulder values.");
+
+// The reported 97-credit estimate must not reopen nine phantom credits after an 88.05-credit schedule is generated.
+const weeklyReportedCapacityMismatch = runScenario(`
+  ${resetAndHelpers}
+  var actual = { chest: 6, back: 12.5, shoulders: 8.5, biceps: 7.5, triceps: 5, quads: 7, hamstrings: 9.5, glutes: 7.25, calves: 7, abs: 13 };
+  var requestedTargets = { chest: 20, back: 16.9, shoulders: 20, biceps: 20, triceps: 20, quads: 15.8, hamstrings: 15.8, glutes: 15.8, calves: 15.8, abs: 20 };
+  var projected = { chest: 20, back: 16, shoulders: 20.5, biceps: 20.5, triceps: 20, quads: 16, hamstrings: 12.5, glutes: 12.75, calves: 13, abs: 20 };
+  var setup = normalizeCoachWeeklyPlan({ days: [1, 2, 4, 5, 6], averageMinutes: 75, priorities: ["chest", "shoulders", "biceps", "triceps", "abs"], targets: requestedTargets });
+  var generated = {
+    setup,
+    sessions: [],
+    actualStats: muscleGroups.map((muscle) => ({ ...muscle, sets: actual[muscle.id] || 0 })),
+    projected,
+    setBudgets: requestedTargets,
+    missing: [],
+    attainment: coachWeeklyAttainment(setup, projected),
+    capacity: { totalMinutes: 225, estimatedSetCapacity: 97, allocatedSetCapacity: 88.05, requestedSets: 96.85, fits: false, message: "Generated sessions are full before every requested target is reached." }
+  };
+  var finalized = finalizeCoachWeeklyGeneratedPlan(setup, generated);
+  var progress = coachWeekCapacityProgress(finalized.setup, actual, 97);
+  ({ targets: finalized.setup.targets, projected: finalized.projected, fits: finalized.capacity.fits, message: finalized.capacity.message, available: progress.available });
+`);
+
+assert.deepEqual(weeklyReportedCapacityMismatch.targets, {
+  chest: 20,
+  back: 16.9,
+  shoulders: 20,
+  biceps: 20,
+  triceps: 20,
+  quads: 15.8,
+  hamstrings: 15.8,
+  glutes: 15.8,
+  calves: 15.8,
+  abs: 20
+}, "Expected the report's requested targets to survive Generate unchanged.");
+assert.strictEqual(weeklyReportedCapacityMismatch.fits, false, "Expected the generated schedule shortfall to remain visible.");
+assert.strictEqual(weeklyReportedCapacityMismatch.message, "Generated sessions are full before every requested target is reached.", "Expected the generated schedule explanation to survive finalization.");
+assert(weeklyReportedCapacityMismatch.available < 0.2, `Expected no reopened nine-credit gap, got ${weeklyReportedCapacityMismatch.available}.`);
+
+// Bounded repair must keep neutral/intermediate states long enough to repack protected floor work around a priority target.
+const weeklyBoundedRepairRepacking = runScenario(`
+  ${resetAndHelpers}
+  var makeExercise = (id, muscleId) => ({
+    id,
+    name: id,
+    primaryMuscles: [muscleId],
+    secondaryMuscles: [],
+    equipment: "cable",
+    reps: "8-15",
+    rest: "60 sec",
+    exerciseType: "isolation",
+    loadingStyle: "standard",
+    userCreated: true
+  });
+  var floorIds = ["back", "shoulders", "biceps", "triceps", "quads", "hamstrings"];
+  var floorExercises = floorIds.map((muscleId) => makeExercise("floor-" + muscleId, muscleId));
+  var spareExercises = [0, 1, 2, 3, 4].map((index) => makeExercise("spare-" + index, "glutes"));
+  var chestExercise = makeExercise("priority-chest", "chest");
+  state.settings.customExercises = [...floorExercises, ...spareExercises, chestExercise];
+  var muscle = (id) => muscleGroups.find((candidate) => candidate.id === id);
+  var item = (exercise, muscleId) => ({ muscle: muscle(muscleId), exercise, sets: 2, phase: "floor", growthMode: "medium", planTarget: { kind: "hold" } });
+  var sessions = [
+    { day: 4, date: "2026-06-18", status: "planned", submitted: [], items: floorExercises.map((exercise, index) => item(exercise, floorIds[index])), totalMinutes: 0 },
+    { day: 6, date: "2026-06-20", status: "planned", submitted: [], items: spareExercises.map((exercise) => item(exercise, "glutes")), totalMinutes: 0 }
+  ];
+  sessions.forEach((session) => { session.totalMinutes = plannedCoachSessionMinutes(session.items); });
+  var baseProjected = Object.fromEntries(muscleGroups.map((entry) => [entry.id, floorIds.includes(entry.id) || entry.id === "chest" ? 8 : 10]));
+  var targets = Object.fromEntries(muscleGroups.map((entry) => [entry.id, 10]));
+  var setup = normalizeCoachWeeklyPlan({ days: [4, 6], averageMinutes: 75, priorities: ["chest"], targets });
+  var optimized = optimizeCoachWeeklySchedule({
+    sessions,
+    baseProjected,
+    setup,
+    exercises: state.settings.customExercises,
+    lastDirect: {},
+    maxStates: 120,
+    recoveryClearForDate: (muscleId, date) => muscleId !== "chest" || date === "2026-06-18"
+  });
+  ({
+    projected: optimized.projected,
+    sessions: optimized.sessions.map((session) => ({ itemCount: session.items.length, minutes: session.totalMinutes })),
+    diagnostics: optimized.diagnostics
+  });
+`);
+
+assert.strictEqual(weeklyBoundedRepairRepacking.projected.chest, 10, "Expected bounded repair to place the missing two-set Chest priority block.");
+assert(["back", "shoulders", "biceps", "triceps", "quads", "hamstrings"].every((id) => weeklyBoundedRepairRepacking.projected[id] >= 10), "Expected the temporary repack not to sacrifice any protected floor.");
+assert(weeklyBoundedRepairRepacking.sessions.every((session) => session.itemCount <= 6 && session.minutes <= 78), "Expected the repaired schedule to preserve exercise and time limits.");
+assert(weeklyBoundedRepairRepacking.diagnostics.improved, "Expected diagnostics to record that bounded repair improved the greedy schedule.");
+assert(weeklyBoundedRepairRepacking.diagnostics.attemptedMoves > 0, "Expected bounded repair to report evaluated scheduling moves.");
+
+// Exercise swaps must compare full stimulus so a same-primary alternative can close a secondary floor gap.
+const weeklyBoundedRepairExerciseSelection = runScenario(`
+  ${resetAndHelpers}
+  var chestOnly = { id: "chest-only", name: "Chest Only", primaryMuscles: ["chest"], secondaryMuscles: [], equipment: "machine", reps: "8-15", rest: "60 sec", exerciseType: "isolation", loadingStyle: "standard", userCreated: true };
+  var chestTriceps = { id: "chest-triceps", name: "Chest Triceps", primaryMuscles: ["chest"], secondaryMuscles: ["triceps"], equipment: "machine", reps: "8-15", rest: "60 sec", exerciseType: "compound", loadingStyle: "standard", userCreated: true };
+  state.settings.customExercises = [chestOnly, chestTriceps];
+  var chest = muscleGroups.find((muscle) => muscle.id === "chest");
+  var sessions = [{
+    day: 4,
+    date: "2026-06-18",
+    status: "planned",
+    submitted: [],
+    items: [{ muscle: chest, exercise: chestOnly, sets: 2, phase: "floor", growthMode: "medium", planTarget: { kind: "hold" } }],
+    totalMinutes: 0
+  }];
+  sessions[0].totalMinutes = plannedCoachSessionMinutes(sessions[0].items);
+  var baseProjected = Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, muscle.id === "chest" ? 8 : muscle.id === "triceps" ? 9 : 10]));
+  var targets = Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, 10]));
+  var optimized = optimizeCoachWeeklySchedule({ sessions, baseProjected, setup: normalizeCoachWeeklyPlan({ days: [4], averageMinutes: 60, priorities: ["chest"], targets }), exercises: state.settings.customExercises, maxStates: 100 });
+  ({ exerciseId: optimized.sessions[0].items[0].exercise.id, projectedTriceps: optimized.projected.triceps, diagnostics: optimized.diagnostics });
+`);
+
+assert.strictEqual(weeklyBoundedRepairExerciseSelection.exerciseId, "chest-triceps", "Expected bounded repair to choose the Chest exercise that also closes the Triceps floor gap.");
+assert.strictEqual(weeklyBoundedRepairExerciseSelection.projectedTriceps, 10, "Expected the selected exercise's secondary stimulus to be recalculated in the repaired projection.");
+assert(weeklyBoundedRepairExerciseSelection.diagnostics.moveCounts["exercise-swap"] > 0, "Expected exercise-selection repair to remain visible in move diagnostics.");
+
+// Unresolved targets must retain a concrete bounded-search reason instead of a generic impossibility claim.
+const weeklyBoundedRepairDiagnostics = runScenario(`
+  ${resetAndHelpers}
+  var backOnly = { id: "back-only", name: "Back Only", primaryMuscles: ["back"], secondaryMuscles: [], equipment: "cable", reps: "8-15", rest: "60 sec", exerciseType: "isolation", loadingStyle: "standard", userCreated: true };
+  state.settings.customExercises = [backOnly];
+  var baseProjected = Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, muscle.id === "chest" ? 8 : 10]));
+  var targets = Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, 10]));
+  var optimized = optimizeCoachWeeklySchedule({
+    sessions: [{ day: 4, date: "2026-06-18", status: "planned", submitted: [], items: [], totalMinutes: 0 }],
+    baseProjected,
+    setup: normalizeCoachWeeklyPlan({ days: [4], averageMinutes: 60, priorities: ["chest"], targets }),
+    exercises: [backOnly],
+    maxStates: 20
+  });
+  ({ terminationReason: optimized.diagnostics.terminationReason, shortfall: optimized.diagnostics.shortfalls.find((item) => item.id === "chest") });
+`);
+
+assert.strictEqual(weeklyBoundedRepairDiagnostics.terminationReason, "no-supported-improvement", "Expected an exhausted bounded search to identify its actual termination state.");
+assert.strictEqual(weeklyBoundedRepairDiagnostics.shortfall.reason, "missing-or-performance-coverage", "Expected the unresolved Chest target to retain its measured candidate-coverage blocker.");
+assert(appCode.includes("Search limits:"), "Expected generated Coach Week copy to expose per-muscle bounded-search reasons.");
+
+// Shortfall diagnostics must prefer the least-disruptive failed repair over noisier add-exercise attempts.
+const weeklyBoundedRepairDirectBlocker = runScenario(`
+  ${resetAndHelpers}
+  var makeExercise = (id, muscleId) => ({ id, name: id, primaryMuscles: [muscleId], secondaryMuscles: [], equipment: "cable", reps: "8-15", rest: "180 sec", exerciseType: "isolation", loadingStyle: "standard", userCreated: true });
+  var ids = ["calves", "chest", "back", "shoulders", "biceps", "triceps"];
+  var exercises = ids.map((muscleId) => makeExercise("base-" + muscleId, muscleId));
+  exercises.push(makeExercise("alternate-calves", "calves"));
+  state.settings.customExercises = exercises;
+  var session = {
+    day: 4,
+    date: "2026-06-18",
+    status: "planned",
+    submitted: [],
+    items: exercises.slice(0, 6).map((exercise, index) => ({ muscle: muscleGroups.find((muscle) => muscle.id === ids[index]), exercise, sets: 2, phase: "floor", growthMode: "medium", planTarget: { kind: "hold" } })),
+    totalMinutes: 0
+  };
+  session.totalMinutes = plannedCoachSessionMinutes(session.items);
+  var baseProjected = Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, muscle.id === "calves" ? 7 : ids.includes(muscle.id) ? 8 : 10]));
+  var targets = Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, 10]));
+  var setup = normalizeCoachWeeklyPlan({ days: [4], averageMinutes: 30, priorities: ["calves"], targets });
+  var optimized = optimizeCoachWeeklySchedule({ sessions: [session], baseProjected, setup, exercises, maxStates: 100 });
+  optimized.diagnostics.shortfalls.find((item) => item.id === "calves");
+`);
+
+assert.strictEqual(weeklyBoundedRepairDirectBlocker.reason, "time-limit", "Expected the failed one-set top-up to identify time, not the noisier six-exercise add attempt, as the Calves blocker.");
+
+// Heavy repair belongs to Generate/debug paths, while its failure language must describe a bounded search rather than impossibility.
+assert(/buildCoachWeeklyPlan\(requestedSetup, \{ optimize: true \}\)/.test(appCode), "Expected Generate to opt into bounded weekly repair.");
+assert(/function buildCoachWeeklyPlan\(setupInput = selectedCoachWeeklyPlan\(\), options = \{\}\)/.test(appCode), "Expected ordinary weekly rendering to keep bounded repair optional.");
+assert(appCode.includes("optimizer: clonePlain(plan.optimizer"), "Expected weekly debug/snapshots to retain optimizer diagnostics.");
+assert(appCode.includes("No additional supported improvement was found in the generated schedule"), "Expected bounded-search shortfalls not to be described as mathematically impossible.");
 
 // An impossible floor remains a hard error rather than being relabeled as a feasible lower target.
 const weeklyGeneratedTargetsProtectFloor = runScenario(`

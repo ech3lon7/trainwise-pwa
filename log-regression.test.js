@@ -197,9 +197,9 @@ assert(!appCode.includes('selectedExercise: "Push-up"'), "Expected Log startup n
 assert(!appCode.includes('showBanner("Unsaved draft restored."'), "Expected startup draft recovery not to show a top banner.");
 assert(appCode.includes("notifyMetricSaved"), "Expected metrics saves to use a dedicated bottom-only notification helper.");
 assert(!stylesCode.includes(".mobile-quick-toggle"), "Expected floating quick action button styling to be removed.");
-assert(indexCode.includes("v=1.5.94"), "Expected index shell references to use bumped app version.");
+assert(indexCode.includes("v=1.5.97"), "Expected index shell references to use bumped app version.");
 assert(!indexCode.includes('id="app" class="app-content" aria-live'), "Expected broad app aria-live to be removed in favor of targeted live regions.");
-assert(serviceWorkerCode.includes("trainwise-cache-v116"), "Expected service worker cache version bump.");
+assert(serviceWorkerCode.includes("trainwise-cache-v119"), "Expected service worker cache version bump.");
 // The mobile tab bar must anchor to the visible bottom edge and compact only during active scrolling.
 assert(/\.tabbar\s*\{[^}]*top:\s*auto;[^}]*bottom:\s*env\(safe-area-inset-bottom\)/s.test(stylesCode), "Expected the tab bar to use a stable bottom safe-area anchor instead of a dynamic viewport top offset.");
 assert(stylesCode.includes(".tabbar.is-scrolling") && appCode.includes("updateTabbarScrollState"), "Expected the tab bar to shrink during scrolling and restore after scrolling stops.");
@@ -2898,5 +2898,136 @@ const centeredMiniSparklines = runScenario(`
 
 assert(centeredMiniSparklines.single.includes('points="50,50"'), "Expected a single-point sparkline marker to be centered.");
 assert(centeredMiniSparklines.flat.includes('points="6,50 94,50"'), "Expected a flat sparkline to be centered vertically.");
+
+// Exercise aliases reinterpret only the confirmed date range while preserving every raw submitted workout row.
+const exerciseAliasHistory = runScenario(`
+  ${reset}
+  state.settings.customExercises = [
+    {
+      id: "hamstring-curl", name: "Hamstring Dumbell Curl", primaryMuscles: ["hamstrings"], secondaryMuscles: [],
+      equipment: "dumbbell", reps: "8-15", rest: "60-120 sec"
+    },
+    {
+      id: "hamstring-curls", name: "Hamstring Dumbell Curls", primaryMuscles: ["glutes"], secondaryMuscles: [],
+      equipment: "dumbbell", reps: "8-15", rest: "60-120 sec", archivedAt: "2026-06-20T12:00:00.000Z"
+    }
+  ];
+  state.workouts = [
+    makeWorkout({ id: "canonical", date: "2026-06-18", exerciseId: "hamstring-curl", exercise: "Hamstring Dumbell Curl", primaryMuscles: ["hamstrings"], secondaryMuscles: [] }),
+    makeWorkout({ id: "in-scope", date: "2026-06-12", exerciseId: "hamstring-curls", exercise: "Hamstring Dumbell Curls", primaryMuscles: ["glutes"], secondaryMuscles: [] }),
+    makeWorkout({ id: "out-of-scope", date: "2026-05-20", exerciseId: "hamstring-curls", exercise: "Hamstring Dumbell Curls", primaryMuscles: ["glutes"], secondaryMuscles: [] })
+  ];
+  state.settings.exerciseAliases = {
+    "hamstring-curls": {
+      duplicateId: "hamstring-curls", canonicalId: "hamstring-curl",
+      startDate: "2026-06-01", endDate: "2026-06-30", createdAt: "2026-06-20T12:00:00.000Z"
+    }
+  };
+  var rawBefore = JSON.stringify(state.workouts);
+  var canonicalHistory = exerciseHistoryForIdentity(state.settings.customExercises[0], state.workouts, true);
+  var duplicateHistory = exerciseHistoryForIdentity(state.settings.customExercises[1], state.workouts, true);
+  var records = allTimeRecords().exercises;
+  ({
+    inScopeMuscles: workoutMeta(state.workouts[1]).primaryMuscles,
+    outOfScopeMuscles: workoutMeta(state.workouts[2]).primaryMuscles,
+    canonicalIds: canonicalHistory.map((entry) => entry.id).sort(),
+    duplicateIds: duplicateHistory.map((entry) => entry.id).sort(),
+    canonicalRecordSessions: records.find((entry) => entry.exerciseId === "hamstring-curl")?.sessionCount,
+    duplicateRecordSessions: records.find((entry) => entry.exerciseId === "hamstring-curls")?.sessionCount,
+    timingMatchesCanonical: workoutMatchesTimingExercise(state.workouts[1], state.settings.customExercises[0]),
+    duplicateRemovalMode: exerciseRemovalMode(state.settings.customExercises[1]),
+    rawUnchanged: rawBefore === JSON.stringify(state.workouts)
+  });
+`);
+
+assert.deepEqual(exerciseAliasHistory.inScopeMuscles, ["hamstrings"], "Expected an in-scope duplicate workout to use canonical muscle credits.");
+assert.deepEqual(exerciseAliasHistory.outOfScopeMuscles, ["glutes"], "Expected an out-of-scope duplicate workout to retain its original muscle credits.");
+assert.deepEqual(exerciseAliasHistory.canonicalIds, ["canonical", "in-scope"], "Expected canonical History to include only the confirmed duplicate range.");
+assert.deepEqual(exerciseAliasHistory.duplicateIds, ["out-of-scope"], "Expected duplicate History to retain sessions outside the confirmed range.");
+assert.strictEqual(exerciseAliasHistory.canonicalRecordSessions, 2, "Expected Records to group in-scope duplicate sessions under the canonical exercise.");
+assert.strictEqual(exerciseAliasHistory.duplicateRecordSessions, 1, "Expected Records to preserve out-of-scope duplicate sessions separately.");
+assert.strictEqual(exerciseAliasHistory.timingMatchesCanonical, true, "Expected confirmed aliases to share canonical timing history without rewriting workout IDs.");
+assert.strictEqual(exerciseAliasHistory.duplicateRemovalMode, "archive", "Expected a merged source definition with raw history to remain recoverable instead of becoming permanently deletable.");
+assert.strictEqual(exerciseAliasHistory.rawUnchanged, true, "Expected alias resolution never to rewrite submitted workout rows.");
+
+// The merge preview must expose the exact workout dates and before/after muscle-credit changes before confirmation.
+const exerciseAliasPreviewResult = runScenario(`
+  ${reset}
+  state.settings.customExercises = [
+    { id: "curl-canonical", name: "Hamstring Curl", primaryMuscles: ["hamstrings"], secondaryMuscles: [], equipment: "machine", reps: "8-15", rest: "60-120 sec" },
+    { id: "curl-duplicate", name: "Hamstring Curls", primaryMuscles: ["glutes"], secondaryMuscles: [], equipment: "machine", reps: "8-15", rest: "60-120 sec" }
+  ];
+  state.workouts = [
+    makeWorkout({ id: "affected-one", date: "2026-06-10", exerciseId: "curl-duplicate", exercise: "Hamstring Curls", primaryMuscles: ["glutes"], secondaryMuscles: [] }),
+    makeWorkout({ id: "canonical-one", date: "2026-05-10", exerciseId: "curl-canonical", exercise: "Hamstring Curl", primaryMuscles: ["hamstrings"], secondaryMuscles: [] })
+  ];
+  state.exerciseMergeReview = {
+    conflictKey: coachExerciseConflictKey(state.settings.customExercises[0]),
+    exerciseIds: ["curl-canonical", "curl-duplicate"],
+    duplicateId: "curl-duplicate", canonicalId: "curl-canonical", startDate: "2026-06-01", endDate: "2026-06-30"
+  };
+  var preview = exerciseAliasPreview(state.exerciseMergeReview);
+  ({ ...preview, markup: renderExercises() });
+`);
+
+assert.strictEqual(exerciseAliasPreviewResult.affectedWorkoutCount, 1, "Expected merge preview to count only workouts inside the explicit date scope.");
+assert.deepEqual(exerciseAliasPreviewResult.affectedDates, ["2026-06-10"], "Expected merge preview to list the affected submitted dates.");
+assert.strictEqual(exerciseAliasPreviewResult.creditChanges.glutes, -2, "Expected preview to show removed incorrect Glutes credits.");
+assert.strictEqual(exerciseAliasPreviewResult.creditChanges.hamstrings, 2, "Expected preview to show added canonical Hamstrings credits.");
+assert.strictEqual(exerciseAliasPreviewResult.grouping.beforeGroups, 2, "Expected preview to show separate exercise groups before the alias.");
+assert.strictEqual(exerciseAliasPreviewResult.grouping.afterGroups, 1, "Expected preview to show one canonical exercise group after the alias.");
+assert(exerciseAliasPreviewResult.markup.includes("1 submitted workout affected"), "Expected the Exercises review panel to display its affected workout evidence.");
+assert(exerciseAliasPreviewResult.markup.includes('data-action="apply-exercise-merge"') && !exerciseAliasPreviewResult.markup.includes('data-action="apply-exercise-merge" disabled'), "Expected a reviewed merge with affected history to enable explicit confirmation.");
+
+// Alias settings must survive safe backup, normalization, device sync, and expose explicit review/rollback controls.
+const exerciseAliasPersistence = runScenario(`
+  ${reset}
+  state.settings.exerciseAliases = {
+    "custom-row-old": {
+      duplicateId: "custom-row-old", canonicalId: "custom-row", startDate: "2026-01-01", endDate: "2026-06-30",
+      createdAt: "2026-07-01T00:00:00.000Z", archivedAtBefore: "", archiveAppliedAt: "2026-07-01T00:00:00.000Z"
+    }
+  };
+  ({
+    exported: exportSafeSettings().exerciseAliases,
+    normalized: normalizeBackupSettings({ exerciseAliases: state.settings.exerciseAliases }).exerciseAliases,
+    safePreference: safePreferenceValue("exerciseAliases"),
+    syncEnabled: SYNC_SAFE_PREFERENCES.includes("exerciseAliases")
+  });
+`);
+
+assert.deepEqual(exerciseAliasPersistence.exported, exerciseAliasPersistence.normalized, "Expected safe backup normalization to retain exercise aliases.");
+assert.deepEqual(exerciseAliasPersistence.safePreference, exerciseAliasPersistence.exported, "Expected preference sync to carry the same normalized alias map.");
+assert.strictEqual(exerciseAliasPersistence.syncEnabled, true, "Expected exercise aliases to sync as a safe preference.");
+assert(appCode.includes('data-action="review-exercise-merge"'), "Expected Exercises conflicts to expose an explicit review action.");
+assert(appCode.includes('data-action="apply-exercise-merge"'), "Expected reviewed aliases to require an explicit apply action.");
+assert(appCode.includes('data-action="rollback-exercise-merge"'), "Expected every active alias to expose a rollback action.");
+
+// Rollback removes the alias and restores only the archive timestamp created by that same merge.
+const exerciseAliasRollback = runScenario(`
+  var aliases = normalizeExerciseAliases({
+    "duplicate": {
+      duplicateId: "duplicate", canonicalId: "canonical", startDate: "2026-06-01", endDate: "2026-06-30",
+      createdAt: "2026-07-01T00:00:00.000Z", archivedAtBefore: "", archiveAppliedAt: "2026-07-01T00:00:00.000Z"
+    }
+  });
+  var restored = exerciseAliasRollbackSnapshot(aliases, [
+    { id: "canonical", name: "Canonical", primaryMuscles: ["hamstrings"] },
+    { id: "duplicate", name: "Duplicate", primaryMuscles: ["glutes"], archivedAt: "2026-07-01T00:00:00.000Z" }
+  ], "duplicate", "2026-07-02T00:00:00.000Z");
+  var independentlyArchived = exerciseAliasRollbackSnapshot(aliases, [
+    { id: "canonical", name: "Canonical", primaryMuscles: ["hamstrings"] },
+    { id: "duplicate", name: "Duplicate", primaryMuscles: ["glutes"], archivedAt: "2026-07-01T12:00:00.000Z" }
+  ], "duplicate", "2026-07-02T00:00:00.000Z");
+  ({
+    aliasRemoved: !restored.nextAliases.duplicate,
+    restoredArchivedAt: restored.restoredDuplicate.archivedAt || "",
+    laterArchivePreserved: independentlyArchived.restoredDuplicate.archivedAt
+  });
+`);
+
+assert.strictEqual(exerciseAliasRollback.aliasRemoved, true, "Expected rollback to remove only the selected alias.");
+assert.strictEqual(exerciseAliasRollback.restoredArchivedAt, "", "Expected rollback to restore a duplicate archived by the merge.");
+assert.strictEqual(exerciseAliasRollback.laterArchivePreserved, "2026-07-01T12:00:00.000Z", "Expected rollback not to undo a later independent archive choice.");
 
 console.log("log regression tests passed");

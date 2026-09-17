@@ -2704,6 +2704,68 @@ textarea {
   padding: 0 10px;
 }
 
+/* Keep conflict review evidence compact, scannable, and reversible on the Exercises screen. */
+.exercise-merge-panel > .collapse-content {
+  display: grid;
+  gap: 10px;
+}
+
+.exercise-merge-conflict,
+.exercise-merge-active {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px;
+  border: 1px solid rgba(242, 208, 107, 0.18);
+  border-radius: 8px;
+  background: rgba(242, 208, 107, 0.045);
+}
+
+.exercise-merge-conflict span,
+.exercise-merge-active span {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.exercise-merge-conflict small,
+.exercise-merge-active small,
+.exercise-merge-definition span {
+  color: var(--muted);
+}
+
+.exercise-merge-review {
+  display: grid;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid rgba(53, 213, 140, 0.22);
+  border-radius: 8px;
+  background: rgba(53, 213, 140, 0.035);
+}
+
+.exercise-merge-definition,
+.exercise-merge-impact {
+  display: grid;
+  gap: 7px;
+  padding: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.exercise-merge-workouts {
+  display: grid;
+  gap: 5px;
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.exercise-merge-workouts span {
+  overflow-wrap: anywhere;
+}
+
 .badge-row {
   display: flex;
   flex-wrap: wrap;
@@ -3532,6 +3594,12 @@ textarea {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
+  /* Keep merge choices and date bounds full-width at both requested phone widths. */
+  .exercise-merge-definition-grid,
+  .exercise-merge-review .field-row {
+    grid-template-columns: 1fr;
+  }
+
   .date-control {
     grid-template-columns: 42px minmax(0, 1fr) 42px;
   }
@@ -3912,6 +3980,23 @@ textarea {
 
   .exercise-definition {
     grid-template-columns: 1fr;
+  }
+
+  /* Stack merge evidence and actions so the confirmation flow never overflows narrow screens. */
+  .exercise-merge-definition-grid,
+  .exercise-merge-review .field-row {
+    grid-template-columns: 1fr;
+  }
+
+  .exercise-merge-conflict,
+  .exercise-merge-active {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .exercise-merge-conflict button,
+  .exercise-merge-active button {
+    width: 100%;
   }
 
   .exercise-definition .row-actions {

@@ -3,7 +3,7 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 3;
 const STORES = ["workouts", "metrics", "settings", "syncQueue"];
-const APP_VERSION = "1.5.94";
+const APP_VERSION = "1.5.97";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 const DRAFT_RECOVERY_KEY = "trainwise-draft-recovery-v1";
 const DATED_STRENGTH_DRAFTS_KEY = "trainwise-strength-drafts-by-date-v1";
@@ -13,7 +13,7 @@ const COACH_WEEK_PREVIEW_STORAGE_KEY = "trainwise-coach-week-preview-v1";
 const SYNC_BOOTSTRAP_VERSION = 1;
 const SYNC_POLL_MS = 60000;
 const SYNC_PAGE_SIZE = 500;
-const SYNC_SAFE_PREFERENCES = ["hypertrophyProfile", "nutritionGoal", "maintenanceProfile", "dashboardWidgets", "dashboardWidgetOrder", "coachWeeklyPlan"];
+const SYNC_SAFE_PREFERENCES = ["hypertrophyProfile", "nutritionGoal", "maintenanceProfile", "dashboardWidgets", "dashboardWidgetOrder", "coachWeeklyPlan", "exerciseAliases"];
 const COLLAPSE_ANIMATION_MS = 360;
 const COLLAPSE_REVEAL_MS = 1600;
 const COLLAPSIBLE_SELECTOR = "details.collapsible-panel, details.coverage-row, details.inline-disclosure";
@@ -213,6 +213,7 @@ const state = {
   exerciseSort: "recent",
   exerciseFormDraft: null,
   exerciseFormErrors: {},
+  exerciseMergeReview: null,
   metricFormDraft: null,
   openExerciseActionMenu: null,
   editingWorkoutId: null,
@@ -953,6 +954,7 @@ function safePreferenceValue(key) {
   if (key === "dashboardWidgets") return selectedDashboardWidgets();
   if (key === "dashboardWidgetOrder") return dashboardWidgetOrder();
   if (key === "coachWeeklyPlan") return normalizeCoachWeeklyPlan(state.settings.coachWeeklyPlan || {});
+  if (key === "exerciseAliases") return exerciseAliases();
   return undefined;
 }
 
@@ -1171,6 +1173,262 @@ function exerciseDatabase() {
     });
 }
 
+// Fold only a final plural suffix per name token so obvious Curl/Curls duplicates share one Coach session key.
+function coachExerciseConflictKey(exercise = {}) {
+  const nameTokens = String(exercise.name || "").toLowerCase().match(/[a-z0-9]+/g) || [];
+  const foldedName = nameTokens.map((token) => (
+    token.length > 3 && token.endsWith("s") && !token.endsWith("ss") ? token.slice(0, -1) : token
+  )).join("");
+  return `${foldedName}|${normalizeName(exercise.equipment)}`;
+}
+
+// Report only active definitions that collapse to the same high-confidence name/equipment family.
+// Keep stable IDs visible to conflict review even when two definitions share the exact same display name.
+function activeExerciseDefinitionsById() {
+  const hidden = new Set(getHiddenExercises());
+  return (Array.isArray(state.settings.customExercises) ? state.settings.customExercises : [])
+    .map(normalizeExerciseDefinition)
+    .filter(Boolean)
+    .filter((exercise) => !exercise.archivedAt && !hidden.has(exercise.id));
+}
+
+function coachExerciseDefinitionConflicts(exercises = activeExerciseDefinitionsById()) {
+  const grouped = new Map();
+  exercises.forEach((exercise) => {
+    const key = coachExerciseConflictKey(exercise);
+    if (!key || key.startsWith("|")) return;
+    if (!grouped.has(key)) grouped.set(key, []);
+    grouped.get(key).push(exercise);
+  });
+  return [...grouped.entries()]
+    .filter(([, matches]) => matches.length > 1)
+    .map(([key, matches]) => ({
+      key,
+      exerciseIds: matches.map((exercise) => exercise.id),
+      names: matches.map((exercise) => exercise.name),
+      primaryMuscles: matches.map((exercise) => [...exercise.primaryMuscles])
+    }));
+}
+
+// Normalize reversible exercise aliases without accepting self-links or implicit, unbounded date scopes.
+function normalizeExerciseAliases(value = {}) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const normalized = {};
+  Object.entries(value).forEach(([key, entry]) => {
+    if (!entry || typeof entry !== "object") return;
+    const duplicateId = String(entry.duplicateId || key || "").trim();
+    const canonicalId = String(entry.canonicalId || "").trim();
+    const startDate = String(entry.startDate || "").trim();
+    const endDate = String(entry.endDate || "").trim();
+    if (!duplicateId || !canonicalId || duplicateId === canonicalId || !isValidISODate(startDate) || !isValidISODate(endDate) || startDate > endDate) return;
+    normalized[duplicateId] = {
+      duplicateId,
+      canonicalId,
+      startDate,
+      endDate,
+      createdAt: String(entry.createdAt || ""),
+      archivedAtBefore: String(entry.archivedAtBefore || ""),
+      archiveAppliedAt: String(entry.archiveAppliedAt || "")
+    };
+  });
+  return normalized;
+}
+
+// Resolve aliases only for workouts inside the user's confirmed inclusive date range.
+function exerciseAliases() {
+  return normalizeExerciseAliases(state.settings.exerciseAliases || {});
+}
+
+function exerciseAliasCoversDate(alias, date) {
+  return Boolean(alias && isValidISODate(date) && date >= alias.startDate && date <= alias.endDate);
+}
+
+function resolveAliasedExerciseId(exerciseId, date, aliases = exerciseAliases()) {
+  let currentId = String(exerciseId || "").trim();
+  const visited = new Set();
+  while (currentId && !visited.has(currentId)) {
+    visited.add(currentId);
+    const alias = aliases[currentId];
+    if (!exerciseAliasCoversDate(alias, date)) break;
+    currentId = alias.canonicalId;
+  }
+  return currentId;
+}
+
+function exerciseAliasWouldCreateLoop(duplicateId, canonicalId, aliases = exerciseAliases()) {
+  let currentId = String(canonicalId || "").trim();
+  const visited = new Set();
+  while (currentId && !visited.has(currentId)) {
+    if (currentId === duplicateId) return true;
+    visited.add(currentId);
+    currentId = aliases[currentId]?.canonicalId || "";
+  }
+  return false;
+}
+
+function effectiveWorkoutExerciseId(workout = {}) {
+  const exerciseId = String(workout.exerciseId || "").trim();
+  return exerciseId ? resolveAliasedExerciseId(exerciseId, workout.date) : "";
+}
+
+function exerciseDefinitionById(exerciseId) {
+  return (Array.isArray(state.settings.customExercises) ? state.settings.customExercises : [])
+    .map(normalizeExerciseDefinition)
+    .filter(Boolean)
+    .find((exercise) => exercise.id === exerciseId) || null;
+}
+
+function aliasedExerciseDefinitionForWorkout(workout = {}) {
+  const originalId = String(workout.exerciseId || "").trim();
+  const effectiveId = effectiveWorkoutExerciseId(workout);
+  return originalId && effectiveId && effectiveId !== originalId ? exerciseDefinitionById(effectiveId) : null;
+}
+
+function effectiveWorkoutExerciseName(workout = {}) {
+  return aliasedExerciseDefinitionForWorkout(workout)?.name || String(workout.exercise || "").trim();
+}
+
+// Preview the exact submitted rows and muscle-credit changes before an alias can be confirmed.
+function exerciseAliasPreview(input = {}, workouts = state.workouts) {
+  const duplicateId = String(input.duplicateId || "").trim();
+  const canonicalId = String(input.canonicalId || "").trim();
+  const startDate = String(input.startDate || "").trim();
+  const endDate = String(input.endDate || "").trim();
+  const duplicate = exerciseDefinitionById(duplicateId);
+  const canonical = exerciseDefinitionById(canonicalId);
+  if (!duplicate || !canonical || duplicateId === canonicalId) throw new Error("Choose two different exercise definitions.");
+  if (!isValidISODate(startDate) || !isValidISODate(endDate) || startDate > endDate) throw new Error("Choose a valid merge date range.");
+  const affected = (workouts || []).filter((workout) => (
+    !workout.pendingDraft
+    && !isSampleEntry(workout)
+    && String(workout.exerciseId || "") === duplicateId
+    && workout.date >= startDate
+    && workout.date <= endDate
+  ));
+  const beforeCredits = {};
+  const afterCredits = {};
+  affected.forEach((workout) => {
+    const hardSets = hardSetCount(workout);
+    const beforeMeta = rawWorkoutMeta(workout);
+    (beforeMeta.primaryMuscles || []).forEach((muscle) => { beforeCredits[muscle] = (beforeCredits[muscle] || 0) + hardSets; });
+    (beforeMeta.secondaryMuscles || []).forEach((muscle) => { beforeCredits[muscle] = (beforeCredits[muscle] || 0) + hardSets * 0.5; });
+    (canonical.primaryMuscles || []).forEach((muscle) => { afterCredits[muscle] = (afterCredits[muscle] || 0) + hardSets; });
+    (canonical.secondaryMuscles || []).forEach((muscle) => { afterCredits[muscle] = (afterCredits[muscle] || 0) + hardSets * 0.5; });
+  });
+  const creditChanges = {};
+  new Set([...Object.keys(beforeCredits), ...Object.keys(afterCredits)]).forEach((muscle) => {
+    const change = (afterCredits[muscle] || 0) - (beforeCredits[muscle] || 0);
+    if (Math.abs(change) > 0.0001) creditChanges[muscle] = Math.round(change * 100) / 100;
+  });
+  const relatedWorkouts = (workouts || []).filter((workout) => (
+    !workout.pendingDraft
+    && !isSampleEntry(workout)
+    && [duplicateId, canonicalId].includes(String(workout.exerciseId || ""))
+  ));
+  const beforeGroups = new Set(relatedWorkouts.map((workout) => effectiveWorkoutExerciseId(workout) || `name:${normalizeName(workout.exercise)}`));
+  const afterGroups = new Set(relatedWorkouts.map((workout) => (
+    String(workout.exerciseId || "") === duplicateId && workout.date >= startDate && workout.date <= endDate
+      ? canonicalId
+      : effectiveWorkoutExerciseId(workout) || `name:${normalizeName(workout.exercise)}`
+  )));
+  return {
+    duplicate,
+    canonical,
+    startDate,
+    endDate,
+    affectedWorkoutCount: affected.length,
+    affectedDates: [...new Set(affected.map((workout) => workout.date))].sort(),
+    affectedWorkouts: affected,
+    beforeCredits,
+    afterCredits,
+    creditChanges,
+    grouping: { beforeGroups: beforeGroups.size, afterGroups: afterGroups.size }
+  };
+}
+
+// Persist the library archive and alias map together so a failed write cannot leave a half-applied merge.
+async function saveExerciseAliasState(exercises, aliases) {
+  await runStoreTransaction(["settings"], "readwrite", (stores) => {
+    stores.settings.put({ key: "customExercises", value: exercises });
+    stores.settings.put({ key: "exerciseAliases", value: aliases });
+  });
+  state.settings.customExercises = exercises;
+  state.settings.exerciseAliases = aliases;
+}
+
+// Apply the reviewed alias and archive only the duplicate definition; submitted workouts remain untouched.
+async function applyExerciseAliasMerge(input = {}) {
+  const preview = exerciseAliasPreview(input);
+  if (!preview.affectedWorkoutCount) throw new Error("No submitted workouts fall inside this merge range.");
+  const aliases = exerciseAliases();
+  if (exerciseAliasWouldCreateLoop(preview.duplicate.id, preview.canonical.id, aliases)) throw new Error("This merge would create an exercise alias loop.");
+  const exercises = (Array.isArray(state.settings.customExercises) ? state.settings.customExercises : [])
+    .map(normalizeExerciseDefinition)
+    .filter(Boolean);
+  const duplicate = exercises.find((exercise) => exercise.id === preview.duplicate.id);
+  const archiveAppliedAt = new Date().toISOString();
+  const archivedDuplicate = { ...duplicate, archivedAt: archiveAppliedAt, updatedAt: archiveAppliedAt };
+  const nextAliases = {
+    ...aliases,
+    [duplicate.id]: {
+      duplicateId: duplicate.id,
+      canonicalId: preview.canonical.id,
+      startDate: preview.startDate,
+      endDate: preview.endDate,
+      createdAt: archiveAppliedAt,
+      archivedAtBefore: duplicate.archivedAt || "",
+      archiveAppliedAt
+    }
+  };
+  const nextExercises = exercises.map((exercise) => exercise.id === duplicate.id ? archivedDuplicate : exercise);
+  await saveExerciseAliasState(nextExercises, nextAliases);
+  await queueSyncChange("exercise", archivedDuplicate.id, archivedDuplicate);
+  await queueSyncChange("preference", "exerciseAliases", { value: nextAliases });
+  scheduleRecordSync();
+  return preview;
+}
+
+// Build rollback state without mutating workouts or overwriting a later independent archive decision.
+function exerciseAliasRollbackSnapshot(aliasesInput, exercises, duplicateId, updatedAt = new Date().toISOString()) {
+  const aliases = normalizeExerciseAliases(aliasesInput);
+  const alias = aliases[String(duplicateId || "")];
+  if (!alias) throw new Error("Exercise merge not found.");
+  const duplicate = exercises.find((exercise) => exercise.id === alias.duplicateId);
+  const nextAliases = { ...aliases };
+  delete nextAliases[alias.duplicateId];
+  let restoredDuplicate = duplicate;
+  if (duplicate && alias.archiveAppliedAt && duplicate.archivedAt === alias.archiveAppliedAt) {
+    restoredDuplicate = { ...duplicate, updatedAt };
+    if (alias.archivedAtBefore) restoredDuplicate.archivedAt = alias.archivedAtBefore;
+    else delete restoredDuplicate.archivedAt;
+  }
+  return {
+    alias,
+    nextAliases,
+    restoredDuplicate,
+    nextExercises: restoredDuplicate
+      ? exercises.map((exercise) => exercise.id === restoredDuplicate.id ? restoredDuplicate : exercise)
+      : exercises
+  };
+}
+
+// Roll back one alias and persist the duplicate restoration produced by the guarded snapshot.
+async function rollbackExerciseAliasMerge(duplicateId) {
+  const aliases = exerciseAliases();
+  const exercises = (Array.isArray(state.settings.customExercises) ? state.settings.customExercises : [])
+    .map(normalizeExerciseDefinition)
+    .filter(Boolean);
+  const rollback = exerciseAliasRollbackSnapshot(aliases, exercises, duplicateId);
+  const { alias, nextAliases, restoredDuplicate, nextExercises } = rollback;
+  await saveExerciseAliasState(nextExercises, nextAliases);
+  if (restoredDuplicate) {
+    await queueSyncChange("exercise", restoredDuplicate.id, restoredDuplicate);
+  }
+  await queueSyncChange("preference", "exerciseAliases", { value: nextAliases });
+  scheduleRecordSync();
+  return alias;
+}
+
 function exerciseNames() {
   return exerciseDatabase().map((exercise) => exercise.name);
 }
@@ -1239,7 +1497,7 @@ function exerciseIdentity(exerciseOrName, fallbackMuscle = "chest") {
 
 function sameExerciseIdentity(entry, exerciseOrName) {
   const identity = exerciseIdentity(exerciseOrName);
-  const entryId = String(entry?.exerciseId || "").trim();
+  const entryId = effectiveWorkoutExerciseId(entry);
   if (identity.id && entryId) return identity.id === entryId;
   const targetName = normalizeName(identity.name || exerciseOrName);
   if (!targetName || normalizeName(entry?.exercise) !== targetName) return false;
@@ -1267,8 +1525,16 @@ function exerciseUsageStats(exerciseOrName) {
   };
 }
 
+// Keep a merged source definition recoverable whenever raw submitted rows still reference its stable ID.
+function rawExerciseHasSubmittedLogs(exerciseOrName) {
+  const identity = exerciseIdentity(exerciseOrName);
+  if (identity.id) return state.workouts.some((entry) => String(entry.exerciseId || "") === identity.id);
+  const targetName = normalizeName(identity.name || exerciseOrName);
+  return Boolean(targetName && state.workouts.some((entry) => !entry.exerciseId && normalizeName(entry.exercise) === targetName));
+}
+
 function exerciseRemovalMode(exerciseOrName) {
-  return exerciseUsageStats(exerciseOrName).hasLogs ? "archive" : "delete";
+  return exerciseUsageStats(exerciseOrName).hasLogs || rawExerciseHasSubmittedLogs(exerciseOrName) ? "archive" : "delete";
 }
 
 function exerciseCoverageStats() {
@@ -1310,7 +1576,8 @@ function filteredExerciseList(options = {}) {
   return exercises;
 }
 
-function workoutMeta(entry) {
+// Preserve the submitted metadata as the unaliased source for previews and out-of-scope history.
+function rawWorkoutMeta(entry) {
   if (Array.isArray(entry.primaryMuscles) && entry.primaryMuscles.length) {
     return {
       id: entry.exerciseId || `custom-${normalizeName(entry.exercise)}`,
@@ -1327,6 +1594,11 @@ function workoutMeta(entry) {
     };
   }
   return resolveExerciseMeta(entry.exercise, entry.targetMuscle);
+}
+
+// Derived credits use the canonical definition only when a confirmed alias covers this workout date.
+function workoutMeta(entry) {
+  return aliasedExerciseDefinitionForWorkout(entry) || rawWorkoutMeta(entry);
 }
 
 function setRowsFromWorkout(workout) {
@@ -1615,8 +1887,10 @@ function allTimeRecords(workouts = state.workouts, metrics = state.metrics) {
 
   const exerciseGroups = new Map();
   for (const workout of submitted) {
-    const key = workout.exerciseId ? `id:${workout.exerciseId}` : `name:${normalizeName(workout.exercise)}`;
-    const group = exerciseGroups.get(key) || { exercise: workout.exercise, exerciseId: workout.exerciseId || "", sessions: [] };
+    const effectiveExerciseId = effectiveWorkoutExerciseId(workout);
+    const effectiveExerciseName = effectiveWorkoutExerciseName(workout);
+    const key = effectiveExerciseId ? `id:${effectiveExerciseId}` : `name:${normalizeName(effectiveExerciseName)}`;
+    const group = exerciseGroups.get(key) || { exercise: effectiveExerciseName, exerciseId: effectiveExerciseId, sessions: [] };
     group.sessions.push(workout);
     exerciseGroups.set(key, group);
   }
@@ -3317,8 +3591,13 @@ function scoreExerciseForMuscle(exercise, muscleId, options = {}) {
 
 function coachExerciseCandidates(muscleId, usedExerciseIds = new Set(), options = {}) {
   const workouts = options.workouts || coachWorkoutEntries();
+  const usedExerciseConflictKeys = options.usedExerciseConflictKeys instanceof Set ? options.usedExerciseConflictKeys : new Set();
   const candidates = exerciseDatabase()
-    .filter((exercise) => exercise.primaryMuscles.includes(muscleId) && !usedExerciseIds.has(exercise.id));
+    .filter((exercise) => (
+      exercise.primaryMuscles.includes(muscleId)
+      && !usedExerciseIds.has(exercise.id)
+      && !usedExerciseConflictKeys.has(coachExerciseConflictKey(exercise))
+    ));
   if (!candidates.length) return [];
   const memories = candidates.map((exercise) => coachExerciseMemory(exercise, workouts));
   const maxWeeklyUses = Math.max(0, ...memories.map((memory) => memory.weeklyUses));
@@ -3468,7 +3747,7 @@ function startWorkoutTimerTicker() {
 // Keep historical rest matching strict so renamed or duplicated exercises cannot contaminate estimates.
 function workoutMatchesTimingExercise(workout, exercise) {
   const exerciseId = String(exercise?.id || "").trim();
-  const workoutId = String(workout?.exerciseId || "").trim();
+  const workoutId = effectiveWorkoutExerciseId(workout);
   if (exerciseId && workoutId) return exerciseId === workoutId;
   if (workoutId || !exerciseId) return false;
   const resolved = uniqueExerciseDefinitionByName(workout?.exercise);
@@ -5171,7 +5450,7 @@ function coachWeeklyAttainment(setup, projected = {}) {
   };
 }
 
-// Commit the generated credit totals as the feasible fader targets while keeping every 10-set floor non-negotiable.
+// Preserve requested fader targets while attaching the independently generated weekly projection.
 function finalizeCoachWeeklyGeneratedPlan(setupInput, generatedPlan) {
   const requestedSetup = normalizeCoachWeeklyPlan(setupInput);
   const projected = Object.fromEntries(muscleGroups.map((muscle) => [
@@ -5182,39 +5461,14 @@ function finalizeCoachWeeklyGeneratedPlan(setupInput, generatedPlan) {
   if (floorUnmet.length) {
     throw new Error(`Coach cannot safely generate the 10-set floor for ${floorUnmet.map((muscle) => muscle.label).join(", ")}. Add a selected training day or increase the average workout time.`);
   }
-  const targets = Object.fromEntries(muscleGroups.map((muscle) => [
-    muscle.id,
-    Math.min(30, Math.max(HYPERTROPHY.minimumSets, projected[muscle.id]))
-  ]));
-  const setup = normalizeCoachWeeklyPlan({ ...requestedSetup, targets, generatedPlan: null });
-  const targetAdjustments = muscleGroups
-    .map((muscle) => ({
-      id: muscle.id,
-      label: muscle.label,
-      requested: requestedSetup.targets[muscle.id],
-      committed: targets[muscle.id]
-    }))
-    .filter((item) => Math.abs(item.requested - item.committed) > 0.001);
-  const actual = Object.fromEntries((generatedPlan.actualStats || []).map((stat) => [stat.id, Number(stat.sets) || 0]));
-  const requestedSets = muscleGroups.reduce((sum, muscle) => sum + Math.max(0, targets[muscle.id] - (actual[muscle.id] || 0)), 0);
+  const setup = normalizeCoachWeeklyPlan({ ...requestedSetup, generatedPlan: null });
   const attainment = coachWeeklyAttainment(setup, projected);
   return {
     ...generatedPlan,
     setup,
     projected,
-    setBudgets: clonePlain(targets),
-    missing: [],
     attainment,
-    targetAdjustments,
-    capacity: {
-      ...generatedPlan.capacity,
-      allocatedSetCapacity: requestedSets,
-      requestedSets,
-      fits: true,
-      message: targetAdjustments.length
-        ? `Coach adjusted ${targetAdjustments.length} target${targetAdjustments.length === 1 ? "" : "s"} to the exact credits the generated schedule can deliver.`
-        : "Coach scheduled every requested weekly target."
-    }
+    targetAdjustments: []
   };
 }
 
@@ -5335,7 +5589,10 @@ function reallocateCoachWeeklyPriorityShortfalls(sessions, projected, setBudgets
       if (!changed && !receiverOptions.length) {
         for (const session of plannedSessions.filter((candidate) => recoveryClearForDate(muscle.id, candidate.date))) {
           const usedExercises = session.usedExercises || new Set(session.items.map((item) => item.exercise.id));
-          const chosen = coachExerciseCandidates(muscle.id, usedExercises).find((candidate) => candidate.eligible && isActiveCoachExercise(candidate.exercise));
+          // Keep high-confidence duplicate definitions from replacing two different exercise slots in one session.
+          const usedExerciseConflictKeys = new Set(session.items.map((item) => coachExerciseConflictKey(item.exercise)));
+          const chosen = coachExerciseCandidates(muscle.id, usedExercises, { usedExerciseConflictKeys })
+            .find((candidate) => candidate.eligible && isActiveCoachExercise(candidate.exercise));
           if (!chosen) continue;
           const addSets = Math.max(COACH_MIN_SETS_PER_EXERCISE, Math.min(4, Math.ceil((Number(setBudgets[muscle.id]) || 0) - (Number(projected[muscle.id]) || 0))));
           for (const donor of session.items.filter((item) => !setup.priorities.includes(item.muscle.id)).sort((a, b) => b.sets - a.sets)) {
@@ -5417,7 +5674,348 @@ function fillCoachWeeklySessionTime(sessions, projected, setup) {
   });
 }
 
-function buildCoachWeeklyPlan(setupInput = selectedCoachWeeklyPlan()) {
+// Clone only mutable weekly-session fields so bounded search cannot alter the greedy seed schedule.
+function cloneCoachWeeklySearchSessions(sessions = [], sessionMinutes = plannedCoachSessionMinutes) {
+  return sessions.map((session) => ({
+    ...session,
+    items: session.items.map((item) => ({ ...item })),
+    submitted: [...(session.submitted || [])],
+    totalMinutes: sessionMinutes(session.items)
+  }));
+}
+
+// Recalculate every primary and secondary credit from one candidate schedule instead of carrying stale deltas.
+function coachWeeklySearchProjection(baseProjected = {}, sessions = []) {
+  const projected = Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, Math.max(0, Number(baseProjected[muscle.id]) || 0)]));
+  sessions.filter((session) => session.status === "planned").forEach((session) => {
+    session.items.forEach((item) => applyCoachStimulusCredits(projected, item.exercise, item.sets));
+  });
+  return projected;
+}
+
+// Score schedules lexicographically so floors, priorities, and requested targets cannot be traded for lower-value polish.
+function coachWeeklySearchScore(setup, projected, sessions) {
+  const floorShortfall = muscleGroups.reduce((sum, muscle) => sum + Math.max(0, HYPERTROPHY.minimumSets - (Number(projected[muscle.id]) || 0)), 0);
+  const priorityShortfall = setup.priorities.reduce((sum, muscleId) => sum + Math.max(0, (Number(setup.targets[muscleId]) || HYPERTROPHY.minimumSets) - (Number(projected[muscleId]) || 0)), 0);
+  const targetShortfall = muscleGroups.reduce((sum, muscle) => sum + Math.max(0, (Number(setup.targets[muscle.id]) || HYPERTROPHY.minimumSets) - (Number(projected[muscle.id]) || 0)), 0);
+  const unusedMinutes = sessions.filter((session) => session.status === "planned").reduce((sum, session) => sum + Math.max(0, setup.averageMinutes - session.totalMinutes), 0);
+  const excessCredits = muscleGroups.reduce((sum, muscle) => sum + Math.max(0, (Number(projected[muscle.id]) || 0) - (Number(setup.targets[muscle.id]) || HYPERTROPHY.minimumSets)), 0);
+  return [floorShortfall, priorityShortfall, targetShortfall, unusedMinutes, excessCredits];
+}
+
+// Compare score tuples without collapsing higher-priority planning goals into one weighted number.
+function compareCoachWeeklySearchScores(left = [], right = []) {
+  for (let index = 0; index < Math.max(left.length, right.length); index += 1) {
+    const difference = (Number(left[index]) || 0) - (Number(right[index]) || 0);
+    if (Math.abs(difference) > 0.001) return difference;
+  }
+  return 0;
+}
+
+// Produce a stable signature so equivalent move sequences are evaluated only once.
+function coachWeeklySearchSignature(sessions = []) {
+  return sessions.filter((session) => session.status === "planned").map((session) => (
+    `${session.date}:${session.items.map((item) => `${item.exercise.id}:${item.sets}:${item.muscle.id}`).sort().join(",")}`
+  )).join("|");
+}
+
+// Validate every hard weekly constraint after each candidate move and return one diagnosable rejection reason.
+function validateCoachWeeklySearchSchedule(sessions, setup, options = {}) {
+  const maximumMinutes = setup.averageMinutes + COACH_TIME_TOLERANCE_MINUTES;
+  const maxSets = sessionPlanCaps(setup.averageMinutes).maxSets;
+  const activeIds = new Set((options.exercises || exerciseDatabase()).map((exercise) => exercise.id));
+  const directDates = Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, new Set()]));
+  for (const session of sessions.filter((candidate) => candidate.status === "planned")) {
+    if (session.items.length > COACH_MAX_EXERCISES_PER_SESSION) return { valid: false, reason: "exercise-limit" };
+    const ids = new Set();
+    const conflictKeys = new Set();
+    for (const item of session.items) {
+      if (!activeIds.has(item.exercise.id)) return { valid: false, reason: "missing-coverage" };
+      if (item.sets < COACH_MIN_SETS_PER_EXERCISE) return { valid: false, reason: "two-set-minimum" };
+      if (item.sets > maxSets) return { valid: false, reason: "exercise-set-cap" };
+      const conflictKey = coachExerciseConflictKey(item.exercise);
+      if (ids.has(item.exercise.id) || conflictKeys.has(conflictKey)) return { valid: false, reason: "duplicate-conflict" };
+      ids.add(item.exercise.id);
+      conflictKeys.add(conflictKey);
+      for (const muscleId of item.exercise.primaryMuscles) {
+        if (typeof options.recoveryClearForDate === "function" && !options.recoveryClearForDate(muscleId, session.date)) {
+          return { valid: false, reason: "recovery-spacing" };
+        }
+        directDates[muscleId]?.add(session.date);
+      }
+    }
+    session.totalMinutes = (options.sessionMinutes || plannedCoachSessionMinutes)(session.items);
+    if (session.totalMinutes > maximumMinutes) return { valid: false, reason: "time-limit" };
+  }
+  for (const muscle of muscleGroups) {
+    const dates = [...directDates[muscle.id]].sort();
+    const lastActual = options.lastDirect?.[muscle.id] || "";
+    if (lastActual && dates.some((date) => daysBetween(lastActual, date) < 2)) return { valid: false, reason: "recovery-spacing" };
+    for (let index = 1; index < dates.length; index += 1) {
+      if (Math.abs(daysBetween(dates[index - 1], dates[index])) < 2) return { valid: false, reason: "recovery-spacing" };
+    }
+  }
+  return { valid: true, reason: "" };
+}
+
+// Freeze rest history and timing-correction samples once so one search does not rescan workout history per move.
+function coachWeeklySearchTiming(exercises = exerciseDatabase(), workouts = state.workouts) {
+  const diagnostics = timingCorrectionSamples(workouts, new Date());
+  const globalFactor = timingGlobalFactor(diagnostics.samples);
+  const restSeconds = new Map(exercises.map((exercise) => [exercise.id, exerciseRestEstimate(exercise, { workouts }).seconds]));
+  const rawCache = new Map();
+  const rawSeconds = (exercise, sets) => {
+    const key = `${exercise.id}:${sets}`;
+    if (!rawCache.has(key)) rawCache.set(key, estimateExerciseRawSeconds(exercise, sets, { workouts, restSeconds: restSeconds.get(exercise.id) }));
+    return rawCache.get(key);
+  };
+  const correctionFactor = (items) => {
+    const counts = timingSetCounts(items);
+    const type = timingTypeClassification(counts);
+    const style = timingStyleClassification(counts);
+    const typeFactor = timingFactorForClassification(diagnostics.samples, "type", type.key);
+    const styleFactor = timingFactorForClassification(diagnostics.samples, "style", style.key);
+    const factors = [{ weight: 0.6, value: globalFactor }];
+    if (Number.isFinite(typeFactor)) factors.push({ weight: 0.25, value: typeFactor });
+    if (Number.isFinite(styleFactor)) factors.push({ weight: 0.15, value: styleFactor });
+    const totalWeight = factors.reduce((sum, factor) => sum + factor.weight, 0);
+    return factors.reduce((sum, factor) => sum + factor.value * factor.weight, 0) / totalWeight;
+  };
+  return {
+    exerciseMinutes: (exercise, sets) => rawSeconds(exercise, sets) / 60,
+    sessionMinutes: (items) => correctedSessionEstimateMinutes(items.reduce((sum, item) => sum + rawSeconds(item.exercise, item.sets), 0), correctionFactor(items))
+  };
+}
+
+// Build a planned item through the existing performance and progression helpers so search does not bypass safeguards.
+function coachWeeklySearchItem(exercise, muscle, sets, phase = "repair", options = {}) {
+  const performanceSignal = options.performanceSignal || coachExercisePerformanceSignal(exercise);
+  const planTarget = options.planTarget || coachPlanTargetForExercise(exercise, performanceSignal);
+  const guardedSets = planTarget.kind === "deload" ? Math.max(COACH_MIN_SETS_PER_EXERCISE, sets - 1) : sets;
+  return {
+    muscle,
+    exercise,
+    sets: guardedSets,
+    minutes: typeof options.exerciseMinutes === "function" ? options.exerciseMinutes(exercise, guardedSets) : estimateExerciseMinutes(exercise, guardedSets),
+    phase,
+    growthMode: "medium",
+    performanceSignal,
+    planTarget,
+    reason: `${muscle.label} was placed by bounded weekly repair to improve requested-target coverage.`
+  };
+}
+
+// Search a bounded set of additions, relocations, and replacements while retaining neutral intermediate packing states.
+function optimizeCoachWeeklySchedule({ sessions = [], baseProjected = {}, setup: setupInput, exercises = exerciseDatabase(), lastDirect = {}, maxStates = 1200, recoveryClearForDate = null } = {}) {
+  const setup = normalizeCoachWeeklyPlan(setupInput || {});
+  const timing = coachWeeklySearchTiming(exercises);
+  const initialSessions = cloneCoachWeeklySearchSessions(sessions, timing.sessionMinutes);
+  const initialProjected = coachWeeklySearchProjection(baseProjected, initialSessions);
+  const initialState = { sessions: initialSessions, projected: initialProjected, score: coachWeeklySearchScore(setup, initialProjected, initialSessions) };
+  const seen = new Set([coachWeeklySearchSignature(initialSessions)]);
+  const rejected = {};
+  const rejectedByMuscle = {};
+  const rejectedByMuscleMove = {};
+  const moveCounts = {};
+  let attemptedMoves = 0;
+  let acceptedMoves = 0;
+  let best = initialState;
+  let frontier = [initialState];
+  let hitLimit = false;
+  const candidateCatalog = new Map(muscleGroups.map((muscle) => [muscle.id, coachExerciseCandidates(muscle.id).filter((candidate) => candidate.eligible)]));
+  const performanceByExercise = new Map();
+  candidateCatalog.forEach((candidates) => candidates.forEach((candidate) => performanceByExercise.set(candidate.exercise.id, { performanceSignal: candidate.signal, planTarget: coachPlanTargetForExercise(candidate.exercise, candidate.signal) })));
+
+  // Count rejected move reasons by muscle and move type so direct repair blockers outrank noisier alternatives.
+  const recordRejected = (muscleId, reason, kind = "general") => {
+    rejected[reason] = (rejected[reason] || 0) + 1;
+    if (!muscleId) return;
+    if (!rejectedByMuscle[muscleId]) rejectedByMuscle[muscleId] = {};
+    rejectedByMuscle[muscleId][reason] = (rejectedByMuscle[muscleId][reason] || 0) + 1;
+    if (!rejectedByMuscleMove[muscleId]) rejectedByMuscleMove[muscleId] = {};
+    if (!rejectedByMuscleMove[muscleId][kind]) rejectedByMuscleMove[muscleId][kind] = {};
+    rejectedByMuscleMove[muscleId][kind][reason] = (rejectedByMuscleMove[muscleId][kind][reason] || 0) + 1;
+  };
+
+  // Keep only active, eligible definitions for a requested muscle and rank deterministically.
+  const candidatesForMuscle = (muscleId, projected) => {
+    const exercisePool = new Map(exercises.map((exercise) => [exercise.id, exercise]));
+    return (candidateCatalog.get(muscleId) || [])
+      .filter((candidate) => exercisePool.has(candidate.exercise.id) && isActiveCoachExercise(candidate.exercise))
+      .map((candidate) => ({
+        ...candidate,
+        searchScore: candidate.score + Object.entries(coachExerciseStimulusCredits(candidate.exercise, 1)).reduce((score, [stimulatedId, credit]) => {
+          const gap = Math.max(0, (Number(setup.targets[stimulatedId]) || HYPERTROPHY.minimumSets) - (Number(projected[stimulatedId]) || 0));
+          return score + Math.min(gap, credit) * (setup.priorities.includes(stimulatedId) ? 12 : 8);
+        }, 0)
+      }))
+      .sort((a, b) => b.searchScore - a.searchScore || a.exercise.id.localeCompare(b.exercise.id))
+      .map((candidate) => exercisePool.get(candidate.exercise.id))
+      .slice(0, 3);
+  };
+
+  // Reuse frozen progression metadata and timing for every generated candidate item.
+  const makeSearchItem = (exercise, muscle, sets, phase = "repair") => coachWeeklySearchItem(exercise, muscle, sets, phase, {
+    ...(performanceByExercise.get(exercise.id) || {}),
+    exerciseMinutes: timing.exerciseMinutes
+  });
+
+  // Evaluate one move, reject invalid schedules with a reason, and deduplicate accepted states.
+  const consider = (collection, nextSessions, kind, muscleId = "") => {
+    if (attemptedMoves >= maxStates) {
+      hitLimit = true;
+      return;
+    }
+    attemptedMoves += 1;
+    moveCounts[kind] = (moveCounts[kind] || 0) + 1;
+    const validation = validateCoachWeeklySearchSchedule(nextSessions, setup, { exercises, lastDirect, recoveryClearForDate, sessionMinutes: timing.sessionMinutes });
+    if (!validation.valid) {
+      recordRejected(muscleId, validation.reason, kind);
+      return;
+    }
+    const signature = coachWeeklySearchSignature(nextSessions);
+    if (seen.has(signature)) return;
+    seen.add(signature);
+    const projected = coachWeeklySearchProjection(baseProjected, nextSessions);
+    collection.push({ sessions: nextSessions, projected, score: coachWeeklySearchScore(setup, projected, nextSessions) });
+    acceptedMoves += 1;
+  };
+
+  // Explore at most three move layers; two layers are enough for move-then-add or replace-then-repair cases.
+  for (let depth = 0; depth < 3 && frontier.length && !hitLimit; depth += 1) {
+    const nextStates = [];
+    for (const state of frontier) {
+      const shortfalls = muscleGroups
+        .map((muscle) => ({
+          muscle,
+          gap: Math.max(0, (Number(setup.targets[muscle.id]) || HYPERTROPHY.minimumSets) - (Number(state.projected[muscle.id]) || 0)),
+          floorGap: Math.max(0, HYPERTROPHY.minimumSets - (Number(state.projected[muscle.id]) || 0))
+        }))
+        .filter((entry) => entry.gap > 0.001)
+        .sort((a, b) => (
+          b.floorGap - a.floorGap
+          || Number(setup.priorities.includes(b.muscle.id)) - Number(setup.priorities.includes(a.muscle.id))
+          || b.gap - a.gap
+        ))
+        .slice(0, 6);
+
+      // Try direct target additions first so obvious legal capacity is consumed before more disruptive moves.
+      for (const { muscle, gap } of shortfalls) {
+        const candidates = candidatesForMuscle(muscle.id, state.projected);
+        if (!candidates.length) recordRejected(muscle.id, "missing-or-performance-coverage", "coverage");
+        for (const session of state.sessions.filter((candidate) => candidate.status === "planned")) {
+          for (const exercise of candidates) {
+            const usedIds = new Set(session.items.map((item) => item.exercise.id));
+            const conflictKeys = new Set(session.items.map((item) => coachExerciseConflictKey(item.exercise)));
+            if (usedIds.has(exercise.id) || conflictKeys.has(coachExerciseConflictKey(exercise))) continue;
+            const setOptions = [...new Set([COACH_MIN_SETS_PER_EXERCISE, Math.max(COACH_MIN_SETS_PER_EXERCISE, Math.min(4, Math.ceil(gap)))])];
+            for (const sets of setOptions) {
+              const next = cloneCoachWeeklySearchSessions(state.sessions, timing.sessionMinutes);
+              const targetSession = next.find((candidate) => candidate.date === session.date);
+              targetSession.items.push(makeSearchItem(exercise, muscle, sets));
+              consider(nextStates, next, "add", muscle.id);
+            }
+          }
+        }
+      }
+
+      // Relocate complete blocks without changing credits so a later layer can use a newly opened slot.
+      for (const source of state.sessions.filter((candidate) => candidate.status === "planned")) {
+        for (const destination of state.sessions.filter((candidate) => candidate.status === "planned" && candidate.date !== source.date)) {
+          for (let itemIndex = 0; itemIndex < source.items.length; itemIndex += 1) {
+            const next = cloneCoachWeeklySearchSessions(state.sessions, timing.sessionMinutes);
+            const nextSource = next.find((candidate) => candidate.date === source.date);
+            const nextDestination = next.find((candidate) => candidate.date === destination.date);
+            const [moved] = nextSource.items.splice(itemIndex, 1);
+            nextDestination.items.push(moved);
+            consider(nextStates, next, "move", moved.muscle.id);
+          }
+        }
+      }
+
+      // Swap within the same planned primary muscle so better secondary coverage can close another target gap.
+      for (const session of state.sessions.filter((candidate) => candidate.status === "planned")) {
+        session.items.forEach((item, itemIndex) => {
+          candidatesForMuscle(item.muscle.id, state.projected)
+            .filter((exercise) => exercise.id !== item.exercise.id)
+            .forEach((exercise) => {
+              const next = cloneCoachWeeklySearchSessions(state.sessions, timing.sessionMinutes);
+              const targetSession = next.find((candidate) => candidate.date === session.date);
+              targetSession.items.splice(itemIndex, 1, makeSearchItem(exercise, item.muscle, item.sets, item.phase));
+              consider(nextStates, next, "exercise-swap", item.muscle.id);
+            });
+        });
+      }
+
+      // Replace one block with target-directed work; later layers may restore any temporarily displaced floor work elsewhere.
+      for (const { muscle, gap } of shortfalls) {
+        for (const exercise of candidatesForMuscle(muscle.id, state.projected)) {
+          for (const session of state.sessions.filter((candidate) => candidate.status === "planned")) {
+            for (let itemIndex = 0; itemIndex < session.items.length; itemIndex += 1) {
+              const next = cloneCoachWeeklySearchSessions(state.sessions, timing.sessionMinutes);
+              const targetSession = next.find((candidate) => candidate.date === session.date);
+              const sets = Math.max(COACH_MIN_SETS_PER_EXERCISE, Math.min(4, Math.ceil(gap)));
+              targetSession.items.splice(itemIndex, 1, makeSearchItem(exercise, muscle, sets));
+              consider(nextStates, next, "replace", muscle.id);
+            }
+          }
+        }
+      }
+
+      // Add one set only when the existing exercise supplies credit to a currently unmet target.
+      const unmetIds = new Set(shortfalls.map((entry) => entry.muscle.id));
+      for (const session of state.sessions.filter((candidate) => candidate.status === "planned")) {
+        session.items.forEach((item, itemIndex) => {
+          const credits = coachExerciseStimulusCredits(item.exercise, 1);
+          const affectedMuscleId = shortfalls.find((entry) => unmetIds.has(entry.muscle.id) && Number(credits[entry.muscle.id]) > 0)?.muscle.id;
+          if (!affectedMuscleId || ["reset", "deload"].includes(item.planTarget?.kind)) return;
+          const next = cloneCoachWeeklySearchSessions(state.sessions, timing.sessionMinutes);
+          next.find((candidate) => candidate.date === session.date).items[itemIndex].sets += 1;
+          consider(nextStates, next, "add-set", affectedMuscleId);
+        });
+      }
+      if (hitLimit) break;
+    }
+    nextStates.sort((a, b) => compareCoachWeeklySearchScores(a.score, b.score) || coachWeeklySearchSignature(a.sessions).localeCompare(coachWeeklySearchSignature(b.sessions)));
+    frontier = nextStates.slice(0, 16);
+    if (frontier[0] && compareCoachWeeklySearchScores(frontier[0].score, best.score) < 0) best = frontier[0];
+    if (best.score[2] <= 0.001) break;
+  }
+
+  // Summarize unresolved targets with the most frequently observed blocker for each muscle.
+  const shortfalls = muscleGroups.map((muscle) => {
+    const gap = Math.max(0, (Number(setup.targets[muscle.id]) || HYPERTROPHY.minimumSets) - (Number(best.projected[muscle.id]) || 0));
+    const reasons = rejectedByMuscle[muscle.id] || {};
+    const reasonsByMove = rejectedByMuscleMove[muscle.id] || {};
+    const directReasons = reasonsByMove["add-set"] || reasonsByMove.add || reasonsByMove["exercise-swap"] || reasonsByMove.move || reasonsByMove.replace || reasonsByMove.coverage || reasons;
+    const reason = Object.entries(directReasons).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0]?.[0] || "no-supported-move";
+    return { id: muscle.id, label: muscle.label, gap, reason, rejections: reasons };
+  }).filter((item) => item.gap > 0.001);
+  const improved = compareCoachWeeklySearchScores(best.score, initialState.score) < 0;
+  const terminationReason = best.score[2] <= 0.001 ? "targets-met" : hitLimit ? "search-limit" : "no-supported-improvement";
+  return {
+    sessions: cloneCoachWeeklySearchSessions(best.sessions, timing.sessionMinutes),
+    projected: { ...best.projected },
+    diagnostics: { mode: "bounded", improved, attemptedMoves, acceptedMoves, moveCounts, rejected, rejectedByMuscleMove, shortfalls, terminationReason, maxStates }
+  };
+}
+
+// Translate internal search rejection keys into concise user-facing scheduling constraints.
+function coachWeeklySearchReasonLabel(reason) {
+  return ({
+    "time-limit": "selected timeframe",
+    "exercise-limit": "six-exercise session limit",
+    "recovery-spacing": "recovery spacing",
+    "missing-coverage": "missing active exercise coverage",
+    "missing-or-performance-coverage": "missing coverage or performance safeguard",
+    "duplicate-conflict": "exercise-library conflict",
+    "two-set-minimum": "two-set minimum",
+    "exercise-set-cap": "per-exercise set cap",
+    "no-supported-move": "no supported improving move"
+  })[reason] || "supported search exhausted";
+}
+
+function buildCoachWeeklyPlan(setupInput = selectedCoachWeeklyPlan(), options = {}) {
   const setup = normalizeCoachWeeklyPlan(setupInput);
   const weekStart = currentTrainingWeekStart();
   const selectedDates = setup.days
@@ -5491,7 +6089,9 @@ function buildCoachWeeklyPlan(setupInput = selectedCoachWeeklyPlan()) {
         priorityGap: setup.priorities.includes(candidateMuscle.id) ? Math.max(0, candidateTarget - current) : 0
       }];
     }));
-    const exerciseCandidates = coachExerciseCandidates(muscle.id, session.usedExercises, { stimulusNeeds })
+    // Exclude singular/plural duplicates of exercises already assigned to this generated day.
+    const usedExerciseConflictKeys = new Set(session.items.map((item) => coachExerciseConflictKey(item.exercise)));
+    const exerciseCandidates = coachExerciseCandidates(muscle.id, session.usedExercises, { stimulusNeeds, usedExerciseConflictKeys })
       .sort((a, b) => (plannedExerciseUses.get(a.exercise.id) || 0) - (plannedExerciseUses.get(b.exercise.id) || 0) || b.score - a.score);
     const chosen = exerciseCandidates.find((candidate) => candidate.eligible) || exerciseCandidates[0];
     if (!chosen || !isActiveCoachExercise(chosen.exercise)) return false;
@@ -5564,14 +6164,35 @@ function buildCoachWeeklyPlan(setupInput = selectedCoachWeeklyPlan()) {
     session.totalMinutes = plannedCoachSessionMinutes(session.items);
   });
 
+  // Run the heavier bounded repair only for Generate, explicit optimization, and debug callers that opt in.
+  let optimizer = { mode: "not-run", improved: false, attemptedMoves: 0, acceptedMoves: 0, moveCounts: {}, rejected: {}, shortfalls: [], terminationReason: "not-run", maxStates: 0 };
+  if (options.optimize === true) {
+    const baseProjected = Object.fromEntries(actualStats.map((stat) => [stat.id, Number(stat.sets) || 0]));
+    const optimized = optimizeCoachWeeklySchedule({ sessions, baseProjected, setup, lastDirect, maxStates: Number(options.maxStates) || 1200 });
+    optimized.sessions.forEach((optimizedSession) => {
+      const session = sessions.find((candidate) => candidate.date === optimizedSession.date);
+      if (!session || session.status !== "planned") return;
+      session.items = orderCoachSessionItems(optimizedSession.items);
+      session.totalMinutes = plannedCoachSessionMinutes(session.items);
+    });
+    Object.assign(projected, optimized.projected);
+    optimizer = optimized.diagnostics;
+  }
+
   const remainingSets = muscleGroups.reduce((sum, muscle) => sum + Math.max(0, setup.targets[muscle.id] - (actualStats.find((stat) => stat.id === muscle.id)?.sets || 0)), 0);
   const missing = muscleGroups.filter((muscle) => setup.targets[muscle.id] > (projected[muscle.id] || 0) && !hasPrimaryExerciseForMuscle(muscle.id));
   const attainment = coachWeeklyAttainment(setup, projected);
   const priorityShortfalls = attainment.priorityUnmet.map((item) => {
     const exercise = exerciseDatabase().find((candidate) => candidate.primaryMuscles.includes(item.id));
     const eligibleDates = plannedSessions.filter((session) => recoveryClearForDate(item.id, session.date));
+    const searchReason = optimizer.shortfalls.find((shortfall) => shortfall.id === item.id)?.reason;
     let limitation = "selected timeframe";
-    if (!exercise) limitation = "missing active exercise coverage";
+    if (searchReason === "time-limit") limitation = "selected timeframe";
+    else if (searchReason === "exercise-limit") limitation = "six-exercise session limit";
+    else if (searchReason === "recovery-spacing") limitation = "recovery spacing";
+    else if (searchReason === "missing-or-performance-coverage") limitation = "missing coverage or performance safeguard";
+    else if (searchReason === "duplicate-conflict") limitation = "exercise-library conflict";
+    else if (!exercise) limitation = "missing active exercise coverage";
     else if (!eligibleDates.length) limitation = "recovery spacing";
     else if (eligibleDates.every((session) => session.items.length >= COACH_MAX_EXERCISES_PER_SESSION)) limitation = "six-exercise session limit";
     return { ...item, limitation };
@@ -5580,6 +6201,10 @@ function buildCoachWeeklyPlan(setupInput = selectedCoachWeeklyPlan()) {
   const unmetSummary = attainment.unmet.slice(0, 4).map((item) => `${item.label} ${fmt(item.planned, 1)}/${fmt(item.target)}`).join(", ");
   const unmetRemainder = Math.max(0, attainment.unmet.length - 4);
   const attainmentSummary = `Floors planned: ${attainment.floorMet}/${muscleGroups.length}. Defined targets planned: ${attainment.targetMet}/${muscleGroups.length}.${attainment.priorityTotal ? ` Priority targets planned: ${attainment.priorityMet}/${attainment.priorityTotal}.` : ""}`;
+  // Summarize the measured blocker for each visible shortfall without claiming bounded search proved impossibility.
+  const searchLimitSummary = options.optimize === true
+    ? optimizer.shortfalls.slice(0, 4).map((item) => `${item.label} - ${coachWeeklySearchReasonLabel(item.reason)}`).join("; ")
+    : "";
   return {
     setup,
     sessions,
@@ -5588,6 +6213,7 @@ function buildCoachWeeklyPlan(setupInput = selectedCoachWeeklyPlan()) {
     setBudgets,
     missing,
     attainment,
+    optimizer,
     capacity: {
       ...capacity,
       allocatedSetCapacity: budgetAllocation.allocatedCapacity,
@@ -5597,7 +6223,7 @@ function buildCoachWeeklyPlan(setupInput = selectedCoachWeeklyPlan()) {
         ? `${attainmentSummary} Add primary exercises for ${missing.map((muscle) => muscle.label).join(", ")} before Coach can distribute those targets.`
         : capacityFits
         ? `${attainmentSummary} Coach can schedule every weekly floor and defined target across the remaining selected days.`
-        : `${attainmentSummary} Still short: ${unmetSummary}${unmetRemainder ? `, and ${unmetRemainder} more` : ""}.${priorityShortfalls.length ? ` Priority limits: ${priorityShortfalls.map((item) => `${item.label} - ${item.limitation}`).join("; ")}.` : ""} ${remainingSets > capacity.estimatedSetCapacity ? "The selected days do not provide enough estimated set capacity." : "The remaining day spacing, recovery rules, timeframe, or six-exercise limit prevent Coach from safely assigning every requested set."}`
+        : `${attainmentSummary} Still short: ${unmetSummary}${unmetRemainder ? `, and ${unmetRemainder} more` : ""}.${priorityShortfalls.length ? ` Priority limits: ${priorityShortfalls.map((item) => `${item.label} - ${item.limitation}`).join("; ")}.` : ""}${searchLimitSummary ? ` Search limits: ${searchLimitSummary}.` : ""} ${options.optimize === true ? (optimizer.terminationReason === "search-limit" ? "Coach reached its bounded repair limit before proving that no better supported schedule exists." : "No additional supported improvement was found in the generated schedule.") : (remainingSets > capacity.estimatedSetCapacity ? "The selected days do not provide enough estimated set capacity." : "The remaining day spacing, recovery rules, timeframe, or six-exercise limit prevent Coach from safely assigning every requested set.")}`
     }
   };
 }
@@ -5626,6 +6252,7 @@ function compactCoachWeeklyPlanSnapshot(plan) {
     missingIds: plan.missing.map((muscle) => muscle.id),
     capacity: clonePlain(plan.capacity),
     attainment: clonePlain(plan.attainment),
+    optimizer: clonePlain(plan.optimizer || null),
     targetAdjustments: clonePlain(plan.targetAdjustments || [])
   };
 }
@@ -5679,6 +6306,7 @@ function displayedCoachWeeklyPlan(setupInput = selectedCoachWeeklyPlan()) {
     missing: (snapshot.missingIds || []).map((id) => muscleGroups.find((muscle) => muscle.id === id)).filter(Boolean),
     capacity: clonePlain(snapshot.capacity || {}),
     attainment: clonePlain(snapshot.attainment || {}),
+    optimizer: clonePlain(snapshot.optimizer || null),
     targetAdjustments: clonePlain(snapshot.targetAdjustments || []),
     stale: invalidExercise || !setup.sourceFingerprint || setup.sourceFingerprint !== currentFingerprint
   };
@@ -7289,6 +7917,94 @@ function exerciseLibraryControlsMarkup() {
   `;
 }
 
+// Return the explicit submitted date span for one stable exercise ID.
+function exerciseSubmittedDateRange(exerciseId) {
+  const dates = state.workouts
+    .filter((workout) => !workout.pendingDraft && String(workout.exerciseId || "") === exerciseId && isValidISODate(workout.date))
+    .map((workout) => workout.date)
+    .sort();
+  return { startDate: dates[0] || todayISO(), endDate: dates.at(-1) || todayISO() };
+}
+
+// Start each merge review with the duplicate's actual submitted date span, never an implicit all-history range.
+function exerciseMergeReviewForConflict(conflictKey) {
+  const conflict = coachExerciseDefinitionConflicts().find((item) => item.key === conflictKey);
+  if (!conflict || conflict.exerciseIds.length < 2) return null;
+  const canonicalId = conflict.exerciseIds[0];
+  const duplicateId = conflict.exerciseIds[1];
+  const range = exerciseSubmittedDateRange(duplicateId);
+  return {
+    conflictKey,
+    exerciseIds: [...conflict.exerciseIds],
+    canonicalId,
+    duplicateId,
+    startDate: range.startDate,
+    endDate: range.endDate
+  };
+}
+
+// Render the review evidence, explicit date scope, confirmation controls, and reversible active aliases.
+function exerciseMergeToolsMarkup() {
+  const conflicts = coachExerciseDefinitionConflicts();
+  const aliases = exerciseAliases();
+  const review = state.exerciseMergeReview;
+  let reviewMarkup = "";
+  if (review) {
+    const definitions = review.exerciseIds.map(exerciseDefinitionById).filter(Boolean);
+    let preview = null;
+    let previewError = "";
+    try {
+      preview = exerciseAliasPreview(review);
+    } catch (error) {
+      previewError = error.message || "This merge cannot be previewed.";
+    }
+    const optionMarkup = definitions.map((exercise) => `<option value="${escapeHtml(exercise.id)}">${escapeHtml(exercise.name)}</option>`).join("");
+    const changes = preview ? Object.entries(preview.creditChanges) : [];
+    reviewMarkup = `
+      <section class="exercise-merge-review" aria-label="Review exercise merge">
+        <div class="record-shelf-heading"><div><h3>Review historical correction</h3><p>Raw submitted workouts will not be rewritten.</p></div></div>
+        <div class="grid two exercise-merge-definition-grid">
+          ${definitions.map((exercise) => `<div class="exercise-merge-definition"><strong>${escapeHtml(exercise.name)}</strong>${exerciseMuscleBadges(exercise)}<span>${escapeHtml(exercise.equipment || "custom")} - ${exerciseUsageStats(exercise).sessionCount} sessions</span></div>`).join("")}
+        </div>
+        <div class="field-row">
+          <div class="field"><label for="exercise-merge-canonical">Keep as canonical</label><select id="exercise-merge-canonical" data-exercise-merge-field="canonicalId">${optionMarkup.replace(`value="${escapeHtml(review.canonicalId)}"`, `value="${escapeHtml(review.canonicalId)}" selected`)}</select></div>
+          <div class="field"><label for="exercise-merge-duplicate">Treat as duplicate</label><select id="exercise-merge-duplicate" data-exercise-merge-field="duplicateId">${optionMarkup.replace(`value="${escapeHtml(review.duplicateId)}"`, `value="${escapeHtml(review.duplicateId)}" selected`)}</select></div>
+        </div>
+        <div class="field-row">
+          <div class="field"><label for="exercise-merge-start">First affected date</label><input id="exercise-merge-start" type="date" data-exercise-merge-field="startDate" value="${escapeHtml(review.startDate)}"></div>
+          <div class="field"><label for="exercise-merge-end">Last affected date</label><input id="exercise-merge-end" type="date" data-exercise-merge-field="endDate" value="${escapeHtml(review.endDate)}"></div>
+        </div>
+        ${previewError ? `<p class="exercise-form-error" role="alert">${escapeHtml(previewError)}</p>` : `
+          <div class="exercise-merge-impact">
+            <strong>${preview.affectedWorkoutCount} submitted workout${preview.affectedWorkoutCount === 1 ? "" : "s"} affected</strong>
+            <p>${preview.affectedDates.length ? escapeHtml(preview.affectedDates.map(formatShortDate).join(", ")) : "No workouts in this range."}</p>
+            <div class="badge-row">${changes.length ? changes.map(([muscle, value]) => `<span class="muscle-badge ${value > 0 ? "primary" : "secondary"}">${escapeHtml(muscleLabel(muscle))} ${value > 0 ? "+" : ""}${fmt(value, 1)} sets</span>`).join("") : `<span class="muted small">Muscle credits do not change.</span>`}</div>
+            <p class="muted small">History, Records, and Trends: ${preview.grouping.beforeGroups} current group${preview.grouping.beforeGroups === 1 ? "" : "s"} become ${preview.grouping.afterGroups} after this scoped correction.</p>
+            <div class="exercise-merge-workouts">${preview.affectedWorkouts.map((workout) => `<span><strong>${escapeHtml(formatShortDate(workout.date))}</strong> ${setRowsFromWorkout(workout).length} sets - ${escapeHtml(bestSetLabel(workout))} best - ${fmt(workoutVolume(workout), 0)} lb volume${averageRir(workout) === null ? "" : ` - ${fmt(averageRir(workout), 1)} avg RIR`}</span>`).join("")}</div>
+          </div>
+        `}
+        <div class="grid two">
+          <button class="primary-button" type="button" data-action="apply-exercise-merge" ${!preview?.affectedWorkoutCount ? "disabled" : ""}>Apply reviewed merge</button>
+          <button class="ghost-button" type="button" data-action="cancel-exercise-merge">Cancel</button>
+        </div>
+      </section>
+    `;
+  }
+  if (!conflicts.length && !Object.keys(aliases).length && !reviewMarkup) return "";
+  return `
+    <details class="section chart-panel collapsible-panel exercise-merge-panel" open>
+      <summary><span>Exercise definition review</span><small>${conflicts.length} conflict${conflicts.length === 1 ? "" : "s"} - ${Object.keys(aliases).length} active merge${Object.keys(aliases).length === 1 ? "" : "s"}</small></summary>
+      ${conflicts.map((conflict) => `<div class="exercise-merge-conflict"><span><strong>${escapeHtml(conflict.names.join(" / "))}</strong><small>Review muscle tags and submitted history before choosing one definition.</small></span><button class="ghost-mini" type="button" data-action="review-exercise-merge" data-conflict-key="${escapeHtml(conflict.key)}">Review merge</button></div>`).join("")}
+      ${reviewMarkup}
+      ${Object.values(aliases).map((alias) => {
+        const duplicate = exerciseDefinitionById(alias.duplicateId);
+        const canonical = exerciseDefinitionById(alias.canonicalId);
+        return `<div class="exercise-merge-active"><span><strong>${escapeHtml(duplicate?.name || alias.duplicateId)} to ${escapeHtml(canonical?.name || alias.canonicalId)}</strong><small>${escapeHtml(formatShortDate(alias.startDate))} through ${escapeHtml(formatShortDate(alias.endDate))}</small></span><button class="ghost-mini" type="button" data-action="rollback-exercise-merge" data-duplicate-id="${escapeHtml(alias.duplicateId)}">Undo merge</button></div>`;
+      }).join("")}
+    </details>
+  `;
+}
+
 function renderExercises() {
   const allCustomExercises = getCustomExercises({ includeArchived: true });
   const editing = allCustomExercises.find((exercise) => exercise.id === state.editingExerciseId);
@@ -7317,6 +8033,8 @@ function renderExercises() {
         <p class="hero-copy">Build the movement database TrainWise uses for logging, hard-set credits, charts, and coaching.</p>
       </div>
     </section>
+
+    ${exerciseMergeToolsMarkup()}
 
     ${exerciseCoverageMarkup()}
 
@@ -7664,7 +8382,7 @@ function miniSparkline(points, color = "#35d58c") {
 }
 
 function historyExerciseNames() {
-  return [...new Set(state.workouts.map((entry) => entry.exercise))]
+  return [...new Set(state.workouts.map((entry) => effectiveWorkoutExerciseName(entry)).filter(Boolean))]
     .sort((a, b) => a.localeCompare(b));
 }
 
@@ -8567,6 +9285,14 @@ function coachWeeklyTargetAdjustmentMessage(adjustments = []) {
   return `${visible.join(", ")}${remainder ? `, and ${remainder} more` : ""}.`;
 }
 
+// Surface active near-duplicate definitions without guessing which stored muscle assignment is correct.
+function renderCoachWeekExerciseConflictWarning(conflicts = coachExerciseDefinitionConflicts()) {
+  if (!conflicts.length) return "";
+  const labels = conflicts.slice(0, 3).map((conflict) => conflict.names.join(" / "));
+  const remainder = Math.max(0, conflicts.length - labels.length);
+  return `<section class="section coach-week-capacity warn"><strong>Exercise library conflict</strong><p>${escapeHtml(`${labels.join("; ")}${remainder ? `; and ${remainder} more` : ""}. Review these definitions in Exercises; Coach will not place both variants in one session.`)}</p></section>`;
+}
+
 function renderCoachWeek() {
   const setup = selectedCoachWeeklyPlan();
   const plan = displayedCoachWeeklyPlan(setup);
@@ -8582,6 +9308,7 @@ function renderCoachWeek() {
         <button class="primary-button" type="submit">Generate weekly plan</button>
       </form>
     </details>
+    ${renderCoachWeekExerciseConflictWarning()}
     ${plan.stale ? `<section class="section coach-week-capacity warn"><strong>Weekly plan uses earlier information</strong><p>Inputs, submitted workouts, loading styles, or the active exercise library changed. Valid planned days can still be copied; Generate when you want Coach to recalculate the week.</p></section>` : ""}
     ${plan.targetAdjustments?.length ? `<section class="section coach-week-capacity warn"><strong>Targets adjusted to the generated schedule</strong><p>${escapeHtml(coachWeeklyTargetAdjustmentMessage(plan.targetAdjustments))}</p></section>` : ""}
     <section class="section coach-week-capacity ${plan.capacity.fits ? "good" : "warn"}"><strong>${plan.capacity.fits ? "All weekly targets are planned" : "Some weekly targets cannot be planned"}</strong><p>${escapeHtml(plan.capacity.message)}</p></section>
@@ -8594,7 +9321,8 @@ async function commitCoachWeeklyPlan(setupInput, message) {
   // Reject an empty explicit schedule so Generate never restores a weekday the user turned off.
   if (!Array.isArray(setupInput?.days) || !setupInput.days.length) throw new Error("Select at least one training day.");
   const requestedSetup = normalizeCoachWeeklyPlan({ ...setupInput, generatedAt: new Date().toISOString(), generatedPlan: null, sourceFingerprint: "" });
-  const generatedPlan = finalizeCoachWeeklyGeneratedPlan(requestedSetup, buildCoachWeeklyPlan(requestedSetup));
+  // Generate is the authoritative boundary where bounded schedule repair may spend its mobile-safe search budget.
+  const generatedPlan = finalizeCoachWeeklyGeneratedPlan(requestedSetup, buildCoachWeeklyPlan(requestedSetup, { optimize: true }));
   const setup = normalizeCoachWeeklyPlan({ ...generatedPlan.setup, generatedAt: requestedSetup.generatedAt, generatedPlan: null, sourceFingerprint: "" });
   const sourceFingerprint = coachWeeklySourceFingerprint(setup);
   const committed = normalizeCoachWeeklyPlan({
@@ -8714,7 +9442,8 @@ function autoFitCoachWeekForm(form, context = coachWeekMixerFormContext(form)) {
 
 // Apply available capacity upward without allowing the optimizer to lower any current fader target.
 function optimizeCoachWeekForm(form, context = coachWeekMixerFormContext(form)) {
-  const projectedSets = buildCoachWeeklyPlan(context.setup).projected;
+  // Explicit Optimize Under Capacity may use the same bounded repair without putting search work on fader movement.
+  const projectedSets = buildCoachWeeklyPlan(context.setup, { optimize: true }).projected;
   const result = optimizeCoachWeekTargetsToCapacity({
     setup: context.setup,
     bankedSets: context.bankedSets,
@@ -9956,6 +10685,7 @@ function exportSafeSettings() {
     dashboardWidgets: selectedDashboardWidgets(),
     dashboardWidgetOrder: dashboardWidgetOrder(),
     coachWeeklyPlan: selectedCoachWeeklyPlan(),
+    exerciseAliases: exerciseAliases(),
     lastBackupAt: new Date().toISOString(),
     lastCloudPushAt: String(state.settings.lastCloudPushAt || ""),
     lastCloudPullAt: String(state.settings.lastCloudPullAt || "")
@@ -10256,12 +10986,14 @@ function recordsDebugSummary(records = allTimeRecords()) {
 }
 
 function coachDebugWeeklyPlan() {
-  const plan = buildCoachWeeklyPlan(normalizeCoachWeeklyPlan(state.settings.coachWeeklyPlan || {}));
+  // Debug exports run bounded repair so rejected moves and termination reasons describe the generated path users receive.
+  const plan = buildCoachWeeklyPlan(normalizeCoachWeeklyPlan(state.settings.coachWeeklyPlan || {}), { optimize: true });
   return {
     setup: clonePlain(plan.setup),
     remainingDates: plan.sessions.filter((session) => session.status === "planned").map((session) => session.date),
     capacity: clonePlain(plan.capacity),
     attainment: clonePlain(plan.attainment),
+    optimizer: clonePlain(plan.optimizer || null),
     actualSets: Object.fromEntries(plan.actualStats.map((stat) => [stat.id, stat.sets])),
     setBudgets: clonePlain(plan.setBudgets || {}),
     projectedSets: clonePlain(plan.projected),
@@ -10511,6 +11243,7 @@ function normalizeBackupSettings(settings = {}) {
     dashboardWidgets: Array.isArray(settings.dashboardWidgets) ? settings.dashboardWidgets : [...DEFAULT_TODAY_WIDGETS],
     dashboardWidgetOrder: Array.isArray(settings.dashboardWidgetOrder) ? settings.dashboardWidgetOrder : [...DEFAULT_TODAY_WIDGETS],
     coachWeeklyPlan: normalizeCoachWeeklyPlan(settings.coachWeeklyPlan || {}),
+    exerciseAliases: normalizeExerciseAliases(settings.exerciseAliases || {}),
     lastBackupAt: String(settings.lastBackupAt || ""),
     lastCloudPushAt: String(settings.lastCloudPushAt || ""),
     lastCloudPullAt: String(settings.lastCloudPullAt || "")
@@ -10540,6 +11273,7 @@ async function importPayload(payload) {
     dashboardWidgets: normalized.settings.dashboardWidgets,
     dashboardWidgetOrder: normalized.settings.dashboardWidgetOrder,
     coachWeeklyPlan: normalized.settings.coachWeeklyPlan,
+    exerciseAliases: normalized.settings.exerciseAliases,
     lastBackupAt: normalized.settings.lastBackupAt,
     lastCloudPushAt: normalized.settings.lastCloudPushAt,
     lastCloudPullAt: normalized.settings.lastCloudPullAt,
@@ -10915,7 +11649,9 @@ async function applyRemoteSyncRecord(remoteInput) {
   } else if (remote.recordType === "preference" && SYNC_SAFE_PREFERENCES.includes(remote.recordId) && !deleted) {
     const value = remote.recordId === "maintenanceProfile"
       ? normalizeMaintenanceProfile(remote.payload?.value || {})
-      : clonePlain(remote.payload?.value);
+      : remote.recordId === "exerciseAliases"
+        ? normalizeExerciseAliases(remote.payload?.value || {})
+        : clonePlain(remote.payload?.value);
     await saveSetting(remote.recordId, value);
   }
 
@@ -11837,6 +12573,39 @@ async function handleAction(action, target) {
       announce(`${exercise} set to rep-first progression.`, { tone: "good" });
       await render();
     },
+    // Exercise merge actions keep review, confirmation, and rollback explicit in the Exercises screen.
+    async "review-exercise-merge"() {
+      const review = exerciseMergeReviewForConflict(target.dataset.conflictKey);
+      if (!review) throw new Error("Exercise conflict not found.");
+      state.exerciseMergeReview = review;
+      await render();
+      document.querySelector(".exercise-merge-review")?.scrollIntoView?.({ block: "start", behavior: "smooth" });
+    },
+    async "cancel-exercise-merge"() {
+      state.exerciseMergeReview = null;
+      await render();
+    },
+    async "apply-exercise-merge"() {
+      const review = state.exerciseMergeReview;
+      if (!review) throw new Error("Open an exercise merge review first.");
+      const preview = exerciseAliasPreview(review);
+      if (!confirm(`Merge ${preview.affectedWorkoutCount} submitted workout${preview.affectedWorkoutCount === 1 ? "" : "s"} into "${preview.canonical.name}" for this date range? Raw workout rows will remain unchanged.`)) return;
+      await applyExerciseAliasMerge(review);
+      state.exerciseMergeReview = null;
+      announce("Exercise history merged.", { tone: "good", detail: "Derived credits, History, Records, and Trends now use the canonical definition. Undo remains available in Exercises." });
+      await render();
+    },
+    async "rollback-exercise-merge"() {
+      const duplicateId = target.dataset.duplicateId;
+      const alias = exerciseAliases()[duplicateId];
+      if (!alias) throw new Error("Exercise merge not found.");
+      const duplicate = exerciseDefinitionById(alias.duplicateId);
+      const canonical = exerciseDefinitionById(alias.canonicalId);
+      if (!confirm(`Undo the merge from "${duplicate?.name || alias.duplicateId}" to "${canonical?.name || alias.canonicalId}"?`)) return;
+      await rollbackExerciseAliasMerge(duplicateId);
+      announce("Exercise merge undone.", { tone: "good", detail: "Historical credits and grouping use their original submitted definitions again." });
+      await render();
+    },
     async "edit-exercise"() {
       state.activeTab = "exercises";
       state.editingExerciseId = target.dataset.id;
@@ -12423,6 +13192,29 @@ document.addEventListener("change", async (event) => {
     }
     if (event.target.matches("#exercise-primary")) {
       syncSecondaryMuscleCheckboxes(event.target.closest("#exercise-form"));
+    }
+    // Merge field changes refresh only the in-memory preview and never alter history before confirmation.
+    if (event.target.matches("[data-exercise-merge-field]")) {
+      const field = event.target.dataset.exerciseMergeField;
+      if (state.exerciseMergeReview && ["canonicalId", "duplicateId", "startDate", "endDate"].includes(field)) {
+        const previousDuplicateId = state.exerciseMergeReview.duplicateId;
+        state.exerciseMergeReview = { ...state.exerciseMergeReview, [field]: event.target.value };
+        if (["canonicalId", "duplicateId"].includes(field) && state.exerciseMergeReview.canonicalId === state.exerciseMergeReview.duplicateId) {
+          const alternative = state.exerciseMergeReview.exerciseIds.find((id) => id !== event.target.value) || "";
+          state.exerciseMergeReview = {
+            ...state.exerciseMergeReview,
+            [field === "canonicalId" ? "duplicateId" : "canonicalId"]: alternative
+          };
+        }
+        if (state.exerciseMergeReview.duplicateId !== previousDuplicateId) {
+          state.exerciseMergeReview = {
+            ...state.exerciseMergeReview,
+            ...exerciseSubmittedDateRange(state.exerciseMergeReview.duplicateId)
+          };
+        }
+        await render();
+      }
+      return;
     }
     if (event.target.matches("#exercise-loading-style")) {
       const repsInput = event.target.closest("#exercise-form")?.querySelector("#exercise-reps");
