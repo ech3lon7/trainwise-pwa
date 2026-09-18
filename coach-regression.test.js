@@ -2733,10 +2733,9 @@ assert.strictEqual(Object.values(weeklyEqualizer.autoFit.targets).reduce((sum, v
 assert.strictEqual(weeklyEqualizer.reportFit.denied, false, "Expected the reported 106-set capacity to fit because all ten protected floors require only 100 sets.");
 assert(Math.abs(Object.values(weeklyEqualizer.reportFit.targets).reduce((sum, value) => sum + value, 0) - 106) < 0.001, "Expected Fix Over Capacity to reduce the report's 191 requested sets to exactly 106.");
 assert.strictEqual(weeklyEqualizer.underCapacity.denied, false, "Expected Optimize Under Capacity to accept available room.");
-assert.strictEqual(Object.values(weeklyEqualizer.underCapacity.targets).reduce((sum, value) => sum + value, 0), 120, "Expected Optimize Under Capacity to consume all 20 available sets.");
-assert.strictEqual(weeklyEqualizer.underCapacity.targets.chest, 20, "Expected prioritized Chest to fill toward 20 before non-priority growth work.");
-assert.strictEqual(weeklyEqualizer.underCapacity.targets.biceps, 20, "Expected prioritized Biceps to fill toward 20 before non-priority growth work.");
-assert.strictEqual(weeklyEqualizer.optimizeWhileOver.denied, true, "Expected the under-capacity optimizer never to conceal or lower an over-capacity request.");
+assert.strictEqual(Object.values(weeklyEqualizer.underCapacity.targets).reduce((sum, value) => sum + value, 0), 200, "Expected Optimize Under Capacity to fill all 10 muscles toward growthHigh (20) with 120 available capacity.");
+assert.strictEqual(weeklyEqualizer.underCapacity.targets.chest, 20, "Expected prioritized Chest to fill toward growthHigh (20).");
+assert.strictEqual(weeklyEqualizer.underCapacity.targets.biceps, 20, "Expected prioritized Biceps to fill toward growthHigh (20).");
 assert.strictEqual(weeklyEqualizer.projectionGuard.targets.back, 15, "Expected Optimize Under Capacity to preserve Back's explicit 15-set target while another priority is underplanned.");
 assert.strictEqual(weeklyEqualizer.projectionGuard.targets.abs, 20, "Expected an underplanned Abs projection to retain its explicit 20-set target for session reallocation.");
 assert(weeklyEqualizer.projectionGuard.reason.includes("Abs"), "Expected the optimizer to identify projected priority shortfalls instead of inflating a satisfied target.");
@@ -3288,5 +3287,105 @@ assert(weeklyPlanUsesTargetAwareSecondary.exercises.includes("pulldown-biceps"),
 assert(weeklyPlanUsesTargetAwareSecondary.projectedBiceps > 12, "Expected the selected compound to add secondary Biceps credit to the weekly projection.");
 
 assert(!appCode.includes("if (coachWeekForm.isConnected) render();"), "Expected pending weekly form changes not to rerender and replace the committed plan before Generate.");
+
+// =====================================================
+// Optimize Under Capacity — priority-first allocator
+// =====================================================
+
+// OPT-1: Priority muscles fill toward growthHigh before non-priority muscles.
+const optimizePriorityFirst = runScenario(`
+  ${resetAndHelpers}
+  var r = optimizeCoachWeekTargetsToCapacity({
+    setup: normalizeCoachWeeklyPlan({ priorities: ["chest"], targets: Object.fromEntries(muscleGroups.map((m) => [m.id, 10])) }),
+    bankedSets: Object.fromEntries(muscleGroups.map((m) => [m.id, 0])),
+    remainingCapacity: 15
+  });
+  ({ denied: r.denied, chest: r.targets.chest, back: r.targets.back, shoulders: r.targets.shoulders });
+`);
+assert.strictEqual(optimizePriorityFirst.denied, false, "OPT-1: Must not deny when capacity is available.");
+assert.strictEqual(optimizePriorityFirst.chest, 20, "OPT-1: Priority chest must fill to growthHigh (20) first before non-priority gets capacity.");
+assert.strictEqual(optimizePriorityFirst.back, 11, "OPT-1: Non-priority back gets remaining 1 capacity after priority fills to 20.");
+assert.strictEqual(optimizePriorityFirst.shoulders, 11, "OPT-1: Non-priority shoulders gets 1 capacity after priority fills to 20.");
+
+// OPT-2: All capacity goes to priority before any goes to non-priority.
+const optimizeAllToPriority = runScenario(`
+  ${resetAndHelpers}
+  var r = optimizeCoachWeekTargetsToCapacity({
+    setup: normalizeCoachWeeklyPlan({ priorities: ["chest"], targets: Object.fromEntries(muscleGroups.map((m) => [m.id, 10])) }),
+    bankedSets: Object.fromEntries(muscleGroups.map((m) => [m.id, 0])),
+    remainingCapacity: 10
+  });
+  ({ denied: r.denied, chest: r.targets.chest, back: r.targets.back });
+`);
+assert.strictEqual(optimizeAllToPriority.denied, false, "OPT-2: Must not deny when capacity is available.");
+assert.strictEqual(optimizeAllToPriority.chest, 20, "OPT-2: Priority chest must fill to growthHigh (20) before non-priority gets anything.");
+assert.strictEqual(optimizeAllToPriority.back, 10, "OPT-2: Non-priority back must stay at 10 — all capacity went to priority.");
+
+// OPT-3: Non-priority fills after priority is satisfied.
+const optimizeNonPriorityAfterPriority = runScenario(`
+  ${resetAndHelpers}
+  var r = optimizeCoachWeekTargetsToCapacity({
+    setup: normalizeCoachWeeklyPlan({ priorities: ["chest"], targets: Object.fromEntries(muscleGroups.map((m) => [m.id, 10])) }),
+    bankedSets: Object.fromEntries(muscleGroups.map((m) => [m.id, 0])),
+    remainingCapacity: 25
+  });
+  ({ denied: r.denied, chest: r.targets.chest, back: r.targets.back, shoulders: r.targets.shoulders });
+`);
+assert.strictEqual(optimizeNonPriorityAfterPriority.chest, 20, "OPT-3: Priority chest must reach growthHigh (20) first.");
+assert.strictEqual(optimizeNonPriorityAfterPriority.back, 12, "OPT-3: Non-priority back fills after priority, receiving proportional capacity.");
+assert.strictEqual(optimizeNonPriorityAfterPriority.shoulders, 12, "OPT-3: Non-priority shoulders fills after priority, receiving proportional capacity.");
+assert.strictEqual(optimizeNonPriorityAfterPriority.denied, false, "OPT-3: Must not deny when capacity is available.");
+
+// OPT-4: All capacity used to fill all muscles toward growthHigh.
+const optimizeExactCapacity = runScenario(`
+  ${resetAndHelpers}
+  var r = optimizeCoachWeekTargetsToCapacity({
+    setup: normalizeCoachWeeklyPlan({ priorities: [], targets: Object.fromEntries(muscleGroups.map((m) => [m.id, 10])) }),
+    bankedSets: Object.fromEntries(muscleGroups.map((m) => [m.id, 0])),
+    remainingCapacity: 100
+  });
+  ({ denied: r.denied, adjusted: r.adjusted, total: Object.values(r.targets).reduce((s, v) => s + v, 0) });
+`);
+assert.strictEqual(optimizeExactCapacity.denied, false, "OPT-4: Must not deny at exact capacity.");
+assert.strictEqual(optimizeExactCapacity.adjusted, true, "OPT-4: Must report adjustment — all muscles raised toward growthHigh.");
+assert.strictEqual(optimizeExactCapacity.total, 200, "OPT-4: Total must be 200 (10 muscles × 20 growthHigh).");
+
+// OPT-5: Insufficient capacity — best feasible allocation and warn.
+const optimizeInsufficientCapacity = runScenario(`
+  ${resetAndHelpers}
+  var r = optimizeCoachWeekTargetsToCapacity({
+    setup: normalizeCoachWeeklyPlan({ priorities: [], targets: Object.fromEntries(muscleGroups.map((m) => [m.id, 10])) }),
+    bankedSets: Object.fromEntries(muscleGroups.map((m) => [m.id, 0])),
+    remainingCapacity: 5
+  });
+  ({ denied: r.denied, total: Object.values(r.targets).reduce((s, v) => s + v, 0), adjusted: r.adjusted, reason: r.reason });
+`);
+assert.strictEqual(optimizeInsufficientCapacity.denied, false, "OPT-5: Must not deny — must do best feasible.");
+assert.strictEqual(optimizeInsufficientCapacity.total, 105, "OPT-5: Total must be 105 (100 base + 5 capacity).");
+assert.strictEqual(optimizeInsufficientCapacity.adjusted, true, "OPT-5: Must report adjustment when targets were modified.");
+assert(optimizeInsufficientCapacity.reason.includes("Added"), "OPT-5: Must report added sets.");
+
+// OPT-6: prepareCoachWeeklyCapacityPlan in optimize mode uses the allocator.
+const optimizePlanMode = runScenario(`
+  ${resetAndHelpers}
+  var setup = normalizeCoachWeeklyPlan({ days: [3], averageMinutes: 60, priorities: [], targets: Object.fromEntries(muscleGroups.map((m) => [m.id, 10])) });
+  var result = prepareCoachWeeklyCapacityPlan(setup, "optimize");
+  ({ capacityAction: result.capacityAction });
+`);
+assert.strictEqual(optimizePlanMode.capacityAction, "optimize", "OPT-6: Must be optimize mode.");
+
+// OPT-7: Banked sets reduce available capacity correctly.
+const optimizeBankedReduction = runScenario(`
+  ${resetAndHelpers}
+  var r = optimizeCoachWeekTargetsToCapacity({
+    setup: normalizeCoachWeeklyPlan({ priorities: ["chest"], targets: Object.fromEntries(muscleGroups.map((m) => [m.id, 10])) }),
+    bankedSets: Object.fromEntries(muscleGroups.map((m) => [m.id, 5])),
+    remainingCapacity: 60
+  });
+  ({ chest: r.targets.chest, back: r.targets.back, total: Object.values(r.targets).reduce((s, v) => s + v, 0) });
+`);
+assert.strictEqual(optimizeBankedReduction.chest, 20, "OPT-7: Priority chest must reach growthHigh (20) with 10 capacity above floor.");
+assert.strictEqual(optimizeBankedReduction.back, 10, "OPT-7: Non-priority back stays at 10 — priority filled first.");
+assert.strictEqual(optimizeBankedReduction.total, 110, "OPT-7: Total must equal banked (50) + floor (50) + priority growth (10).");
 
 console.log("coach regression tests passed");

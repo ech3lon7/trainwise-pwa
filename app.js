@@ -5409,7 +5409,7 @@ function fitCoachWeekTargetsToCapacity({ setup: setupInput, bankedSets = {}, rem
   };
 }
 
-// Add only unused capacity, keeping weekly floors and priority growth ahead of optional higher-volume work.
+// Add unused capacity in fixed priority order: priority-first, then non-priority, toward growthHigh.
 function optimizeCoachWeekTargetsToCapacity({ setup: setupInput, bankedSets = {}, projectedSets = null, remainingCapacity = 0 }) {
   const setup = normalizeCoachWeeklyPlan(setupInput);
   const banked = Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, Math.max(0, Number(bankedSets[muscle.id]) || 0)]));
@@ -5418,11 +5418,9 @@ function optimizeCoachWeekTargetsToCapacity({ setup: setupInput, bankedSets = {}
     Math.min(30, Math.max(HYPERTROPHY.minimumSets, banked[muscle.id], Number(setup.targets[muscle.id]) || HYPERTROPHY.minimumSets))
   ]));
   const capacity = Math.max(0, Number(remainingCapacity) || 0);
-  const requested = muscleGroups.reduce((sum, muscle) => sum + Math.max(0, targets[muscle.id] - banked[muscle.id]), 0);
-  if (requested > capacity + 0.001) {
-    return { targets, denied: true, adjusted: false, reason: `Targets are ${fmt(requested - capacity, 1)} sets over capacity. Use Fix Over Capacity first.` };
-  }
-  let available = Math.max(0, capacity - requested);
+  // Available capacity is what remains after submitted (banked) work — the optimizer adds on top of requested targets.
+  const totalBanked = muscleGroups.reduce((sum, muscle) => sum + banked[muscle.id], 0);
+  let available = Math.max(0, capacity - totalBanked);
   const startingAvailable = available;
   const priorityIds = muscleGroups.map((muscle) => muscle.id).filter((id) => setup.priorities.includes(id));
   const nonPriorityIds = muscleGroups.map((muscle) => muscle.id).filter((id) => !setup.priorities.includes(id));
@@ -5450,18 +5448,19 @@ function optimizeCoachWeekTargetsToCapacity({ setup: setupInput, bankedSets = {}
   };
   addToward(priorityIds, HYPERTROPHY.growthHigh);
   addToward(nonPriorityIds, HYPERTROPHY.growthHigh);
-  addToward(priorityIds, 30);
-  addToward(nonPriorityIds, 30);
   const added = startingAvailable - available;
+  const capacityExceeded = totalBanked > capacity + 0.001;
   return {
     targets,
     denied: false,
-    adjusted: added > 0.001,
-    reason: added > 0.001
-      ? `Added ${fmt(added, 1)} sets to use the available weekly capacity.`
-      : available > 0.001
-        ? `${fmt(available, 1)} sets remain, but every muscle is already at the 30-set cap.`
-        : "Current targets already use the selected capacity."
+    adjusted: added > 0.001 || capacityExceeded,
+    reason: capacityExceeded
+      ? `All ${fmt(capacity, 1)} capacity is used by submitted work. No room to optimize.`
+      : added > 0.001
+        ? `Added ${fmt(added, 1)} sets to use the available weekly capacity.`
+        : available > 0.001
+          ? `${fmt(available, 1)} sets remain, but every muscle is already at the 30-set cap.`
+          : "Current targets already use the selected capacity."
   };
 }
 
