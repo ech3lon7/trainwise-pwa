@@ -1,15 +1,15 @@
 "use strict";
 
-const CACHE_NAME = "trainwise-cache-v123";
+const CACHE_NAME = "trainwise-cache-v124";
 const ASSETS = [
   "./",
   "./index.html",
-  "./styles.css?v=1.6.1",
-  "./app.js?v=1.6.1",
-  "./manifest.webmanifest?v=1.6.1",
-  "./icon.svg?v=1.6.1",
-  "./icon-512.png?v=1.6.1",
-  "./apple-touch-icon.png?v=1.6.1",
+  "./styles.css?v=1.6.2",
+  "./app.js?v=1.6.2",
+  "./manifest.webmanifest?v=1.6.2",
+  "./icon.svg?v=1.6.2",
+  "./icon-512.png?v=1.6.2",
+  "./apple-touch-icon.png?v=1.6.2",
   "./assets/muscles/abs.png?v=1.5.43",
   "./assets/muscles/back.png?v=1.5.43",
   "./assets/muscles/bicep.png?v=1.5.43",
