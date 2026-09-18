@@ -3,7 +3,7 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 3;
 const STORES = ["workouts", "metrics", "settings", "syncQueue"];
-const APP_VERSION = "1.5.98";
+const APP_VERSION = "1.5.99";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 const DRAFT_RECOVERY_KEY = "trainwise-draft-recovery-v1";
 const DATED_STRENGTH_DRAFTS_KEY = "trainwise-strength-drafts-by-date-v1";
@@ -5087,6 +5087,9 @@ function normalizeCoachWeeklyPlan(value = {}) {
     averageMinutes: Math.min(75, Math.max(30, Number(value.averageMinutes) || 60)),
     priorities,
     targets,
+    // Only explicitly entered ceilings authorize optimization beyond a requested target.
+    optimizeCeilings: Object.fromEntries(muscleGroups.filter((muscle) => value.optimizeCeilings?.[muscle.id] !== "" && value.optimizeCeilings?.[muscle.id] != null && Number.isFinite(Number(value.optimizeCeilings[muscle.id])))
+      .map((muscle) => [muscle.id, Math.min(30, Math.max(10, Number(value.optimizeCeilings[muscle.id])))])),
     generatedAt: String(value.generatedAt || ""),
     sourceFingerprint: String(value.sourceFingerprint || ""),
     generatedPlan: value.generatedPlan && typeof value.generatedPlan === "object" ? clonePlain(value.generatedPlan) : null
@@ -5134,7 +5137,8 @@ function coachWeeklySourceFingerprint(setupInput = selectedCoachWeeklyPlan()) {
       days: setup.days,
       averageMinutes: setup.averageMinutes,
       priorities: setup.priorities,
-      targets: setup.targets
+      targets: setup.targets,
+      optimizeCeilings: setup.optimizeCeilings
     },
     workouts: coachWeeklyWorkouts().map((workout) => ({
       id: workout.id,
@@ -5175,6 +5179,7 @@ function coachWeeklyPlanFromForm(form) {
     averageMinutes: Number(data.get("averageMinutes")),
     priorities: data.getAll("priorities").map(String),
     targets: Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, Number(data.get(`target-${muscle.id}`))])),
+    optimizeCeilings: Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, data.get(`ceiling-${muscle.id}`)])),
     generatedAt: state.settings.coachWeeklyPlan?.generatedAt || ""
   });
 }
@@ -5270,7 +5275,7 @@ function bleedWeeklyTargetPhase(remaining, floors, donorIds, excess) {
   };
 }
 
-// Rebalance a dragged weekly target against remaining capacity with strict non-priority then priority donation phases.
+// Accept affordable manual increases and all floor-respecting decreases without changing other faders.
 function rebalanceWeeklyTargets({ setup: setupInput, draggedMuscleId, requestedRemaining, bankedSets = {}, remainingCapacity = 0 }) {
   const setup = normalizeCoachWeeklyPlan(setupInput);
   const validIds = new Set(muscleGroups.map((muscle) => muscle.id));
@@ -5313,32 +5318,16 @@ function rebalanceWeeklyTargets({ setup: setupInput, draggedMuscleId, requestedR
     maximums[draggedMuscleId],
     Math.max(floors[draggedMuscleId], Number(requestedRemaining) || 0)
   );
-  let excess = Math.max(0, Object.values(remaining).reduce((sum, value) => sum + value, 0) - capacity);
-  const nonPriorityIds = muscleGroups
-    .map((muscle) => muscle.id)
-    .filter((id) => id !== draggedMuscleId && !setup.priorities.includes(id));
-  const priorityIds = muscleGroups
-    .map((muscle) => muscle.id)
-    .filter((id) => id !== draggedMuscleId && setup.priorities.includes(id));
-  const nonPriorityBleed = bleedWeeklyTargetPhase(remaining, floors, nonPriorityIds, excess);
-  excess = nonPriorityBleed.remainingExcess;
-  const priorityBleed = bleedWeeklyTargetPhase(remaining, floors, priorityIds, excess);
-  excess = priorityBleed.remainingExcess;
-  if (excess > 0.001) {
-    return {
-      targets: originalTargets,
-      bleed: { nonPriority: nonPriorityBleed.donors, priority: priorityBleed.donors },
-      denied: true,
-      reason: "That target cannot fit without taking another muscle below its protected 10-set floor."
-    };
-  }
+  const excess = Math.max(0, Object.values(remaining).reduce((sum, value) => sum + value, 0) - capacity);
+  // Manual increases cannot silently take capacity from another requested target.
+  if (excess > 0.001) return { targets: originalTargets, bleed: { nonPriority: [], priority: [] }, denied: true, reason: "That increase exceeds estimated capacity. Lower another target or add workout time first." };
 
   // Return full weekly targets so the existing hidden inputs and Generate path remain unchanged.
   const targets = Object.fromEntries(muscleGroups.map((muscle) => [
     muscle.id,
     Math.round(Math.min(30, Math.max(HYPERTROPHY.minimumSets, banked[muscle.id] + remaining[muscle.id])) * 10) / 10
   ]));
-  return { targets, bleed: { nonPriority: nonPriorityBleed.donors, priority: priorityBleed.donors }, denied: false, reason: "" };
+  return { targets, bleed: { nonPriority: [], priority: [] }, denied: false, reason: "" };
 }
 
 // Reduce over-capacity targets in the same strict order as the faders while preserving feasible 10-set floors.
@@ -5354,10 +5343,10 @@ function fitCoachWeekTargetsToCapacity({ setup: setupInput, bankedSets = {}, rem
   const minimumDemand = Object.values(floors).reduce((sum, value) => sum + value, 0);
   if (minimumDemand > capacity + 0.001) {
     return {
-      targets: clonePlain(setup.targets),
-      denied: true,
-      adjusted: false,
-      reason: `The selected days hold about ${fmt(capacity)} remaining sets, but every 10-set floor needs ${fmt(minimumDemand)}. Add a day or increase workout time.`
+      targets: Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, Math.min(30, Math.max(10, banked[muscle.id]))])),
+      denied: false,
+      adjusted: true,
+      reason: `Targets reduced to their floors. The estimated week still falls ${fmt(minimumDemand - capacity)} sets short; Generate will keep the best feasible partial plan.`
     };
   }
   let excess = Math.max(0, Object.values(remaining).reduce((sum, value) => sum + value, 0) - capacity);
@@ -5467,19 +5456,43 @@ function finalizeCoachWeeklyGeneratedPlan(setupInput, generatedPlan) {
     muscle.id,
     Math.round(Math.max(0, Number(generatedPlan.projected?.[muscle.id]) || 0) * 10) / 10
   ]));
-  const floorUnmet = muscleGroups.filter((muscle) => projected[muscle.id] + 0.001 < HYPERTROPHY.minimumSets);
-  if (floorUnmet.length) {
-    throw new Error(`Coach cannot safely generate the 10-set floor for ${floorUnmet.map((muscle) => muscle.label).join(", ")}. Add a selected training day or increase the average workout time.`);
-  }
   const setup = normalizeCoachWeeklyPlan({ ...requestedSetup, generatedPlan: null });
   const attainment = coachWeeklyAttainment(setup, projected);
+  // An unmet goal is a usable partial result, not a failed generation that leaves an old plan onscreen.
+  const summary = `Floors planned: ${attainment.floorMet}/10. Defined targets planned: ${attainment.targetMet}/10. Priority targets planned: ${attainment.priorityMet}/${attainment.priorityTotal}.`;
+  const floorWarning = attainment.floorUnmet.length ? " Above-floor work is held until every weekly floor is covered." : "";
   return {
     ...generatedPlan,
     setup,
     projected,
     attainment,
-    targetAdjustments: []
+    capacity: { ...generatedPlan.capacity, detail: generatedPlan.capacity.detail || generatedPlan.capacity.message, requestedSets: muscleGroups.reduce((sum, muscle) => sum + Math.max(0, setup.targets[muscle.id] - (generatedPlan.actualStats?.find((stat) => stat.id === muscle.id)?.sets || 0)), 0), fits: !attainment.unmet.length, message: `${summary}${floorWarning}` },
+    targetAdjustments: generatedPlan.targetAdjustments || []
   };
+}
+
+// Fix lowers requests to demonstrated projections; Optimize only raises targets backed by an actual schedule.
+function prepareCoachWeeklyCapacityPlan(setupInput, mode) {
+  const original = normalizeCoachWeeklyPlan(setupInput);
+  let plan = buildCoachWeeklyPlan(original, { optimize: true });
+  let targets = { ...original.targets };
+  if (mode === "fix") {
+    targets = Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, Math.max(10, Math.min(original.targets[muscle.id], plan.projected[muscle.id] || 0))]));
+  } else if (!plan.attainment.unmet.length) {
+    const expanded = normalizeCoachWeeklyPlan({ ...original, targets: Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, Math.max(original.targets[muscle.id], original.optimizeCeilings[muscle.id] || original.targets[muscle.id])])) });
+    const candidate = buildCoachWeeklyPlan(expanded, { optimize: true });
+    // Additional volume must not sacrifice any of the original requests that already fit.
+    if (muscleGroups.every((muscle) => candidate.projected[muscle.id] + 0.001 >= original.targets[muscle.id])) {
+      plan = candidate;
+      targets = Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, Math.max(original.targets[muscle.id], Math.min(expanded.targets[muscle.id], candidate.projected[muscle.id]))]));
+    }
+  }
+  const setup = normalizeCoachWeeklyPlan({ ...original, targets });
+  const result = finalizeCoachWeeklyGeneratedPlan(setup, plan);
+  result.targetAdjustments = muscleGroups.filter((muscle) => Math.abs(targets[muscle.id] - original.targets[muscle.id]) > 0.001)
+    .map((muscle) => ({ id: muscle.id, label: muscle.label, requested: original.targets[muscle.id], committed: targets[muscle.id] }));
+  result.capacityAction = mode;
+  return result;
 }
 
 // Use remaining session time to finish weekly targets through exercises already placed on that day.
@@ -5491,7 +5504,7 @@ function topUpCoachWeeklySessionSets(sessions, projected, setBudgets, setup) {
   const phaseMuscles = [muscleGroups, priorityMuscles, nonPriorityMuscles];
   phaseMuscles.forEach((muscles, phaseIndex) => {
     if (phaseIndex === 2 && priorityMuscles.some((muscle) => (
-      (Number(projected[muscle.id]) || 0) + 0.001 < (Number(setBudgets[muscle.id]) || 0)
+      (Number(projected[muscle.id]) || 0) + 0.001 < setup.targets[muscle.id]
     ))) return;
     let changed = true;
     while (changed) {
@@ -5664,13 +5677,13 @@ function fillCoachWeeklySessionTime(sessions, projected, setup) {
           item.sets < maxSetsPerExercise
           && !["reset", "deload"].includes(item.planTarget?.kind)
           && (!unmetPriorityIds.size || item.exercise.primaryMuscles.some((muscleId) => unmetPriorityIds.has(muscleId)))
-          && item.exercise.primaryMuscles.some((muscleId) => (Number(projected[muscleId]) || 0) < HYPERTROPHY.growthHigh)
+          && item.exercise.primaryMuscles.some((muscleId) => (Number(projected[muscleId]) || 0) < setup.targets[muscleId])
         ))
         .map((item) => ({
           item,
           prospectiveMinutes: plannedCoachSessionMinutesWithSet(session.items, item, item.sets + 1),
           priority: item.exercise.primaryMuscles.some((muscleId) => setup.priorities.includes(muscleId)),
-          growthGap: Math.max(...item.exercise.primaryMuscles.map((muscleId) => Math.max(0, HYPERTROPHY.growthHigh - (Number(projected[muscleId]) || 0))))
+          growthGap: Math.max(...item.exercise.primaryMuscles.map((muscleId) => Math.max(0, setup.targets[muscleId] - (Number(projected[muscleId]) || 0))))
         }))
         .filter((candidate) => candidate.prospectiveMinutes <= maximumMinutes)
         .sort((a, b) => Number(b.priority) - Number(a.priority) || b.growthGap - a.growthGap || a.item.sets - b.item.sets);
@@ -5704,13 +5717,20 @@ function coachWeeklySearchProjection(baseProjected = {}, sessions = []) {
 }
 
 // Score schedules lexicographically so floors, priorities, and requested targets cannot be traded for lower-value polish.
-function coachWeeklySearchScore(setup, projected, sessions) {
+function coachWeeklySearchScore(setup, projected, sessions, baseProjected = {}) {
   const floorShortfall = muscleGroups.reduce((sum, muscle) => sum + Math.max(0, HYPERTROPHY.minimumSets - (Number(projected[muscle.id]) || 0)), 0);
-  const priorityShortfall = setup.priorities.reduce((sum, muscleId) => sum + Math.max(0, (Number(setup.targets[muscleId]) || HYPERTROPHY.minimumSets) - (Number(projected[muscleId]) || 0)), 0);
+  // Squared fractions favor balanced completion of equal priorities' remaining gaps.
+  const priorityShortfall = setup.priorities.reduce((sum, muscleId) => {
+    const gap = Math.max(0, setup.targets[muscleId] - (Number(baseProjected[muscleId]) || 0));
+    const remaining = Math.max(0, setup.targets[muscleId] - (Number(projected[muscleId]) || 0));
+    return sum + (gap > 0 ? (remaining / gap) ** 2 : 0);
+  }, 0);
   const targetShortfall = muscleGroups.reduce((sum, muscle) => sum + Math.max(0, (Number(setup.targets[muscle.id]) || HYPERTROPHY.minimumSets) - (Number(projected[muscle.id]) || 0)), 0);
   const unusedMinutes = sessions.filter((session) => session.status === "planned").reduce((sum, session) => sum + Math.max(0, setup.averageMinutes - session.totalMinutes), 0);
   const excessCredits = muscleGroups.reduce((sum, muscle) => sum + Math.max(0, (Number(projected[muscle.id]) || 0) - (Number(setup.targets[muscle.id]) || HYPERTROPHY.minimumSets)), 0);
-  return [floorShortfall, priorityShortfall, targetShortfall, unusedMinutes, excessCredits];
+  // Among equally productive floor schedules, favor the lowest weekly totals rather than concentrating work.
+  const floorImbalance = muscleGroups.reduce((sum, muscle) => sum + Math.max(0, 10 - (Number(projected[muscle.id]) || 0)) ** 2, 0);
+  return [floorShortfall, priorityShortfall, targetShortfall, floorImbalance, excessCredits, unusedMinutes];
 }
 
 // Compare score tuples without collapsing higher-priority planning goals into one weighted number.
@@ -5821,7 +5841,7 @@ function optimizeCoachWeeklySchedule({ sessions = [], baseProjected = {}, setup:
   const timing = coachWeeklySearchTiming(exercises);
   const initialSessions = cloneCoachWeeklySearchSessions(sessions, timing.sessionMinutes);
   const initialProjected = coachWeeklySearchProjection(baseProjected, initialSessions);
-  const initialState = { sessions: initialSessions, projected: initialProjected, score: coachWeeklySearchScore(setup, initialProjected, initialSessions) };
+  const initialState = { sessions: initialSessions, projected: initialProjected, score: coachWeeklySearchScore(setup, initialProjected, initialSessions, baseProjected) };
   const seen = new Set([coachWeeklySearchSignature(initialSessions)]);
   const rejected = {};
   const rejectedByMuscle = {};
@@ -5887,7 +5907,7 @@ function optimizeCoachWeeklySchedule({ sessions = [], baseProjected = {}, setup:
     if (seen.has(signature)) return;
     seen.add(signature);
     const projected = coachWeeklySearchProjection(baseProjected, nextSessions);
-    collection.push({ sessions: nextSessions, projected, score: coachWeeklySearchScore(setup, projected, nextSessions) });
+    collection.push({ sessions: nextSessions, projected, score: coachWeeklySearchScore(setup, projected, nextSessions, baseProjected) });
     acceptedMoves += 1;
   };
 
@@ -6027,6 +6047,16 @@ function coachWeeklySearchReasonLabel(reason) {
 
 function buildCoachWeeklyPlan(setupInput = selectedCoachWeeklyPlan(), options = {}) {
   const setup = normalizeCoachWeeklyPlan(setupInput);
+  // Solve floors independently before allowing growth; a blocked floor keeps the usable floor-only schedule.
+  if (!options.floorPass) {
+    const floorSetup = normalizeCoachWeeklyPlan({ ...setup, priorities: [], targets: Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, 10])) });
+    const floorPlan = buildCoachWeeklyPlan(floorSetup, { ...options, floorPass: true });
+    if (floorPlan.attainment.floorUnmet.length || muscleGroups.every((muscle) => setup.targets[muscle.id] <= 10)) {
+      return finalizeCoachWeeklyGeneratedPlan(setup, floorPlan);
+    }
+    const growthPlan = buildCoachWeeklyPlan(setup, { ...options, floorPass: true });
+    return finalizeCoachWeeklyGeneratedPlan(setup, growthPlan.attainment.floorUnmet.length ? floorPlan : growthPlan);
+  }
   const weekStart = currentTrainingWeekStart();
   const selectedDates = setup.days
     .map((day) => ({ day, date: coachWeekDate(day, weekStart), option: COACH_WEEKDAY_OPTIONS.find((option) => option.day === day) }))
@@ -6077,6 +6107,8 @@ function buildCoachWeeklyPlan(setupInput = selectedCoachWeeklyPlan(), options = 
 
   const addWeeklyPhaseItem = (session, phase) => {
     if (session.items.length >= COACH_MAX_EXERCISES_PER_SESSION) return false;
+    // Optional direct work waits for the requested priority targets, not merely their rough budgets.
+    if (phase === "optional" && setup.priorities.some((id) => projected[id] + 0.001 < setup.targets[id])) return false;
     const candidates = muscleGroups
       .map((muscle) => candidateForPhase(muscle, phase))
       .filter((muscle) => (
@@ -6085,8 +6117,8 @@ function buildCoachWeeklyPlan(setupInput = selectedCoachWeeklyPlan(), options = 
         && hasPrimaryExerciseForMuscle(muscle.id)
       ))
       .sort((a, b) => (
-        (phase === "floor" ? Number(b.priority) - Number(a.priority) : 0)
-        || (phase === "floor" ? b.floorGap - a.floorGap : b.gap - a.gap)
+        (phase === "floor" ? a.current - b.current : (a.current - (actualStats.find((stat) => stat.id === a.id)?.sets || 0)) / Math.max(1, a.target - (actualStats.find((stat) => stat.id === a.id)?.sets || 0)) - (b.current - (actualStats.find((stat) => stat.id === b.id)?.sets || 0)) / Math.max(1, b.target - (actualStats.find((stat) => stat.id === b.id)?.sets || 0)))
+        || b.gap - a.gap
         || a.current - b.current
       ));
     const muscle = candidates.find((candidate) => session.items.at(-1)?.muscle.id !== candidate.id) || candidates[0];
@@ -6263,7 +6295,8 @@ function compactCoachWeeklyPlanSnapshot(plan) {
     capacity: clonePlain(plan.capacity),
     attainment: clonePlain(plan.attainment),
     optimizer: clonePlain(plan.optimizer || null),
-    targetAdjustments: clonePlain(plan.targetAdjustments || [])
+    targetAdjustments: clonePlain(plan.targetAdjustments || []),
+    capacityAction: plan.capacityAction || ""
   };
 }
 
@@ -6318,6 +6351,7 @@ function displayedCoachWeeklyPlan(setupInput = selectedCoachWeeklyPlan()) {
     attainment: clonePlain(snapshot.attainment || {}),
     optimizer: clonePlain(snapshot.optimizer || null),
     targetAdjustments: clonePlain(snapshot.targetAdjustments || []),
+    capacityAction: snapshot.capacityAction || "",
     stale: invalidExercise || !setup.sourceFingerprint || setup.sourceFingerprint !== currentFingerprint
   };
 }
@@ -9241,7 +9275,12 @@ function renderCoachWeekMixer(setup, plan) {
         </div>
       </div>
     </div>
-    <p class="coach-week-mixer-cost" data-coach-week-mixer-cost>Move a fader to see how the remaining weekly capacity is redistributed.</p>
+    <p class="coach-week-mixer-cost" data-coach-week-mixer-cost>Estimated remaining weekly capacity.</p>
+    <!-- Explicit ceilings keep extra optimization volume opt-in for each muscle. -->
+    <details class="collapsible-panel section">
+      <summary><span>Optimize ceilings</span><small>Optional</small></summary>
+      <div class="exercise-form-grid">${muscleGroups.map((muscle) => `<label>${escapeHtml(muscle.label)}<input type="number" name="ceiling-${muscle.id}" min="10" max="30" step="0.5" placeholder="${fmt(setup.targets[muscle.id])}" value="${setup.optimizeCeilings[muscle.id] ?? ""}" aria-label="${escapeHtml(muscle.label)} Optimize ceiling"></label>`).join("")}</div>
+    </details>
     <p class="coach-week-dirty" data-coach-week-dirty ${state.coachWeekFormPreview ? "" : "hidden"}>Changes not generated yet.</p>
   `;
 }
@@ -9320,19 +9359,20 @@ function renderCoachWeek() {
     </details>
     ${renderCoachWeekExerciseConflictWarning()}
     ${plan.stale ? `<section class="section coach-week-capacity warn"><strong>Weekly plan uses earlier information</strong><p>Inputs, submitted workouts, loading styles, or the active exercise library changed. Valid planned days can still be copied; Generate when you want Coach to recalculate the week.</p></section>` : ""}
-    ${plan.targetAdjustments?.length ? `<section class="section coach-week-capacity warn"><strong>Targets adjusted to the generated schedule</strong><p>${escapeHtml(coachWeeklyTargetAdjustmentMessage(plan.targetAdjustments))}</p></section>` : ""}
-    <section class="section coach-week-capacity ${plan.capacity.fits ? "good" : "warn"}"><strong>${plan.capacity.fits ? "All weekly targets are planned" : "Some weekly targets cannot be planned"}</strong><p>${escapeHtml(plan.capacity.message)}</p></section>
+    ${plan.capacityAction ? `<section class="section coach-week-capacity"><strong>${plan.capacityAction === "fix" ? "Capacity adjustment" : "Optimization result"}</strong><p>${plan.targetAdjustments?.length ? escapeHtml(coachWeeklyTargetAdjustmentMessage(plan.targetAdjustments)) : "Targets unchanged."} ${plan.attainment.unmet.length ? `${plan.attainment.unmet.length} targets remain short in the feasible schedule.` : "All requested targets are covered."}</p></section>` : ""}
+    <section class="section coach-week-capacity ${plan.capacity.fits ? "good" : "warn"}"><strong>${plan.capacity.fits ? "All weekly targets are planned" : "Some weekly targets remain short"}</strong><p>${escapeHtml(plan.capacity.message)}</p></section>
+    ${plan.attainment.unmet.length ? `<details class="section collapsible-panel"><summary><span>Target shortfalls</span><small>${plan.attainment.unmet.length} muscles</small></summary>${plan.attainment.unmet.map((item) => `<p><strong>${escapeHtml(item.label)}</strong>: ${fmt(item.planned, 1)}/${fmt(item.target, 1)} (${fmt(item.target - item.planned, 1)} short). ${escapeHtml(plan.attainment.floorUnmet.length && item.planned >= 10 ? "Above-floor work waits for all weekly floors." : coachWeeklySearchReasonLabel(plan.optimizer?.shortfalls?.find((shortfall) => shortfall.id === item.id)?.reason))}</p>`).join("")}</details>` : ""}
     <details class="section chart-panel collapsible-panel" open><summary><span>Weekly distribution</span><small>${escapeHtml(coachWeekScheduleSummary(plan.setup))}</small></summary>${renderCoachWeekDistribution(plan)}</details>
     <section class="section coach-week-days">${plan.sessions.map(renderCoachWeekDay).join("")}</section>
   `;
 }
 
-async function commitCoachWeeklyPlan(setupInput, message) {
+async function commitCoachWeeklyPlan(setupInput, message, preparedPlan = null) {
   // Reject an empty explicit schedule so Generate never restores a weekday the user turned off.
   if (!Array.isArray(setupInput?.days) || !setupInput.days.length) throw new Error("Select at least one training day.");
   const requestedSetup = normalizeCoachWeeklyPlan({ ...setupInput, generatedAt: new Date().toISOString(), generatedPlan: null, sourceFingerprint: "" });
   // Generate is the authoritative boundary where bounded schedule repair may spend its mobile-safe search budget.
-  const generatedPlan = finalizeCoachWeeklyGeneratedPlan(requestedSetup, buildCoachWeeklyPlan(requestedSetup, { optimize: true }));
+  const generatedPlan = preparedPlan || finalizeCoachWeeklyGeneratedPlan(requestedSetup, buildCoachWeeklyPlan(requestedSetup, { optimize: true }));
   const setup = normalizeCoachWeeklyPlan({ ...generatedPlan.setup, generatedAt: requestedSetup.generatedAt, generatedPlan: null, sourceFingerprint: "" });
   const sourceFingerprint = coachWeeklySourceFingerprint(setup);
   const committed = normalizeCoachWeeklyPlan({
@@ -9386,6 +9426,9 @@ function updateCoachWeekMixerDom(form, targets, bankedSets, bleed, draggedMuscle
     const target = Math.min(30, Math.max(HYPERTROPHY.minimumSets, Number(targets[muscle.id]) || HYPERTROPHY.minimumSets));
     const remaining = Math.max(0, target - banked);
     input.value = String(Math.round(target * 10) / 10);
+    // An empty ceiling follows the current target as faders or quick picks change it.
+    const ceilingInput = form.elements[`ceiling-${muscle.id}`];
+    if (ceilingInput) ceilingInput.placeholder = fmt(target, 1);
     fader.style.setProperty("--target-pct", `${target / 30 * 100}%`);
     fader.querySelector("[data-weekly-remaining]").textContent = `${fmt(remaining, 1)} left`;
     fader.querySelector("[data-weekly-total]").textContent = `${fmt(target, 1)} target`;
@@ -12431,17 +12474,17 @@ async function handleAction(action, target) {
       const form = target.closest("#coach-week-form");
       if (!form) return;
       const context = markCoachWeekFormDirty(form);
-      const result = autoFitCoachWeekForm(form, context);
-      if (!result.denied) await render();
-      toast(result.denied ? result.reason : result.adjusted ? "Over-capacity targets reduced to the available weekly capacity." : "Current targets are not over capacity.");
+      // Save the same measured schedule used to adjust the faders, so projections cannot diverge.
+      const result = prepareCoachWeeklyCapacityPlan(context.setup, "fix");
+      await commitCoachWeeklyPlan(result.setup, "Capacity adjustment applied.", result);
     },
     async "coach-week-optimize-under"() {
       const form = target.closest("#coach-week-form");
       if (!form) return;
       const context = markCoachWeekFormDirty(form);
-      const result = optimizeCoachWeekForm(form, context);
-      if (!result.denied) await render();
-      toast(result.reason);
+      // Explicit optimization evaluates actual sessions and commits even a useful partial result.
+      const result = prepareCoachWeeklyCapacityPlan(context.setup, "optimize");
+      await commitCoachWeeklyPlan(result.setup, "Weekly optimization applied.", result);
     },
     async "coach-view"() {
       state.coachView = target.dataset.view === "week" ? "week" : "today";

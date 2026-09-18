@@ -2280,8 +2280,8 @@ const weeklyExistingExerciseTopUp = runScenario(`
   ({ projectedAbs: plan.projected.abs, absSets: session.items.find((item) => item.exercise.id === "abs-only")?.sets || 0, itemCount: session.items.length, totalMinutes: session.totalMinutes });
 `);
 
-assert.strictEqual(weeklyExistingExerciseTopUp.projectedAbs, 16, `Expected logical unused time to continue safe growth-zone work beyond the requested floor, got ${weeklyExistingExerciseTopUp.projectedAbs}.`);
-assert.strictEqual(weeklyExistingExerciseTopUp.absSets, 8, `Expected the existing Abs exercise to reach the per-exercise cap when no other safe work is available, got ${weeklyExistingExerciseTopUp.absSets}.`);
+assert.strictEqual(weeklyExistingExerciseTopUp.projectedAbs, 14, "Generate must stop direct fill at the requested target; extra volume requires an explicit Optimize ceiling.");
+assert.strictEqual(weeklyExistingExerciseTopUp.absSets, 6, "Expected six added sets to finish the requested Abs target.");
 assert.strictEqual(weeklyExistingExerciseTopUp.itemCount, 1, "Expected topping up sets to preserve the exercise count.");
 assert(weeklyExistingExerciseTopUp.totalMinutes <= 63, `Expected the topped-up session to remain within the selected time tolerance, got ${weeklyExistingExerciseTopUp.totalMinutes}.`);
 
@@ -2414,6 +2414,8 @@ const weeklySecondaryStimulusBudget = runScenario(`
     priorities: ["glutes"],
     targets: Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, ["glutes", "quads"].includes(muscle.id) ? 20 : 10]))
   });
+  // Secondary-growth coverage is tested only after all other weekly floors are already protected.
+  state.workouts.push(...muscleGroups.filter((muscle) => !["quads", "glutes"].includes(muscle.id)).map((muscle) => makeWorkout(muscle, 2, 10, { exerciseId: "previous-" + muscle.id, secondaryMuscles: [] })));
   var plan = buildCoachWeeklyPlan();
   var planned = plan.sessions.flatMap((session) => session.items);
   var directGluteSets = planned.filter((item) => item.muscle.id === "glutes").reduce((sum, item) => sum + item.sets, 0);
@@ -2504,7 +2506,56 @@ assert.strictEqual(weeklyAttainmentWarning.fits, false, "Expected weekly capacit
 assert(weeklyAttainmentWarning.targetMet < 10, "Expected adjacent remaining days to leave at least one defined target unmet.");
 assert(weeklyAttainmentWarning.priorityMet < weeklyAttainmentWarning.priorityTotal, "Expected unmet priority targets to be reported explicitly.");
 assert(weeklyAttainmentWarning.message.includes("Floors planned:") && weeklyAttainmentWarning.message.includes("Priority targets planned:"), "Expected weekly status to report floor and priority-target attainability.");
-assert(weeklyAttainmentWarning.markup.includes("Some weekly targets cannot be planned"), "Expected Coach Week UI to clearly warn when the generated schedule misses targets.");
+assert(weeklyAttainmentWarning.markup.includes("Some weekly targets remain short"), "Expected Coach Week UI to report shortfalls without claiming they are impossible.");
+
+// Partial weeks must remain usable, with strict floors and explicit optimization ceilings.
+const partialWeekControls = runScenario(`
+  ${resetAndHelpers}
+  state.settings.customExercises = state.settings.customExercises.filter((exercise) => exercise.id.startsWith("custom-") && exercise.primaryMuscles.length === 1 && !exercise.secondaryMuscles.length);
+  var allFifteen = Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, 15]));
+  var setup = normalizeCoachWeeklyPlan({ days: [3], averageMinutes: 30, priorities: ["chest"], targets: allFifteen });
+  var fit = fitCoachWeekTargetsToCapacity({ setup, remainingCapacity: 30 });
+  var plan = finalizeCoachWeeklyGeneratedPlan(setup, buildCoachWeeklyPlan(setup, { optimize: true }));
+  var fixed = prepareCoachWeeklyCapacityPlan(setup, "fix");
+  var optimized = prepareCoachWeeklyCapacityPlan(setup, "optimize");
+  ({ fit, plan, fixed, optimized, ceilings: normalizeCoachWeeklyPlan({ targets: allFifteen, optimizeCeilings: { chest: 25, back: 100 } }).optimizeCeilings });
+`);
+assert.strictEqual(partialWeekControls.fit.denied, false, "Floor shortages must not trap quick picks.");
+assert(Object.values(partialWeekControls.fit.targets).every((target) => target === 10));
+assert(partialWeekControls.plan.attainment.floorMet < 10);
+assert(partialWeekControls.plan.sessions.some((session) => session.items.length));
+assert(Object.values(partialWeekControls.plan.projected).every((sets) => sets <= 10), "Isolation-only partial plans must not include above-floor extras.");
+assert(Object.values(partialWeekControls.fixed.setup.targets).every((target) => target === 10));
+assert.strictEqual(partialWeekControls.optimized.setup.targets.chest, 15, "Optimize must retain requested targets when floors cannot fit.");
+assert.strictEqual(partialWeekControls.ceilings.chest, 25);
+assert.strictEqual(partialWeekControls.ceilings.back, 30);
+assert.strictEqual(partialWeekControls.ceilings.abs, undefined, "Unspecified ceilings follow targets without authorizing extra work.");
+
+// Ceilings are opt-in, and a blocked floor suppresses all growth extras.
+const weeklyCapacityRecovery = runScenario(`
+  ${resetAndHelpers}
+  state.settings.customExercises = muscleGroups.map((muscle) => ({ id: "iso-" + muscle.id, name: muscle.label + " Isolation", primaryMuscles: [muscle.id], secondaryMuscles: [], exerciseType: "isolation", reps: "8-15", rest: "60 sec", equipment: "machine" }));
+  state.workouts = muscleGroups.map((muscle) => makeWorkout(muscle, 2, 10, { exerciseId: "old-" + muscle.id, secondaryMuscles: [] }));
+  var before = JSON.stringify(state.workouts);
+  var setup = normalizeCoachWeeklyPlan({ days: [5, 0], averageMinutes: 60, priorities: ["chest"], targets: { chest: 14 } });
+  var defaultResult = prepareCoachWeeklyCapacityPlan(setup, "optimize");
+  var explicitResult = prepareCoachWeeklyCapacityPlan({ ...setup, optimizeCeilings: { chest: 20 } }, "optimize");
+  var unchanged = before === JSON.stringify(state.workouts);
+  state.workouts = state.workouts.filter((workout) => !workout.primaryMuscles.includes("abs"));
+  state.settings.customExercises = state.settings.customExercises.filter((exercise) => !exercise.primaryMuscles.includes("abs"));
+  var blocked = prepareCoachWeeklyCapacityPlan(setup, "optimize");
+  state.settings.customExercises = [];
+  var empty = prepareCoachWeeklyCapacityPlan(setup, "fix");
+  ({ defaultResult, explicitResult, blocked, empty, unchanged });
+`);
+assert.strictEqual(weeklyCapacityRecovery.defaultResult.setup.targets.chest, 14);
+assert(weeklyCapacityRecovery.explicitResult.setup.targets.chest > 14 && weeklyCapacityRecovery.explicitResult.setup.targets.chest <= 20);
+assert(weeklyCapacityRecovery.explicitResult.projected.chest >= weeklyCapacityRecovery.explicitResult.setup.targets.chest);
+assert.strictEqual(weeklyCapacityRecovery.unchanged, true);
+assert.strictEqual(weeklyCapacityRecovery.blocked.projected.chest, 10, "A missing Abs floor must block Chest extras under the strict rule.");
+assert(weeklyCapacityRecovery.blocked.attainment.floorUnmet.some((muscle) => muscle.id === "abs"));
+assert(weeklyCapacityRecovery.empty.sessions.every((session) => session.items.length === 0));
+assert.strictEqual(weeklyCapacityRecovery.empty.capacityAction, "fix");
 
 // Over-capacity quick picks must still allow incremental reductions without moving other targets.
 const overCapacityReductions = JSON.parse(runScenario(`
@@ -2583,16 +2634,17 @@ const weeklyEqualizer = runScenario(`
 
 assert.strictEqual(weeklyEqualizer.floorClamp.denied, false, "Expected a below-floor drag to clamp rather than fail.");
 assert.strictEqual(weeklyEqualizer.floorClamp.targets.chest, 10, "Expected Chest to remain at its protected 10-set weekly floor.");
-assert.strictEqual(weeklyEqualizer.nonPriorityPhase.targets.chest, 25, "Expected the dragged Chest target to win its requested capacity.");
+assert.strictEqual(weeklyEqualizer.nonPriorityPhase.targets.chest, 20, "Over-capacity increases must leave targets unchanged.");
 assert.strictEqual(weeklyEqualizer.nonPriorityPhase.targets.biceps, 20, "Expected another priority to remain untouched while non-priority donors have room.");
-assert.strictEqual(weeklyEqualizer.nonPriorityPhase.targets.quads, 17.5, "Expected Quads to donate its proportional half of the phase-one cost.");
-assert.strictEqual(weeklyEqualizer.nonPriorityPhase.targets.hamstrings, 17.5, "Expected Hamstrings to donate its proportional half of the phase-one cost.");
+assert.strictEqual(weeklyEqualizer.nonPriorityPhase.targets.quads, 20);
+assert.strictEqual(weeklyEqualizer.nonPriorityPhase.targets.hamstrings, 20);
 assert.deepEqual(weeklyEqualizer.nonPriorityPhase.bleed.priority, [], "Expected strict phase one to avoid priority bleed.");
-assert.deepEqual(weeklyEqualizer.nonPriorityPhase.bleed.nonPriority.map((item) => item.muscleId).sort(), ["hamstrings", "quads"], "Expected proportional phase-one bleed from eligible non-priorities.");
-assert.strictEqual(weeklyEqualizer.priorityPhase.targets.chest, 25, "Expected dragged Chest to retain its phase-two target.");
-assert.strictEqual(weeklyEqualizer.priorityPhase.targets.biceps, 17.5, "Expected Biceps to share priority-phase cost proportionally.");
-assert.strictEqual(weeklyEqualizer.priorityPhase.targets.triceps, 17.5, "Expected Triceps to share priority-phase cost proportionally.");
-assert.deepEqual(weeklyEqualizer.priorityPhase.bleed.priority.map((item) => item.muscleId).sort(), ["biceps", "triceps"], "Expected phase-two bleed only after non-priorities reach their floors.");
+assert.deepEqual(weeklyEqualizer.nonPriorityPhase.bleed.nonPriority, []);
+assert.strictEqual(weeklyEqualizer.nonPriorityPhase.denied, true);
+assert.strictEqual(weeklyEqualizer.priorityPhase.targets.chest, 20);
+assert.strictEqual(weeklyEqualizer.priorityPhase.targets.biceps, 20);
+assert.strictEqual(weeklyEqualizer.priorityPhase.targets.triceps, 20);
+assert.deepEqual(weeklyEqualizer.priorityPhase.bleed.priority, []);
 assert.strictEqual(weeklyEqualizer.deadlock.denied, true, "Expected a true all-floor capacity deadlock to be denied.");
 assert.strictEqual(weeklyEqualizer.autoFit.denied, false, "Expected reduced day/time capacity to auto-fit targets when all protected floors still fit.");
 assert.strictEqual(weeklyEqualizer.autoFit.targets.chest, 20, "Expected auto-fit to preserve a selected priority before reducing non-priority growth targets.");
@@ -2716,6 +2768,7 @@ const weeklyGeneratedTargetsRemainRequested = runScenario(`
     adjustments: finalized.targetAdjustments,
     fits: finalized.capacity.fits,
     message: finalized.capacity.message,
+    detail: finalized.capacity.detail,
     markup: renderCoachWeekDistribution(finalized)
   });
 `);
@@ -2727,7 +2780,7 @@ assert.strictEqual(weeklyGeneratedTargetsRemainRequested.backProjected, 14, "Exp
 assert.strictEqual(weeklyGeneratedTargetsRemainRequested.unmet, 1, "Expected the generated plan to retain the real Shoulder shortfall.");
 assert.deepEqual(weeklyGeneratedTargetsRemainRequested.adjustments, [], "Expected Generate not to create automatic fader adjustments.");
 assert.strictEqual(weeklyGeneratedTargetsRemainRequested.fits, false, "Expected capacity status to retain the generated schedule shortfall.");
-assert.strictEqual(weeklyGeneratedTargetsRemainRequested.message, "Requested targets did not all fit.", "Expected Generate to retain the schedule's truthful capacity explanation.");
+assert.strictEqual(weeklyGeneratedTargetsRemainRequested.detail, "Requested targets did not all fit.", "Expected Generate to retain detailed diagnostics alongside the compact summary.");
 assert(weeklyGeneratedTargetsRemainRequested.markup.includes("18 projected / 20 target"), "Expected Weekly distribution to distinguish projected and requested Shoulder values.");
 
 // The reported 97-credit estimate must not reopen nine phantom credits after an 88.05-credit schedule is generated.
@@ -2765,7 +2818,7 @@ assert.deepEqual(weeklyReportedCapacityMismatch.targets, {
   abs: 20
 }, "Expected the report's requested targets to survive Generate unchanged.");
 assert.strictEqual(weeklyReportedCapacityMismatch.fits, false, "Expected the generated schedule shortfall to remain visible.");
-assert.strictEqual(weeklyReportedCapacityMismatch.message, "Generated sessions are full before every requested target is reached.", "Expected the generated schedule explanation to survive finalization.");
+assert(weeklyReportedCapacityMismatch.message.includes("Defined targets planned: 6/10"), "Expected the compact summary to retain the actual target shortfall.");
 assert(weeklyReportedCapacityMismatch.available < 0.2, `Expected no reopened nine-credit gap, got ${weeklyReportedCapacityMismatch.available}.`);
 
 // Bounded repair must keep neutral/intermediate states long enough to repack protected floor work around a priority target.
@@ -2899,7 +2952,7 @@ assert(/function buildCoachWeeklyPlan\(setupInput = selectedCoachWeeklyPlan\(\),
 assert(appCode.includes("optimizer: clonePlain(plan.optimizer"), "Expected weekly debug/snapshots to retain optimizer diagnostics.");
 assert(appCode.includes("No additional supported improvement was found in the generated schedule"), "Expected bounded-search shortfalls not to be described as mathematically impossible.");
 
-// An impossible floor remains a hard error rather than being relabeled as a feasible lower target.
+// An impossible floor stays visible as a shortfall in a successful partial result.
 const weeklyGeneratedTargetsProtectFloor = runScenario(`
   ${resetAndHelpers}
   var setup = normalizeCoachWeeklyPlan({ days: [3], averageMinutes: 30, targets: Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, 10])) });
@@ -2914,15 +2967,12 @@ const weeklyGeneratedTargetsProtectFloor = runScenario(`
     attainment: coachWeeklyAttainment(setup, projected),
     capacity: { totalMinutes: 30, estimatedSetCapacity: 20, allocatedSetCapacity: 20, requestedSets: 100, fits: false, message: "Floor shortfall." }
   };
-  try {
-    finalizeCoachWeeklyGeneratedPlan(setup, generated);
-    "no error";
-  } catch (error) {
-    error.message;
-  }
+  finalizeCoachWeeklyGeneratedPlan(setup, generated);
 `);
 
-assert(weeklyGeneratedTargetsProtectFloor.includes("10-set floor") && weeklyGeneratedTargetsProtectFloor.includes("Chest"), `Expected an impossible floor to block generation with a precise explanation, got: ${weeklyGeneratedTargetsProtectFloor}`);
+assert.strictEqual(weeklyGeneratedTargetsProtectFloor.projected.chest, 8);
+assert.strictEqual(weeklyGeneratedTargetsProtectFloor.setup.targets.chest, 10);
+assert.strictEqual(weeklyGeneratedTargetsProtectFloor.attainment.floorUnmet[0].id, "chest");
 
 // Fader previews must survive unrelated renders, use muscle artwork, and report live remaining capacity.
 const weeklyFaderStability = runScenario(`
