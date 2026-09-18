@@ -3,7 +3,7 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 3;
 const STORES = ["workouts", "metrics", "settings", "syncQueue"];
-const APP_VERSION = "1.6.0";
+const APP_VERSION = "1.6.1";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 const DRAFT_RECOVERY_KEY = "trainwise-draft-recovery-v1";
 const DATED_STRENGTH_DRAFTS_KEY = "trainwise-strength-drafts-by-date-v1";
@@ -5354,18 +5354,31 @@ function fitCoachWeekTargetsToCapacity({ setup: setupInput, bankedSets = {}, rem
     Math.max(0, setup.targets[muscle.id] - banked[muscle.id])
   ]));
   const capacity = Math.max(0, Number(remainingCapacity) || 0);
-  const minimumDemand = Object.values(floors).reduce((sum, value) => sum + value, 0);
+  // Recovered priority floors can reclaim capacity after a previous fit lowered every muscle evenly.
+  const scarceFloorCaps = Object.fromEntries(muscleGroups.map((muscle) => {
+    const target = Number(setup.targets[muscle.id]) || 0;
+    const wasReduced = setup.adjustedMinimums[muscle.id] != null && target < HYPERTROPHY.minimumSets;
+    const priorityFloor = setup.priorities.includes(muscle.id) && wasReduced ? HYPERTROPHY.minimumSets : target;
+    return [muscle.id, Math.max(0, Math.min(HYPERTROPHY.minimumSets, priorityFloor))];
+  }));
+  const minimumDemand = muscleGroups.reduce((sum, muscle) => sum + Math.max(0, scarceFloorCaps[muscle.id] - banked[muscle.id]), 0);
   if (minimumDemand > capacity + 0.001) {
-    // Allocate scarce floor credits to the lowest totals; tenths preserve fractional demand without rounding up.
+    // Allocate scarce floor credits to priority muscles first, then balance any leftover across the rest.
     const targets = { ...banked };
     let available = Math.floor((capacity + 0.000001) * 10) / 10;
-    while (available >= 0.099999) {
-      const candidate = muscleGroups.filter((muscle) => targets[muscle.id] + 0.001 < Math.min(10, setup.targets[muscle.id]))
-        .sort((a, b) => targets[a.id] - targets[b.id])[0];
-      if (!candidate) break;
-      const increment = Math.min(0.1, available, Math.min(10, setup.targets[candidate.id]) - targets[candidate.id]);
-      targets[candidate.id] = Math.round((targets[candidate.id] + increment) * 1000000) / 1000000;
-      available -= increment;
+    const scarceFloorPhases = [
+      muscleGroups.filter((muscle) => setup.priorities.includes(muscle.id)),
+      muscleGroups.filter((muscle) => !setup.priorities.includes(muscle.id))
+    ];
+    for (const phase of scarceFloorPhases) {
+      while (available >= 0.099999) {
+        const candidate = phase.filter((muscle) => targets[muscle.id] + 0.001 < scarceFloorCaps[muscle.id])
+          .sort((a, b) => targets[a.id] - targets[b.id])[0];
+        if (!candidate) break;
+        const increment = Math.min(0.1, available, scarceFloorCaps[candidate.id] - targets[candidate.id]);
+        targets[candidate.id] = Math.round((targets[candidate.id] + increment) * 1000000) / 1000000;
+        available -= increment;
+      }
     }
     return {
       targets,

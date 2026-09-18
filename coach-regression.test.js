@@ -2531,6 +2531,41 @@ assert.strictEqual(adjustedFloorCapacity.allowed.denied, false);
 assert(Object.values(adjustedFloorCapacity.zeroSetup.targets).every(value => value === 0));
 assert(adjustedFloorCapacity.zeroPlan.sessions.every(session => session.items.length === 0));
 
+const adjustedFloorPriorityCapacity = runScenario(`
+  ${resetAndHelpers}
+  var setup = normalizeCoachWeeklyPlan({
+    days: [5, 6],
+    averageMinutes: 75,
+    priorities: ["chest", "shoulders"],
+    targets: Object.fromEntries(muscleGroups.map(m => [m.id, 10]))
+  });
+  var fit = fitCoachWeekTargetsToCapacity({ setup, remainingCapacity: 65 });
+  ({ targets: fit.targets, adjustedMinimums: fit.adjustedMinimums });
+`);
+assert.strictEqual(adjustedFloorPriorityCapacity.targets.chest, 10, "Scarce weekly capacity must complete selected priority floors first.");
+assert.strictEqual(adjustedFloorPriorityCapacity.targets.shoulders, 10, "Scarce weekly capacity must complete every selected priority floor before balancing non-priorities.");
+assert(adjustedFloorPriorityCapacity.targets.back < 10, "Non-priorities should absorb the below-floor reduction before selected priorities do.");
+assert.strictEqual(adjustedFloorPriorityCapacity.adjustedMinimums.chest, undefined, "Priority floors that fit should not be marked as reduced requests.");
+
+const adjustedFloorPriorityRecovery = runScenario(`
+  ${resetAndHelpers}
+  var setup = normalizeCoachWeeklyPlan({
+    days: [5, 6],
+    averageMinutes: 75,
+    priorities: ["chest", "shoulders"],
+    targets: Object.fromEntries(muscleGroups.map(m => [m.id, 6.5])),
+    adjustedMinimums: Object.fromEntries(muscleGroups.map(m => [m.id, 6.5])),
+    adjustmentWeek: isoFromLocalDate(currentTrainingWeekStart())
+  });
+  var fit = fitCoachWeekTargetsToCapacity({ setup, remainingCapacity: 65 });
+  var demand = muscleGroups.reduce((sum, muscle) => sum + fit.targets[muscle.id], 0);
+  ({ targets: fit.targets, demand });
+`);
+assert.strictEqual(adjustedFloorPriorityRecovery.targets.chest, 10, "Fixing an already-reduced week must recover selected priority floors when capacity allows.");
+assert.strictEqual(adjustedFloorPriorityRecovery.targets.shoulders, 10, "Fixing an already-reduced week must not leave priorities flattened with non-priorities.");
+assert(adjustedFloorPriorityRecovery.targets.back < 6.5, "Recovering priority floors should rebalance the remaining scarce capacity across non-priorities.");
+assert(adjustedFloorPriorityRecovery.demand <= 65.000001, "Priority recovery must still fit the displayed weekly capacity.");
+
 // Fitting metadata survives serialization, but expires next week; submitted fractions remain immutable.
 const adjustedFloorPersistence = runScenario(`
   ${resetAndHelpers}
