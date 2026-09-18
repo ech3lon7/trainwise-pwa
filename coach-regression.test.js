@@ -2509,6 +2509,52 @@ assert(weeklyAttainmentWarning.message.includes("Floors planned:") && weeklyAtta
 assert(weeklyAttainmentWarning.markup.includes("Some weekly targets remain short"), "Expected Coach Week UI to report shortfalls without claiming they are impossible.");
 
 // Partial weeks must remain usable, with strict floors and explicit optimization ceilings.
+// Capacity fitting must lower floors explicitly, preserve zeros, and permit only affordable manual increases.
+const adjustedFloorCapacity = runScenario(`
+  ${resetAndHelpers}
+  var setup = normalizeCoachWeeklyPlan({ days: [3], targets: Object.fromEntries(muscleGroups.map(m => [m.id, 10])) });
+  var fit = fitCoachWeekTargetsToCapacity({ setup, remainingCapacity: 65 });
+  var adjusted = normalizeCoachWeeklyPlan({ ...setup, ...fit });
+  var progress = coachWeekCapacityProgress(adjusted, {}, 65);
+  var denied = rebalanceWeeklyTargets({ setup: adjusted, draggedMuscleId: "chest", requestedRemaining: adjusted.targets.chest + 1, remainingCapacity: 65 });
+  var allowed = rebalanceWeeklyTargets({ setup: adjusted, draggedMuscleId: "chest", requestedRemaining: adjusted.targets.chest + 1, remainingCapacity: 66 });
+  var zero = fitCoachWeekTargetsToCapacity({ setup, remainingCapacity: 0 });
+  var zeroSetup = normalizeCoachWeeklyPlan({ ...setup, ...zero });
+  var zeroPlan = buildCoachWeeklyPlan(zeroSetup, { optimize: true });
+  ({ fit, adjusted, progress, denied, allowed, zeroSetup, zeroPlan });
+`);
+assert.strictEqual(adjustedFloorCapacity.progress.over, 0, "100 requested / 65 capacity must be fixed, not left at ten each.");
+assert.strictEqual(adjustedFloorCapacity.progress.requested, 65);
+assert(adjustedFloorCapacity.fit.reason.includes("below 10"));
+assert.strictEqual(adjustedFloorCapacity.denied.denied, true);
+assert.strictEqual(adjustedFloorCapacity.allowed.denied, false);
+assert(Object.values(adjustedFloorCapacity.zeroSetup.targets).every(value => value === 0));
+assert(adjustedFloorCapacity.zeroPlan.sessions.every(session => session.items.length === 0));
+
+// Fitting metadata survives serialization, but expires next week; submitted fractions remain immutable.
+const adjustedFloorPersistence = runScenario(`
+  ${resetAndHelpers}
+  var setup = normalizeCoachWeeklyPlan({ targets: Object.fromEntries(muscleGroups.map(m => [m.id, 10])) });
+  var banked = { chest: 0.25, back: 35 };
+  var fit = fitCoachWeekTargetsToCapacity({ setup, bankedSets: banked, remainingCapacity: 12.3 });
+  var demand = muscleGroups.reduce((sum, m) => sum + Math.max(0, fit.targets[m.id] - (banked[m.id] || 0)), 0);
+  var fitted = normalizeCoachWeeklyPlan({ ...setup, ...fit });
+  var restored = normalizeCoachWeeklyPlan(JSON.parse(JSON.stringify(fitted)));
+  var expired = normalizeCoachWeeklyPlan({ ...fitted, adjustmentWeek: "2026-06-08" });
+  var plan = prepareCoachWeeklyCapacityPlan({ ...setup, days: [3], averageMinutes: 30 }, "fix");
+  state.settings.coachWeeklyPlan = { ...plan.setup, sourceFingerprint: coachWeeklySourceFingerprint(plan.setup), generatedPlan: compactCoachWeeklyPlanSnapshot(plan) };
+  var markup = renderCoachWeek();
+  ({ demand, fit, fitted, restored, expired, plan, markup });
+`);
+assert(adjustedFloorPersistence.demand <= 12.300001, "Fractional submitted credits must not round fitted demand above capacity.");
+assert.strictEqual(adjustedFloorPersistence.fit.targets.back, 35);
+assert.deepStrictEqual(adjustedFloorPersistence.restored.targets, adjustedFloorPersistence.fitted.targets);
+assert(Object.values(adjustedFloorPersistence.expired.targets).every(value => value >= 10));
+assert(adjustedFloorPersistence.markup.includes("Some weekly floors could not be scheduled"));
+assert(adjustedFloorPersistence.markup.includes("Target adjustments"));
+assert(adjustedFloorPersistence.plan.capacity.requestedSets <= adjustedFloorPersistence.plan.capacity.estimatedSetCapacity);
+assert(adjustedFloorPersistence.plan.sessions.every(session => session.items.length <= 6 && session.totalMinutes <= 33));
+
 const partialWeekControls = runScenario(`
   ${resetAndHelpers}
   state.settings.customExercises = state.settings.customExercises.filter((exercise) => exercise.id.startsWith("custom-") && exercise.primaryMuscles.length === 1 && !exercise.secondaryMuscles.length);
@@ -2521,11 +2567,11 @@ const partialWeekControls = runScenario(`
   ({ fit, plan, fixed, optimized, ceilings: normalizeCoachWeeklyPlan({ targets: allFifteen, optimizeCeilings: { chest: 25, back: 100 } }).optimizeCeilings });
 `);
 assert.strictEqual(partialWeekControls.fit.denied, false, "Floor shortages must not trap quick picks.");
-assert(Object.values(partialWeekControls.fit.targets).every((target) => target === 10));
+assert(Object.values(partialWeekControls.fit.targets).reduce((sum, target) => sum + target, 0) <= 30);
 assert(partialWeekControls.plan.attainment.floorMet < 10);
 assert(partialWeekControls.plan.sessions.some((session) => session.items.length));
 assert(Object.values(partialWeekControls.plan.projected).every((sets) => sets <= 10), "Isolation-only partial plans must not include above-floor extras.");
-assert(Object.values(partialWeekControls.fixed.setup.targets).every((target) => target === 10));
+assert(Object.values(partialWeekControls.fixed.setup.targets).some((target) => target < 10));
 assert.strictEqual(partialWeekControls.optimized.setup.targets.chest, 15, "Optimize must retain requested targets when floors cannot fit.");
 assert.strictEqual(partialWeekControls.ceilings.chest, 25);
 assert.strictEqual(partialWeekControls.ceilings.back, 30);
