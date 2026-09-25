@@ -3,7 +3,7 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 3;
 const STORES = ["workouts", "metrics", "settings", "syncQueue"];
-const APP_VERSION = "1.6.2";
+const APP_VERSION = "1.6.6";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 const DRAFT_RECOVERY_KEY = "trainwise-draft-recovery-v1";
 const DATED_STRENGTH_DRAFTS_KEY = "trainwise-strength-drafts-by-date-v1";
@@ -43,6 +43,7 @@ const COACH_TIME_TOLERANCE_MINUTES = 3;
 const COACH_MAX_EXERCISES_PER_SESSION = 6;
 // Keep every Coach-prescribed exercise large enough to be a useful working block.
 const COACH_MIN_SETS_PER_EXERCISE = 2;
+const COACH_WEEK_TARGET_MAX = 50;
 const COACH_TIME_ESTIMATOR_VERSION = "coach-time-v1";
 const COACH_TIMEFRAME_OPTIONS = [
   { label: "30 min", minutes: 30 },
@@ -5086,8 +5087,8 @@ function normalizeCoachWeeklyPlan(value = {}) {
     const requested = Number(value.targets?.[muscle.id]);
     const fallback = priorities.includes(muscle.id) ? 20 : HYPERTROPHY.minimumSets;
     // Totals above the adjustable ceiling are allowed only to retain already-submitted work.
-    const submitted = requested > 30 ? (muscleSetStats(coachWeeklyWorkouts()).find((stat) => stat.id === muscle.id)?.sets || 0) : 0;
-    return [muscle.id, Math.min(Math.max(30, submitted), Math.max(adjustedMinimums[muscle.id] ?? HYPERTROPHY.minimumSets, Number.isFinite(requested) ? requested : fallback))];
+    const submitted = requested > COACH_WEEK_TARGET_MAX ? (muscleSetStats(coachWeeklyWorkouts()).find((stat) => stat.id === muscle.id)?.sets || 0) : 0;
+    return [muscle.id, Math.min(Math.max(COACH_WEEK_TARGET_MAX, submitted), Math.max(adjustedMinimums[muscle.id] ?? HYPERTROPHY.minimumSets, Number.isFinite(requested) ? requested : fallback))];
   }));
   return {
     days: hasExplicitDays ? days : [1, 3, 5, 6],
@@ -5098,7 +5099,7 @@ function normalizeCoachWeeklyPlan(value = {}) {
     adjustmentWeek: Object.keys(adjustedMinimums).length ? adjustmentWeek : "",
     // Only explicitly entered ceilings authorize optimization beyond a requested target.
     optimizeCeilings: Object.fromEntries(muscleGroups.filter((muscle) => value.optimizeCeilings?.[muscle.id] !== "" && value.optimizeCeilings?.[muscle.id] != null && Number.isFinite(Number(value.optimizeCeilings[muscle.id])))
-      .map((muscle) => [muscle.id, Math.min(30, Math.max(10, Number(value.optimizeCeilings[muscle.id])))])),
+      .map((muscle) => [muscle.id, Math.min(COACH_WEEK_TARGET_MAX, Math.max(10, Number(value.optimizeCeilings[muscle.id])))])),
     generatedAt: String(value.generatedAt || ""),
     sourceFingerprint: String(value.sourceFingerprint || ""),
     generatedPlan: value.generatedPlan && typeof value.generatedPlan === "object" ? clonePlain(value.generatedPlan) : null
@@ -5196,6 +5197,25 @@ function coachWeeklyPlanFromForm(form) {
     optimizeCeilings: Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, data.get(`ceiling-${muscle.id}`)])),
     generatedAt: state.settings.coachWeeklyPlan?.generatedAt || ""
   });
+}
+
+// Read a preset or custom All X weekly target through one path so quick picks stay consistent.
+function coachWeekQuickPickTarget(trigger, form) {
+  const isCustom = Boolean(trigger?.dataset?.customTarget);
+  const raw = trigger?.dataset?.customTarget
+    ? form?.querySelector("[data-coach-week-custom-target]")?.value
+    : trigger?.dataset?.target;
+  if (raw === "" || raw == null) return null;
+  const value = Number(raw);
+  if (!Number.isFinite(value)) return null;
+  return Math.round(Math.max(isCustom ? 0 : HYPERTROPHY.minimumSets, Math.min(COACH_WEEK_TARGET_MAX, value)) * 10) / 10;
+}
+
+// Convert intentional sub-floor quick picks into explicit week-scoped floor exceptions.
+function coachWeekAdjustedMinimumsForTargets(targets) {
+  return Object.fromEntries(muscleGroups
+    .filter((muscle) => Number(targets[muscle.id]) < HYPERTROPHY.minimumSets)
+    .map((muscle) => [muscle.id, Math.max(0, Math.round(Number(targets[muscle.id]) * 10) / 10)]));
 }
 
 function coachWeekDate(day, weekStart = currentTrainingWeekStart()) {
@@ -5300,23 +5320,31 @@ function rebalanceWeeklyTargets({ setup: setupInput, draggedMuscleId, requestedR
   // Convert full weekly targets into the adjustable remainder above already submitted stimulus.
   const banked = Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, Math.max(0, Number(bankedSets[muscle.id]) || 0)]));
   const floors = Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, Math.max(0, (setup.adjustedMinimums[muscle.id] ?? HYPERTROPHY.minimumSets) - banked[muscle.id])]));
-  const maximums = Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, Math.max(0, 30 - banked[muscle.id])]));
+  const maximums = Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, Math.max(0, COACH_WEEK_TARGET_MAX - banked[muscle.id])]));
   const remaining = Object.fromEntries(muscleGroups.map((muscle) => {
     const current = Math.max(0, Number(setup.targets[muscle.id]) - banked[muscle.id]);
     return [muscle.id, Math.min(maximums[muscle.id], Math.max(floors[muscle.id], current))];
   }));
   const originalTargets = clonePlain(setup.targets);
+  // When all normal floors cannot fit, permit manual reductions down to submitted work.
+  const capacity = Math.max(0, Number(remainingCapacity) || 0);
+  const normalFloorDemand = muscleGroups.reduce((sum, muscle) => sum + Math.max(0, HYPERTROPHY.minimumSets - banked[muscle.id]), 0);
+  const minimum = normalFloorDemand > capacity + 0.001 ? 0 : floors[draggedMuscleId];
   // Allow incremental reductions even when the remaining week cannot accommodate every floor.
-  const requested = Math.min(maximums[draggedMuscleId], Math.max(floors[draggedMuscleId], Number(requestedRemaining) || 0));
+  const requested = Math.min(maximums[draggedMuscleId], Math.max(minimum, Number(requestedRemaining) || 0));
   if (requested < remaining[draggedMuscleId]) {
+    // Persist this explicit exception before the form is normalized again; other faders stay unchanged.
+    const target = Math.max(banked[draggedMuscleId], Math.round((banked[draggedMuscleId] + requested) * 10) / 10);
+    const belowFloor = target < HYPERTROPHY.minimumSets;
     return {
-      targets: { ...originalTargets, [draggedMuscleId]: Math.round((banked[draggedMuscleId] + requested) * 10) / 10 },
+      targets: { ...originalTargets, [draggedMuscleId]: target },
+      adjustedMinimums: belowFloor ? { ...setup.adjustedMinimums, [draggedMuscleId]: target } : setup.adjustedMinimums,
+      adjustmentWeek: belowFloor ? isoFromLocalDate(currentTrainingWeekStart()) : setup.adjustmentWeek,
       bleed: { nonPriority: [], priority: [] },
       denied: false,
-      reason: ""
+      reason: belowFloor ? "This target is below 10; the weekly floor is not covered by this request." : ""
     };
   }
-  const capacity = Math.max(0, Number(remainingCapacity) || 0);
   const minimumDemand = Object.values(floors).reduce((sum, value) => sum + value, 0);
   if (minimumDemand > capacity + 0.001) {
     return {
@@ -5327,7 +5355,7 @@ function rebalanceWeeklyTargets({ setup: setupInput, draggedMuscleId, requestedR
     };
   }
 
-  // Clamp the dragged muscle to its protected floor and its 30-set weekly ceiling.
+  // Clamp the dragged muscle to its protected floor and the weekly equalizer ceiling.
   remaining[draggedMuscleId] = Math.min(
     maximums[draggedMuscleId],
     Math.max(floors[draggedMuscleId], Number(requestedRemaining) || 0)
@@ -5339,13 +5367,13 @@ function rebalanceWeeklyTargets({ setup: setupInput, draggedMuscleId, requestedR
   // Return full weekly targets so the existing hidden inputs and Generate path remain unchanged.
   const targets = Object.fromEntries(muscleGroups.map((muscle) => [
     muscle.id,
-    Math.round(Math.max(banked[muscle.id], Math.min(30, banked[muscle.id] + remaining[muscle.id])) * 10) / 10
+    Math.round(Math.max(banked[muscle.id], Math.min(COACH_WEEK_TARGET_MAX, banked[muscle.id] + remaining[muscle.id])) * 10) / 10
   ]));
   return { targets, bleed: { nonPriority: [], priority: [] }, denied: false, reason: "" };
 }
 
 // Reduce over-capacity targets in the same strict order as the faders while preserving feasible 10-set floors.
-function fitCoachWeekTargetsToCapacity({ setup: setupInput, bankedSets = {}, remainingCapacity = 0 }) {
+function fitCoachWeekTargetsToCapacity({ setup: setupInput, bankedSets = {}, remainingCapacity = 0, respectRequestedTargets = false }) {
   const setup = normalizeCoachWeeklyPlan(setupInput);
   const banked = Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, Math.max(0, Number(bankedSets[muscle.id]) || 0)]));
   const floors = Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, Math.max(0, Math.min(10, setup.targets[muscle.id]) - banked[muscle.id])]));
@@ -5358,7 +5386,8 @@ function fitCoachWeekTargetsToCapacity({ setup: setupInput, bankedSets = {}, rem
   const scarceFloorCaps = Object.fromEntries(muscleGroups.map((muscle) => {
     const target = Number(setup.targets[muscle.id]) || 0;
     const wasReduced = setup.adjustedMinimums[muscle.id] != null && target < HYPERTROPHY.minimumSets;
-    const priorityFloor = setup.priorities.includes(muscle.id) && wasReduced ? HYPERTROPHY.minimumSets : target;
+    // A custom below-floor quick pick is a deliberate ceiling; explicit Fix can still recover floors.
+    const priorityFloor = !respectRequestedTargets && setup.priorities.includes(muscle.id) && wasReduced ? HYPERTROPHY.minimumSets : target;
     return [muscle.id, Math.max(0, Math.min(HYPERTROPHY.minimumSets, priorityFloor))];
   }));
   const minimumDemand = muscleGroups.reduce((sum, muscle) => sum + Math.max(0, scarceFloorCaps[muscle.id] - banked[muscle.id]), 0);
@@ -5409,57 +5438,67 @@ function fitCoachWeekTargetsToCapacity({ setup: setupInput, bankedSets = {}, rem
   };
 }
 
-// Add unused capacity in fixed priority order: priority-first, then non-priority, toward growthHigh.
+// Rebuild the requested weekly targets from the remaining capacity budget in the same order Coach plans it.
 function optimizeCoachWeekTargetsToCapacity({ setup: setupInput, bankedSets = {}, projectedSets = null, remainingCapacity = 0 }) {
   const setup = normalizeCoachWeeklyPlan(setupInput);
   const banked = Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, Math.max(0, Number(bankedSets[muscle.id]) || 0)]));
-  const targets = Object.fromEntries(muscleGroups.map((muscle) => [
-    muscle.id,
-    Math.min(30, Math.max(HYPERTROPHY.minimumSets, banked[muscle.id], Number(setup.targets[muscle.id]) || HYPERTROPHY.minimumSets))
-  ]));
+  const originalTargets = Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, Math.min(COACH_WEEK_TARGET_MAX, Math.max(banked[muscle.id], Number(setup.targets[muscle.id]) || 0))]));
+  const targets = { ...banked };
   const capacity = Math.max(0, Number(remainingCapacity) || 0);
-  // Available capacity is what remains after submitted (banked) work — the optimizer adds on top of requested targets.
-  const totalBanked = muscleGroups.reduce((sum, muscle) => sum + banked[muscle.id], 0);
-  let available = Math.max(0, capacity - totalBanked);
+  // Capacity describes future sessions only; submitted credits are already retained in targets.
+  let available = capacity;
   const startingAvailable = available;
   const priorityIds = muscleGroups.map((muscle) => muscle.id).filter((id) => setup.priorities.includes(id));
   const nonPriorityIds = muscleGroups.map((muscle) => muscle.id).filter((id) => !setup.priorities.includes(id));
   const unmetProjectedPriorities = projectedSets ? priorityIds.filter((id) => (
-    (Number(projectedSets[id]) || 0) + 0.001 < targets[id]
+    (Number(projectedSets[id]) || 0) + 0.001 < originalTargets[id]
   )) : [];
   if (unmetProjectedPriorities.length) {
     return {
-      targets,
+      targets: originalTargets,
       denied: false,
       adjusted: false,
       reason: `Reserved available capacity for unmet priorities: ${unmetProjectedPriorities.map(muscleLabel).join(", ")}. Generate to rebuild the sessions.`
     };
   }
-  const addToward = (ids, ceiling) => {
+  const addToward = (ids, ceilingFor) => {
     while (available > 0.001) {
       const id = ids
-        .filter((muscleId) => targets[muscleId] < ceiling - 0.001)
+        .filter((muscleId) => targets[muscleId] < ceilingFor(muscleId) - 0.001)
         .sort((a, b) => targets[a] - targets[b] || muscleGroups.findIndex((muscle) => muscle.id === a) - muscleGroups.findIndex((muscle) => muscle.id === b))[0];
       if (!id) break;
-      const increment = Math.min(1, available, ceiling - targets[id]);
+      const increment = Math.min(0.5, available, ceilingFor(id) - targets[id]);
       targets[id] += increment;
       available -= increment;
     }
   };
-  addToward(priorityIds, HYPERTROPHY.growthHigh);
-  addToward(nonPriorityIds, HYPERTROPHY.growthHigh);
+  addToward(priorityIds, () => HYPERTROPHY.minimumSets);
+  addToward(nonPriorityIds, () => HYPERTROPHY.minimumSets);
+  addToward(priorityIds, (id) => originalTargets[id]);
+  addToward(nonPriorityIds, (id) => originalTargets[id]);
+  addToward(priorityIds, (id) => Math.max(originalTargets[id], setup.optimizeCeilings[id] || (setup.priorities.includes(id) ? HYPERTROPHY.growthHigh : originalTargets[id])));
+  addToward(nonPriorityIds, (id) => Math.max(originalTargets[id], setup.optimizeCeilings[id] || originalTargets[id]));
   const added = startingAvailable - available;
-  const capacityExceeded = totalBanked > capacity + 0.001;
+  // Round new requests down to the fader precision without rounding submitted fractional credits.
+  const normalizedTargets = Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, Math.max(banked[muscle.id], Math.floor((Math.min(COACH_WEEK_TARGET_MAX, targets[muscle.id]) + 0.000001) * 10) / 10)]));
+  const changed = muscleGroups.some((muscle) => Math.abs(normalizedTargets[muscle.id] - originalTargets[muscle.id]) > 0.001);
+  const reducedFloors = muscleGroups.filter((muscle) => normalizedTargets[muscle.id] + 0.001 < HYPERTROPHY.minimumSets);
   return {
-    targets,
+    targets: normalizedTargets,
+    adjustedMinimums: Object.fromEntries(reducedFloors.map((muscle) => [muscle.id, normalizedTargets[muscle.id]])),
+    adjustmentWeek: reducedFloors.length ? isoFromLocalDate(currentTrainingWeekStart()) : "",
     denied: false,
-    adjusted: added > 0.001 || capacityExceeded,
-    reason: capacityExceeded
-      ? `All ${fmt(capacity, 1)} capacity is used by submitted work. No room to optimize.`
-      : added > 0.001
-        ? `Added ${fmt(added, 1)} sets to use the available weekly capacity.`
+    adjusted: changed || added > 0.001,
+    reason: capacity <= 0.001
+      ? "No remaining workout capacity. Submitted work is preserved."
+      : reducedFloors.length
+        ? setup.priorities.length
+          ? "Some targets remain below 10; available capacity is prioritizing selected weekly floors first."
+          : "Some targets remain below 10; available capacity is balanced across muscle groups."
+        : changed || added > 0.001
+          ? `Optimized ${fmt(added, 1)} sets across floors, priorities, and requested targets.`
         : available > 0.001
-          ? `${fmt(available, 1)} sets remain, but every muscle is already at the 30-set cap.`
+          ? `${fmt(available, 1)} sets remain, but every muscle is already at the ${COACH_WEEK_TARGET_MAX}-set cap.`
           : "Current targets already use the selected capacity."
   };
 }
@@ -5519,24 +5558,30 @@ function prepareCoachWeeklyCapacityPlan(setupInput, mode) {
   const banked = Object.fromEntries(muscleSetStats(coachWeeklyWorkouts()).map((stat) => [stat.id, stat.sets]));
   const dates = original.days.map((day) => ({ date: coachWeekDate(day) })).filter(({ date }) => date >= todayISO() && !workoutsForDate(date).length);
   const capacity = coachWeeklyCapacity(original, dates).estimatedSetCapacity;
-  const fitted = mode === "fix" ? fitCoachWeekTargetsToCapacity({ setup: original, bankedSets: banked, remainingCapacity: capacity }) : {};
-  let plan = buildCoachWeeklyPlan(normalizeCoachWeeklyPlan({ ...original, ...fitted }), { optimize: true });
-  let targets = { ...original.targets };
+  const fitted = mode === "fix"
+    ? fitCoachWeekTargetsToCapacity({ setup: original, bankedSets: banked, remainingCapacity: capacity })
+    : mode === "optimize"
+      ? optimizeCoachWeekTargetsToCapacity({ setup: original, bankedSets: banked, remainingCapacity: capacity })
+      : {};
+  const plannedSetup = normalizeCoachWeeklyPlan({ ...original, ...(fitted.adjusted ? fitted : {}) });
+  let plan = buildCoachWeeklyPlan(plannedSetup, { optimize: true });
+  let targets = { ...plannedSetup.targets };
   if (mode === "fix") {
     // Reconcile requests with demonstrated schedule support; submitted work is never reduced.
     targets = Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, Math.max(banked[muscle.id] || 0, Math.min(fitted.targets[muscle.id], plan.projected[muscle.id] || 0))]));
   } else if (!plan.attainment.unmet.length) {
-    const expanded = normalizeCoachWeeklyPlan({ ...original, targets: Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, Math.max(original.targets[muscle.id], original.optimizeCeilings[muscle.id] || original.targets[muscle.id])])) });
+    // Explicit ceilings may authorize extra work after the optimized/requested targets already fit.
+    const expanded = normalizeCoachWeeklyPlan({ ...plannedSetup, targets: Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, Math.max(plannedSetup.targets[muscle.id], plannedSetup.optimizeCeilings[muscle.id] || plannedSetup.targets[muscle.id])])) });
     const candidate = buildCoachWeeklyPlan(expanded, { optimize: true });
     // Additional volume must not sacrifice any of the original requests that already fit.
-    if (muscleGroups.every((muscle) => candidate.projected[muscle.id] + 0.001 >= original.targets[muscle.id])
+    if (muscleGroups.every((muscle) => candidate.projected[muscle.id] + 0.001 >= plannedSetup.targets[muscle.id])
       && coachWeekCapacityProgress(expanded, banked, capacity).over <= 0.001) {
       plan = candidate;
-      targets = Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, Math.max(original.targets[muscle.id], Math.min(expanded.targets[muscle.id], candidate.projected[muscle.id]))]));
+      targets = Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, Math.max(plannedSetup.targets[muscle.id], Math.min(expanded.targets[muscle.id], candidate.projected[muscle.id]))]));
     }
   }
   // Persist reduced manual minima alongside their week so reloads cannot silently restore ten.
-  const adjustedMinimums = mode === "fix" ? Object.fromEntries(muscleGroups.filter((muscle) => targets[muscle.id] < 10).map((muscle) => [muscle.id, targets[muscle.id]])) : original.adjustedMinimums;
+  const adjustedMinimums = ["fix", "optimize"].includes(mode) ? Object.fromEntries(muscleGroups.filter((muscle) => targets[muscle.id] < 10).map((muscle) => [muscle.id, targets[muscle.id]])) : original.adjustedMinimums;
   const setup = normalizeCoachWeeklyPlan({ ...original, targets, adjustedMinimums, adjustmentWeek: isoFromLocalDate(currentTrainingWeekStart()) });
   if (mode === "fix" && coachWeekCapacityProgress(setup, banked, capacity).over > 0.001) throw new Error("Capacity adjustment could not be validated; your previous plan was kept.");
   const result = finalizeCoachWeeklyGeneratedPlan(setup, plan);
@@ -9283,7 +9328,7 @@ function renderCoachWeekMixer(setup, plan) {
   ]));
   const capacity = Math.max(0, coachWeeklyCapacity(setup, liveDates).estimatedSetCapacity);
   const progress = coachWeekCapacityProgress(setup, banked, capacity);
-  const axisTicks = [30, 25, 20, 15, 10, 5, 0];
+  const axisTicks = [50, 40, 30, 20, 10, 0];
   return `
     <div class="coach-week-mixer-head">
       <div class="coach-week-capacity-progress ${progress.over ? "is-over" : ""}" data-coach-week-capacity-progress>
@@ -9297,6 +9342,7 @@ function renderCoachWeekMixer(setup, plan) {
       ${[10, 15, 20].map((target) => `<button class="ghost-mini" type="button" data-action="coach-week-quick-pick" data-target="${target}">All ${target}</button>`).join("")}
       <button class="ghost-mini" type="button" data-action="coach-week-fix-over">Fix Over Capacity</button>
       <button class="ghost-mini" type="button" data-action="coach-week-optimize-under">Optimize Under Capacity</button>
+      <label class="coach-week-custom-pick"><input type="number" min="0" max="${COACH_WEEK_TARGET_MAX}" step="0.5" inputmode="decimal" data-coach-week-custom-target aria-label="Custom weekly target" placeholder="X"><button class="ghost-mini" type="button" data-action="coach-week-quick-pick" data-custom-target="true">All X</button></label>
     </div>
     <div class="coach-week-mixer-shell">
       <div class="coach-week-mixer-axis" aria-hidden="true">${axisTicks.map((tick) => `<span style="--tick:${tick}">${tick}</span>`).join("")}</div>
@@ -9308,14 +9354,14 @@ function renderCoachWeekMixer(setup, plan) {
             const remaining = Math.max(0, target - submitted);
             const floor = Math.max(setup.adjustedMinimums[muscle.id] ?? HYPERTROPHY.minimumSets, submitted);
             return `
-              <div class="coach-week-fader ${setup.priorities.includes(muscle.id) ? "is-priority" : ""}" data-coach-week-fader data-muscle-id="${muscle.id}" data-banked-sets="${fmt(submitted, 1)}" style="--banked-pct:${Math.min(100, submitted / 30 * 100)}%;--target-pct:${target / 30 * 100}%;--floor-pct:${Math.min(100, floor / 30 * 100)}%">
+              <div class="coach-week-fader ${setup.priorities.includes(muscle.id) ? "is-priority" : ""}" data-coach-week-fader data-muscle-id="${muscle.id}" data-banked-sets="${fmt(submitted, 1)}" style="--banked-pct:${Math.min(100, submitted / COACH_WEEK_TARGET_MAX * 100)}%;--target-pct:${target / COACH_WEEK_TARGET_MAX * 100}%;--floor-pct:${Math.min(100, floor / COACH_WEEK_TARGET_MAX * 100)}%">
                 <div class="coach-week-fader-readout"><strong data-weekly-remaining>${fmt(remaining, 1)} left</strong><small data-weekly-total>${fmt(target, 1)} target</small></div>
                 <div class="coach-week-fader-track" data-weekly-fader-track>
                   <span class="coach-week-fader-grid" aria-hidden="true"></span>
                   <span class="coach-week-fader-adjustable" aria-hidden="true"></span>
                   <span class="coach-week-fader-banked" aria-hidden="true"></span>
                   <span class="coach-week-fader-floor" aria-hidden="true"></span>
-                  <button class="coach-week-fader-knob" type="button" role="slider" data-weekly-fader-knob aria-label="${escapeHtml(muscle.label)} remaining weekly sets" aria-valuemin="${fmt(Math.max(0, floor - submitted), 1)}" aria-valuemax="${fmt(Math.max(0, 30 - submitted), 1)}" aria-valuenow="${fmt(remaining, 1)}" aria-valuetext="${fmt(remaining, 1)} sets left, ${fmt(submitted, 1)} already submitted"><img src="${escapeHtml(`${muscleIconPaths[muscle.id]}?v=${APP_VERSION}`)}" alt="" draggable="false"></button>
+                  <button class="coach-week-fader-knob" type="button" role="slider" data-weekly-fader-knob aria-label="${escapeHtml(muscle.label)} remaining weekly sets" aria-valuemin="${fmt(Math.max(0, floor - submitted), 1)}" aria-valuemax="${fmt(Math.max(0, COACH_WEEK_TARGET_MAX - submitted), 1)}" aria-valuenow="${fmt(remaining, 1)}" aria-valuetext="${fmt(remaining, 1)} sets left, ${fmt(submitted, 1)} already submitted"><img src="${escapeHtml(`${muscleIconPaths[muscle.id]}?v=${APP_VERSION}`)}" alt="" draggable="false"></button>
                 </div>
                 <label class="coach-week-fader-label"><input type="checkbox" name="priorities" value="${muscle.id}" ${setup.priorities.includes(muscle.id) ? "checked" : ""}><span>${escapeHtml(muscle.label)}</span></label>
                 <small data-weekly-banked>${fmt(submitted, 1)} banked</small>
@@ -9330,7 +9376,7 @@ function renderCoachWeekMixer(setup, plan) {
     <!-- Explicit ceilings keep extra optimization volume opt-in for each muscle. -->
     <details class="collapsible-panel section">
       <summary><span>Optimize ceilings</span><small>Optional</small></summary>
-      <div class="exercise-form-grid">${muscleGroups.map((muscle) => `<label>${escapeHtml(muscle.label)}<input type="number" name="ceiling-${muscle.id}" min="10" max="30" step="0.5" placeholder="${fmt(setup.targets[muscle.id])}" value="${setup.optimizeCeilings[muscle.id] ?? ""}" aria-label="${escapeHtml(muscle.label)} Optimize ceiling"></label>`).join("")}</div>
+      <div class="exercise-form-grid">${muscleGroups.map((muscle) => `<label>${escapeHtml(muscle.label)}<input type="number" name="ceiling-${muscle.id}" min="10" max="${COACH_WEEK_TARGET_MAX}" step="0.5" placeholder="${fmt(setup.targets[muscle.id])}" value="${setup.optimizeCeilings[muscle.id] ?? ""}" aria-label="${escapeHtml(muscle.label)} Optimize ceiling"></label>`).join("")}</div>
     </details>
     <p class="coach-week-dirty" data-coach-week-dirty ${state.coachWeekFormPreview ? "" : "hidden"}>Changes not generated yet.</p>
   `;
@@ -9483,7 +9529,7 @@ function updateCoachWeekMixerDom(form, targets, bankedSets, bleed, draggedMuscle
     // An empty ceiling follows the current target as faders or quick picks change it.
     const ceilingInput = form.elements[`ceiling-${muscle.id}`];
     if (ceilingInput) ceilingInput.placeholder = fmt(target, 1);
-    fader.style.setProperty("--target-pct", `${target / 30 * 100}%`);
+    fader.style.setProperty("--target-pct", `${target / COACH_WEEK_TARGET_MAX * 100}%`);
     fader.querySelector("[data-weekly-remaining]").textContent = `${fmt(remaining, 1)} left`;
     fader.querySelector("[data-weekly-total]").textContent = `${fmt(target, 1)} target`;
     const knob = fader.querySelector("[data-weekly-fader-knob]");
@@ -9491,7 +9537,7 @@ function updateCoachWeekMixerDom(form, targets, bankedSets, bleed, draggedMuscle
     const setup = state.coachWeekFormPreview || selectedCoachWeeklyPlan();
     const minimum = setup.adjustedMinimums?.[muscle.id] ?? 10;
     knob?.setAttribute("aria-valuemin", fmt(Math.max(0, minimum - banked), 1));
-    fader.style.setProperty("--floor-pct", `${Math.min(100, Math.max(banked, minimum) / 30 * 100)}%`);
+    fader.style.setProperty("--floor-pct", `${Math.min(100, Math.max(banked, minimum) / COACH_WEEK_TARGET_MAX * 100)}%`);
     knob?.setAttribute("aria-valuenow", fmt(remaining, 1));
     knob?.setAttribute("aria-valuetext", `${fmt(remaining, 1)} sets left, ${fmt(banked, 1)} already submitted`);
   });
@@ -9533,7 +9579,8 @@ function autoFitCoachWeekForm(form, context = coachWeekMixerFormContext(form)) {
   const result = fitCoachWeekTargetsToCapacity({
     setup: context.setup,
     bankedSets: context.bankedSets,
-    remainingCapacity: context.remainingCapacity
+    remainingCapacity: context.remainingCapacity,
+    respectRequestedTargets: context.respectRequestedTargets
   });
   const cost = form.querySelector("[data-coach-week-mixer-cost]");
   if (result.denied) {
@@ -9569,11 +9616,14 @@ function optimizeCoachWeekForm(form, context = coachWeekMixerFormContext(form)) 
     if (cost) cost.textContent = result.reason;
     return result;
   }
-  if (result.adjusted) updateCoachWeekMixerDom(form, result.targets, context.bankedSets, { nonPriority: [], priority: [] }, "");
+  // Keep below-floor allocations through normalization before updating the controls.
   state.coachWeekFormPreview = normalizeCoachWeeklyPlan({
     ...context.setup,
+    adjustedMinimums: result.adjustedMinimums ?? context.setup.adjustedMinimums,
+    adjustmentWeek: result.adjustmentWeek ?? context.setup.adjustmentWeek,
     targets: result.adjusted ? result.targets : context.setup.targets
   });
+  if (result.adjusted) updateCoachWeekMixerDom(form, result.targets, context.bankedSets, { nonPriority: [], priority: [] }, "");
   persistCoachWeekFormPreview();
   updateCoachWeekCapacityProgressDom(form, state.coachWeekFormPreview, context.bankedSets, context.remainingCapacity);
   if (cost) cost.textContent = result.reason;
@@ -9591,11 +9641,15 @@ function applyCoachWeekFaderRequest(form, muscleId, requestedRemaining) {
     remainingCapacity: context.remainingCapacity
   });
   if (!result.denied) {
+    // Carry an intentional floor reduction into the form reader so it cannot snap back to ten.
+    state.coachWeekFormPreview = normalizeCoachWeeklyPlan({ ...context.setup, ...result });
     updateCoachWeekMixerDom(form, result.targets, context.bankedSets, result.bleed, muscleId);
     // Capture the redistributed hidden targets so a later background render restores this exact preview.
     state.coachWeekFormPreview = coachWeeklyPlanFromForm(form);
     persistCoachWeekFormPreview();
     updateCoachWeekCapacityProgressDom(form, state.coachWeekFormPreview, context.bankedSets, context.remainingCapacity);
+    const cost = form.querySelector("[data-coach-week-mixer-cost]");
+    if (cost && result.reason) cost.textContent = result.reason;
   }
   return result;
 }
@@ -9605,7 +9659,7 @@ function coachWeekRemainingFromPointer(fader, clientY) {
   const track = fader.querySelector("[data-weekly-fader-track]");
   if (!track) return 0;
   const rect = track.getBoundingClientRect();
-  const total = Math.round(Math.max(0, Math.min(1, (rect.bottom - clientY) / Math.max(rect.height, 1))) * 30);
+  const total = Math.round(Math.max(0, Math.min(1, (rect.bottom - clientY) / Math.max(rect.height, 1))) * COACH_WEEK_TARGET_MAX);
   const banked = Number(fader.dataset.bankedSets) || 0;
   return total - banked;
 }
@@ -12521,14 +12575,28 @@ async function handleAction(action, target) {
     },
     async "coach-week-quick-pick"() {
       const form = target.closest("#coach-week-form");
-      const requestedTarget = Number(target.dataset.target);
-      if (!form || ![10, 15, 20].includes(requestedTarget)) return;
+      if (!form) return;
+      const requestedTarget = coachWeekQuickPickTarget(target, form);
+      if (requestedTarget == null) {
+        toast(`Enter a weekly target from 0 to ${COACH_WEEK_TARGET_MAX}.`);
+        return;
+      }
       const context = markCoachWeekFormDirty(form);
       const requestedTargets = Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, Math.max(requestedTarget, context.bankedSets[muscle.id] || 0)]));
-      updateCoachWeekMixerDom(form, requestedTargets, context.bankedSets, { nonPriority: [], priority: [] }, "");
+      // Preserve custom below-floor quick picks by carrying their temporary minima before the form is reread.
+      const adjustedMinimums = coachWeekAdjustedMinimumsForTargets(requestedTargets);
+      state.coachWeekFormPreview = normalizeCoachWeeklyPlan({
+        ...context.setup,
+        targets: requestedTargets,
+        adjustedMinimums,
+        adjustmentWeek: Object.keys(adjustedMinimums).length ? isoFromLocalDate(currentTrainingWeekStart()) : ""
+      });
+      persistCoachWeekFormPreview();
+      updateCoachWeekMixerDom(form, state.coachWeekFormPreview.targets, context.bankedSets, { nonPriority: [], priority: [] }, "");
       // Retain the quick pick and refresh its capacity warning even when automatic fitting is denied.
       const fittedContext = markCoachWeekFormDirty(form);
-      const result = autoFitCoachWeekForm(form, fittedContext);
+      // Fit intentional low requests downward without restoring a selected priority to ten.
+      const result = autoFitCoachWeekForm(form, { ...fittedContext, respectRequestedTargets: requestedTarget < HYPERTROPHY.minimumSets });
       toast(result.denied ? result.reason : result.adjusted ? `All ${requestedTarget} exceeded current capacity, so Coach protected floors and priorities.` : `All weekly targets set to ${requestedTarget}.`);
     },
     async "coach-week-fix-over"() {

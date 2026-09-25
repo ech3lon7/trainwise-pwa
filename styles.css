@@ -4198,6 +4198,20 @@ textarea {
   white-space: nowrap;
 }
 
+.coach-week-custom-pick {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+
+.coach-week-custom-pick input {
+  width: 64px;
+  min-height: 34px;
+  padding: 6px 8px;
+  text-align: center;
+}
+
 .coach-week-mixer-head small,
 .coach-week-mixer-cost,
 .coach-week-dirty,
@@ -4263,7 +4277,7 @@ textarea {
 
 .coach-week-mixer-axis span {
   position: absolute;
-  top: calc((30 - var(--tick)) / 30 * 100%);
+  top: calc((50 - var(--tick)) / 50 * 100%);
   right: 0;
   transform: translateY(-50%);
 }
