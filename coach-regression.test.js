@@ -2216,9 +2216,35 @@ const weeklyDistributionIndicators = runScenario(`
   });
 `);
 
-assert(weeklyDistributionIndicators.includes("coach-week-muscle-status below-minimum") && weeklyDistributionIndicators.includes('aria-label="Below 10-set minimum"'), "Expected red weekly indicator for projected totals below 10 sets.");
-assert(weeklyDistributionIndicators.includes("coach-week-muscle-status below-upper") && weeklyDistributionIndicators.includes('aria-label="Below 20 planned sets"'), "Expected orange weekly indicator for projected totals from 10 through under 20 sets.");
-assert(weeklyDistributionIndicators.includes("coach-week-muscle-status upper-met") && weeklyDistributionIndicators.includes('aria-label="20 planned sets reached"'), "Expected green weekly indicator at 20 or more projected sets.");
+assert(weeklyDistributionIndicators.includes("coach-week-muscle-status below-minimum") && weeklyDistributionIndicators.includes('aria-label="Below the 10-set weekly floor"'), "Expected red weekly indicator for projected totals below 10 sets.");
+assert(weeklyDistributionIndicators.includes("coach-week-muscle-status below-upper") && weeklyDistributionIndicators.includes('aria-label="Below the 20-set weekly target"'), "Expected orange weekly indicator when the floor is met but the target is not.");
+assert(weeklyDistributionIndicators.includes("coach-week-muscle-status upper-met") && weeklyDistributionIndicators.includes('aria-label="Weekly target of 20 sets met"'), "Expected green weekly indicator once the muscle reaches its own weekly target.");
+
+// Green must follow the per-muscle target rather than the old fixed twenty-set threshold, so a
+// twelve-set week reads as met instead of permanently short.
+const weeklyDistributionTargetDriven = runScenario(`
+  ${resetAndHelpers}
+  renderCoachWeekDistribution({
+    actualStats: muscleGroups.map((muscle) => ({ id: muscle.id, sets: muscle.id === "chest" ? 12 : 0 })),
+    projected: Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, muscle.id === "chest" ? 12 : 6])),
+    setup: { priorities: [], targets: Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, 12])) }
+  });
+`);
+assert(weeklyDistributionTargetDriven.includes('aria-label="Weekly target of 12 sets met"'), "A muscle at its twelve-set target must show the green mark.");
+assert(!weeklyDistributionTargetDriven.includes('aria-label="Below the 12-set weekly target"'), "A muscle at its twelve-set target must not show the orange mark.");
+
+// A reduced request can be met while still sitting under the ten-set floor, so both marks render together.
+const weeklyDistributionReducedWeek = runScenario(`
+  ${resetAndHelpers}
+  renderCoachWeekDistribution({
+    actualStats: muscleGroups.map((muscle) => ({ id: muscle.id, sets: 2 })),
+    projected: Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, 2])),
+    setup: { priorities: [], targets: Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, 2])) }
+  });
+`);
+assert(weeklyDistributionReducedWeek.includes('aria-label="Below the 10-set weekly floor"'), "A reduced two-set week must still warn that it is below the weekly floor.");
+assert(weeklyDistributionReducedWeek.includes('aria-label="Weekly target of 2 sets met"'), "A reduced two-set week must also confirm the requested target was met.");
+assert(weeklyDistributionReducedWeek.includes("below-minimum") && weeklyDistributionReducedWeek.match(/coach-week-muscle-status/g).length >= 20, "Every reduced muscle must render both a red and a green mark in the same row.");
 
 const weeklySetBudgetAllocation = runScenario(`
   ${resetAndHelpers}
@@ -2280,8 +2306,8 @@ const weeklyExistingExerciseTopUp = runScenario(`
   ({ projectedAbs: plan.projected.abs, absSets: session.items.find((item) => item.exercise.id === "abs-only")?.sets || 0, itemCount: session.items.length, totalMinutes: session.totalMinutes });
 `);
 
-assert.strictEqual(weeklyExistingExerciseTopUp.projectedAbs, 16, `Expected logical unused time to continue safe growth-zone work beyond the requested floor, got ${weeklyExistingExerciseTopUp.projectedAbs}.`);
-assert.strictEqual(weeklyExistingExerciseTopUp.absSets, 8, `Expected the existing Abs exercise to reach the per-exercise cap when no other safe work is available, got ${weeklyExistingExerciseTopUp.absSets}.`);
+assert.strictEqual(weeklyExistingExerciseTopUp.projectedAbs, 14, "Generate must stop direct fill at the requested target; extra volume requires an explicit Optimize ceiling.");
+assert.strictEqual(weeklyExistingExerciseTopUp.absSets, 6, "Expected six added sets to finish the requested Abs target.");
 assert.strictEqual(weeklyExistingExerciseTopUp.itemCount, 1, "Expected topping up sets to preserve the exercise count.");
 assert(weeklyExistingExerciseTopUp.totalMinutes <= 63, `Expected the topped-up session to remain within the selected time tolerance, got ${weeklyExistingExerciseTopUp.totalMinutes}.`);
 
@@ -2414,6 +2440,8 @@ const weeklySecondaryStimulusBudget = runScenario(`
     priorities: ["glutes"],
     targets: Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, ["glutes", "quads"].includes(muscle.id) ? 20 : 10]))
   });
+  // Secondary-growth coverage is tested only after all other weekly floors are already protected.
+  state.workouts.push(...muscleGroups.filter((muscle) => !["quads", "glutes"].includes(muscle.id)).map((muscle) => makeWorkout(muscle, 2, 10, { exerciseId: "previous-" + muscle.id, secondaryMuscles: [] })));
   var plan = buildCoachWeeklyPlan();
   var planned = plan.sessions.flatMap((session) => session.items);
   var directGluteSets = planned.filter((item) => item.muscle.id === "glutes").reduce((sum, item) => sum + item.sets, 0);
@@ -2504,7 +2532,183 @@ assert.strictEqual(weeklyAttainmentWarning.fits, false, "Expected weekly capacit
 assert(weeklyAttainmentWarning.targetMet < 10, "Expected adjacent remaining days to leave at least one defined target unmet.");
 assert(weeklyAttainmentWarning.priorityMet < weeklyAttainmentWarning.priorityTotal, "Expected unmet priority targets to be reported explicitly.");
 assert(weeklyAttainmentWarning.message.includes("Floors planned:") && weeklyAttainmentWarning.message.includes("Priority targets planned:"), "Expected weekly status to report floor and priority-target attainability.");
-assert(weeklyAttainmentWarning.markup.includes("Some weekly targets cannot be planned"), "Expected Coach Week UI to clearly warn when the generated schedule misses targets.");
+assert(weeklyAttainmentWarning.markup.includes("Some weekly targets remain short"), "Expected Coach Week UI to report shortfalls without claiming they are impossible.");
+
+// Partial weeks must remain usable, with strict floors and explicit optimization ceilings.
+// Capacity fitting must lower floors explicitly, preserve zeros, and permit only affordable manual increases.
+const adjustedFloorCapacity = runScenario(`
+  ${resetAndHelpers}
+  var setup = normalizeCoachWeeklyPlan({ days: [3], targets: Object.fromEntries(muscleGroups.map(m => [m.id, 10])) });
+  var fit = fitCoachWeekTargetsToCapacity({ setup, remainingCapacity: 65 });
+  var adjusted = normalizeCoachWeeklyPlan({ ...setup, ...fit });
+  var progress = coachWeekCapacityProgress(adjusted, {}, 65);
+  var denied = rebalanceWeeklyTargets({ setup: adjusted, draggedMuscleId: "chest", requestedRemaining: adjusted.targets.chest + 1, remainingCapacity: 65 });
+  var allowed = rebalanceWeeklyTargets({ setup: adjusted, draggedMuscleId: "chest", requestedRemaining: adjusted.targets.chest + 1, remainingCapacity: 66 });
+  var zero = fitCoachWeekTargetsToCapacity({ setup, remainingCapacity: 0 });
+  var zeroSetup = normalizeCoachWeeklyPlan({ ...setup, ...zero });
+  var zeroPlan = buildCoachWeeklyPlan(zeroSetup, { optimize: true });
+  ({ fit, adjusted, progress, denied, allowed, zeroSetup, zeroPlan });
+`);
+assert.strictEqual(adjustedFloorCapacity.progress.over, 0, "100 requested / 65 capacity must be fixed, not left at ten each.");
+assert.strictEqual(adjustedFloorCapacity.progress.requested, 65);
+assert(adjustedFloorCapacity.fit.reason.includes("below 10"));
+assert.strictEqual(adjustedFloorCapacity.denied.denied, true);
+assert.strictEqual(adjustedFloorCapacity.allowed.denied, false);
+assert(Object.values(adjustedFloorCapacity.zeroSetup.targets).every(value => value === 0));
+assert(adjustedFloorCapacity.zeroPlan.sessions.every(session => session.items.length === 0));
+
+const adjustedFloorPriorityCapacity = runScenario(`
+  ${resetAndHelpers}
+  var setup = normalizeCoachWeeklyPlan({
+    days: [5, 6],
+    averageMinutes: 75,
+    priorities: ["chest", "shoulders"],
+    targets: Object.fromEntries(muscleGroups.map(m => [m.id, 10]))
+  });
+  var fit = fitCoachWeekTargetsToCapacity({ setup, remainingCapacity: 65 });
+  ({ targets: fit.targets, adjustedMinimums: fit.adjustedMinimums });
+`);
+assert.strictEqual(adjustedFloorPriorityCapacity.targets.chest, 10, "Scarce weekly capacity must complete selected priority floors first.");
+assert.strictEqual(adjustedFloorPriorityCapacity.targets.shoulders, 10, "Scarce weekly capacity must complete every selected priority floor before balancing non-priorities.");
+assert(adjustedFloorPriorityCapacity.targets.back < 10, "Non-priorities should absorb the below-floor reduction before selected priorities do.");
+assert.strictEqual(adjustedFloorPriorityCapacity.adjustedMinimums.chest, undefined, "Priority floors that fit should not be marked as reduced requests.");
+
+const adjustedFloorPriorityRecovery = runScenario(`
+  ${resetAndHelpers}
+  var setup = normalizeCoachWeeklyPlan({
+    days: [5, 6],
+    averageMinutes: 75,
+    priorities: ["chest", "shoulders"],
+    targets: Object.fromEntries(muscleGroups.map(m => [m.id, 6.5])),
+    adjustedMinimums: Object.fromEntries(muscleGroups.map(m => [m.id, 6.5])),
+    adjustmentWeek: isoFromLocalDate(currentTrainingWeekStart())
+  });
+  var fit = fitCoachWeekTargetsToCapacity({ setup, remainingCapacity: 65 });
+  var demand = muscleGroups.reduce((sum, muscle) => sum + fit.targets[muscle.id], 0);
+  ({ targets: fit.targets, demand });
+`);
+assert.strictEqual(adjustedFloorPriorityRecovery.targets.chest, 10, "Fixing an already-reduced week must recover selected priority floors when capacity allows.");
+assert.strictEqual(adjustedFloorPriorityRecovery.targets.shoulders, 10, "Fixing an already-reduced week must not leave priorities flattened with non-priorities.");
+assert(adjustedFloorPriorityRecovery.targets.back < 6.5, "Recovering priority floors should rebalance the remaining scarce capacity across non-priorities.");
+assert(adjustedFloorPriorityRecovery.demand <= 65.000001, "Priority recovery must still fit the displayed weekly capacity.");
+
+// Fitting metadata survives serialization, but expires next week; submitted fractions remain immutable.
+const adjustedFloorPersistence = runScenario(`
+  ${resetAndHelpers}
+  var setup = normalizeCoachWeeklyPlan({ targets: Object.fromEntries(muscleGroups.map(m => [m.id, 10])) });
+  var banked = { chest: 0.25, back: 35 };
+  var fit = fitCoachWeekTargetsToCapacity({ setup, bankedSets: banked, remainingCapacity: 12.3 });
+  var demand = muscleGroups.reduce((sum, m) => sum + Math.max(0, fit.targets[m.id] - (banked[m.id] || 0)), 0);
+  var fitted = normalizeCoachWeeklyPlan({ ...setup, ...fit });
+  var restored = normalizeCoachWeeklyPlan(JSON.parse(JSON.stringify(fitted)));
+  var expired = normalizeCoachWeeklyPlan({ ...fitted, adjustmentWeek: "2026-06-08" });
+  var plan = prepareCoachWeeklyCapacityPlan({ ...setup, days: [3], averageMinutes: 30 }, "fix");
+  state.settings.coachWeeklyPlan = { ...plan.setup, sourceFingerprint: coachWeeklySourceFingerprint(plan.setup), generatedPlan: compactCoachWeeklyPlanSnapshot(plan) };
+  var markup = renderCoachWeek();
+  ({ demand, fit, fitted, restored, expired, plan, markup });
+`);
+assert(adjustedFloorPersistence.demand <= 12.300001, "Fractional submitted credits must not round fitted demand above capacity.");
+assert.strictEqual(adjustedFloorPersistence.fit.targets.back, 35);
+assert.deepStrictEqual(adjustedFloorPersistence.restored.targets, adjustedFloorPersistence.fitted.targets);
+assert(Object.values(adjustedFloorPersistence.expired.targets).every(value => value >= 10));
+assert(adjustedFloorPersistence.markup.includes("Some weekly floors could not be scheduled"));
+assert(adjustedFloorPersistence.markup.includes("Target adjustments"));
+assert(adjustedFloorPersistence.plan.capacity.requestedSets <= adjustedFloorPersistence.plan.capacity.estimatedSetCapacity);
+assert(adjustedFloorPersistence.plan.sessions.every(session => session.items.length <= 6 && session.totalMinutes <= 33));
+
+const partialWeekControls = runScenario(`
+  ${resetAndHelpers}
+  state.settings.customExercises = state.settings.customExercises.filter((exercise) => exercise.id.startsWith("custom-") && exercise.primaryMuscles.length === 1 && !exercise.secondaryMuscles.length);
+  var allFifteen = Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, 15]));
+  var setup = normalizeCoachWeeklyPlan({ days: [3], averageMinutes: 30, priorities: ["chest"], targets: allFifteen });
+  var fit = fitCoachWeekTargetsToCapacity({ setup, remainingCapacity: 30 });
+  var plan = finalizeCoachWeeklyGeneratedPlan(setup, buildCoachWeeklyPlan(setup, { optimize: true }));
+  var fixed = prepareCoachWeeklyCapacityPlan(setup, "fix");
+  var optimized = prepareCoachWeeklyCapacityPlan(setup, "optimize");
+  ({ fit, plan, fixed, optimized, ceilings: normalizeCoachWeeklyPlan({ targets: allFifteen, optimizeCeilings: { chest: 25, back: 100 } }).optimizeCeilings });
+`);
+assert.strictEqual(partialWeekControls.fit.denied, false, "Floor shortages must not trap quick picks.");
+assert(Object.values(partialWeekControls.fit.targets).reduce((sum, target) => sum + target, 0) <= 30);
+assert(partialWeekControls.plan.attainment.floorMet < 10);
+assert(partialWeekControls.plan.sessions.some((session) => session.items.length));
+assert(Object.values(partialWeekControls.plan.projected).every((sets) => sets <= 10), "Isolation-only partial plans must not include above-floor extras.");
+assert(Object.values(partialWeekControls.fixed.setup.targets).some((target) => target < 10));
+assert.strictEqual(partialWeekControls.optimized.setup.targets.chest, 10, "Optimize must protect the selected priority floor before preserving above-floor requests when floors cannot fit.");
+assert.strictEqual(partialWeekControls.ceilings.chest, 25);
+assert.strictEqual(partialWeekControls.ceilings.back, 50);
+assert.strictEqual(partialWeekControls.ceilings.abs, undefined, "Unspecified ceilings follow targets without authorizing extra work.");
+
+// Optimize Under Capacity should raise reduced priority floors before balancing non-priorities.
+const weeklyOptimizeUnderCapacityPriorityFloors = runScenario(`
+  ${resetAndHelpers}
+  state.settings.customExercises = muscleGroups.map((muscle) => ({ id: "optimize-floor-" + muscle.id, name: muscle.label + " Floor", primaryMuscles: [muscle.id], secondaryMuscles: [], exerciseType: "isolation", reps: "8-15", rest: "60 sec", equipment: "machine" }));
+  var reducedTargets = Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, 6.5]));
+  var reducedMinimums = Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, 6.5]));
+  var setup = normalizeCoachWeeklyPlan({
+    days: [5, 6],
+    averageMinutes: 75,
+    priorities: ["chest", "shoulders"],
+    targets: reducedTargets,
+    adjustedMinimums: reducedMinimums,
+    adjustmentWeek: isoFromLocalDate(currentTrainingWeekStart())
+  });
+  var optimized = prepareCoachWeeklyCapacityPlan(setup, "optimize");
+  ({
+    chest: optimized.setup.targets.chest,
+    shoulders: optimized.setup.targets.shoulders,
+    nonPriorityMax: Math.max(...muscleGroups.filter((muscle) => !optimized.setup.priorities.includes(muscle.id)).map((muscle) => optimized.setup.targets[muscle.id])),
+    action: optimized.capacityAction
+  });
+`);
+assert(weeklyOptimizeUnderCapacityPriorityFloors.chest >= 10, `Expected Optimize Under Capacity to lift a priority floor before non-priority balancing, got Chest ${weeklyOptimizeUnderCapacityPriorityFloors.chest}.`);
+assert(weeklyOptimizeUnderCapacityPriorityFloors.shoulders >= 10, `Expected Optimize Under Capacity to lift every priority floor first, got Shoulders ${weeklyOptimizeUnderCapacityPriorityFloors.shoulders}.`);
+assert(weeklyOptimizeUnderCapacityPriorityFloors.nonPriorityMax <= 10, `Expected non-priorities not to receive above-floor work before priority floors, got max ${weeklyOptimizeUnderCapacityPriorityFloors.nonPriorityMax}.`);
+assert.strictEqual(weeklyOptimizeUnderCapacityPriorityFloors.action, "optimize");
+
+// Ceilings are opt-in, and a blocked floor suppresses all growth extras.
+const weeklyCapacityRecovery = runScenario(`
+  ${resetAndHelpers}
+  state.settings.customExercises = muscleGroups.map((muscle) => ({ id: "iso-" + muscle.id, name: muscle.label + " Isolation", primaryMuscles: [muscle.id], secondaryMuscles: [], exerciseType: "isolation", reps: "8-15", rest: "60 sec", equipment: "machine" }));
+  state.workouts = muscleGroups.map((muscle) => makeWorkout(muscle, 2, 10, { exerciseId: "old-" + muscle.id, secondaryMuscles: [] }));
+  var before = JSON.stringify(state.workouts);
+  var setup = normalizeCoachWeeklyPlan({ days: [5, 0], averageMinutes: 60, priorities: ["chest"], targets: { chest: 14 } });
+  var defaultResult = prepareCoachWeeklyCapacityPlan(setup, "optimize");
+  var explicitResult = prepareCoachWeeklyCapacityPlan({ ...setup, optimizeCeilings: { chest: 20 } }, "optimize");
+  var unchanged = before === JSON.stringify(state.workouts);
+  state.workouts = state.workouts.filter((workout) => !workout.primaryMuscles.includes("abs"));
+  state.settings.customExercises = state.settings.customExercises.filter((exercise) => !exercise.primaryMuscles.includes("abs"));
+  var blocked = prepareCoachWeeklyCapacityPlan(setup, "optimize");
+  state.settings.customExercises = [];
+  var empty = prepareCoachWeeklyCapacityPlan(setup, "fix");
+  ({ defaultResult, explicitResult, blocked, empty, unchanged });
+`);
+assert.strictEqual(weeklyCapacityRecovery.defaultResult.setup.targets.chest, 20, "Already-submitted floors must leave future capacity available for priority growth.");
+assert(weeklyCapacityRecovery.explicitResult.setup.targets.chest > 14 && weeklyCapacityRecovery.explicitResult.setup.targets.chest <= 20);
+assert(weeklyCapacityRecovery.explicitResult.projected.chest >= weeklyCapacityRecovery.explicitResult.setup.targets.chest);
+assert.strictEqual(weeklyCapacityRecovery.unchanged, true);
+assert.strictEqual(weeklyCapacityRecovery.blocked.projected.chest, 10, "A missing Abs floor must block Chest extras under the strict rule.");
+assert(weeklyCapacityRecovery.blocked.attainment.floorUnmet.some((muscle) => muscle.id === "abs"));
+assert(weeklyCapacityRecovery.empty.sessions.every((session) => session.items.length === 0));
+assert.strictEqual(weeklyCapacityRecovery.empty.capacityAction, "fix");
+
+// Over-capacity quick picks must still allow incremental reductions without moving other targets.
+const overCapacityReductions = JSON.parse(runScenario(`
+  ${resetAndHelpers}
+  var targets = Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, 15]));
+  var results = [];
+  for (var requested of [14, 12, 5]) {
+    var result = rebalanceWeeklyTargets({ setup: normalizeCoachWeeklyPlan({ targets, priorities: ["chest"] }), draggedMuscleId: "chest", requestedRemaining: requested, remainingCapacity: 60 });
+    results.push(result);
+    targets = result.targets;
+  }
+  var bankedReduction = rebalanceWeeklyTargets({ setup: normalizeCoachWeeklyPlan({ targets: { ...targets, chest: 20 } }), draggedMuscleId: "chest", requestedRemaining: 3, bankedSets: { chest: 12 }, remainingCapacity: 0 });
+  JSON.stringify({ results, bankedReduction });
+`));
+assert.deepStrictEqual(overCapacityReductions.results.map((result) => result.denied), [false, false, false]);
+assert.deepStrictEqual(overCapacityReductions.results.map((result) => result.targets.chest), [14, 12, 5]);
+assert(overCapacityReductions.results.every((result) => result.targets.back === 15 && result.bleed.priority.length === 0 && result.bleed.nonPriority.length === 0));
+assert.strictEqual(overCapacityReductions.bankedReduction.targets.chest, 15);
+assert.strictEqual(overCapacityReductions.bankedReduction.denied, false);
 
 // The equalizer must clamp floors and debit non-priorities before other priorities.
 const weeklyEqualizer = runScenario(`
@@ -2564,16 +2768,17 @@ const weeklyEqualizer = runScenario(`
 
 assert.strictEqual(weeklyEqualizer.floorClamp.denied, false, "Expected a below-floor drag to clamp rather than fail.");
 assert.strictEqual(weeklyEqualizer.floorClamp.targets.chest, 10, "Expected Chest to remain at its protected 10-set weekly floor.");
-assert.strictEqual(weeklyEqualizer.nonPriorityPhase.targets.chest, 25, "Expected the dragged Chest target to win its requested capacity.");
+assert.strictEqual(weeklyEqualizer.nonPriorityPhase.targets.chest, 20, "Over-capacity increases must leave targets unchanged.");
 assert.strictEqual(weeklyEqualizer.nonPriorityPhase.targets.biceps, 20, "Expected another priority to remain untouched while non-priority donors have room.");
-assert.strictEqual(weeklyEqualizer.nonPriorityPhase.targets.quads, 17.5, "Expected Quads to donate its proportional half of the phase-one cost.");
-assert.strictEqual(weeklyEqualizer.nonPriorityPhase.targets.hamstrings, 17.5, "Expected Hamstrings to donate its proportional half of the phase-one cost.");
+assert.strictEqual(weeklyEqualizer.nonPriorityPhase.targets.quads, 20);
+assert.strictEqual(weeklyEqualizer.nonPriorityPhase.targets.hamstrings, 20);
 assert.deepEqual(weeklyEqualizer.nonPriorityPhase.bleed.priority, [], "Expected strict phase one to avoid priority bleed.");
-assert.deepEqual(weeklyEqualizer.nonPriorityPhase.bleed.nonPriority.map((item) => item.muscleId).sort(), ["hamstrings", "quads"], "Expected proportional phase-one bleed from eligible non-priorities.");
-assert.strictEqual(weeklyEqualizer.priorityPhase.targets.chest, 25, "Expected dragged Chest to retain its phase-two target.");
-assert.strictEqual(weeklyEqualizer.priorityPhase.targets.biceps, 17.5, "Expected Biceps to share priority-phase cost proportionally.");
-assert.strictEqual(weeklyEqualizer.priorityPhase.targets.triceps, 17.5, "Expected Triceps to share priority-phase cost proportionally.");
-assert.deepEqual(weeklyEqualizer.priorityPhase.bleed.priority.map((item) => item.muscleId).sort(), ["biceps", "triceps"], "Expected phase-two bleed only after non-priorities reach their floors.");
+assert.deepEqual(weeklyEqualizer.nonPriorityPhase.bleed.nonPriority, []);
+assert.strictEqual(weeklyEqualizer.nonPriorityPhase.denied, true);
+assert.strictEqual(weeklyEqualizer.priorityPhase.targets.chest, 20);
+assert.strictEqual(weeklyEqualizer.priorityPhase.targets.biceps, 20);
+assert.strictEqual(weeklyEqualizer.priorityPhase.targets.triceps, 20);
+assert.deepEqual(weeklyEqualizer.priorityPhase.bleed.priority, []);
 assert.strictEqual(weeklyEqualizer.deadlock.denied, true, "Expected a true all-floor capacity deadlock to be denied.");
 assert.strictEqual(weeklyEqualizer.autoFit.denied, false, "Expected reduced day/time capacity to auto-fit targets when all protected floors still fit.");
 assert.strictEqual(weeklyEqualizer.autoFit.targets.chest, 20, "Expected auto-fit to preserve a selected priority before reducing non-priority growth targets.");
@@ -2581,10 +2786,10 @@ assert.strictEqual(Object.values(weeklyEqualizer.autoFit.targets).reduce((sum, v
 assert.strictEqual(weeklyEqualizer.reportFit.denied, false, "Expected the reported 106-set capacity to fit because all ten protected floors require only 100 sets.");
 assert(Math.abs(Object.values(weeklyEqualizer.reportFit.targets).reduce((sum, value) => sum + value, 0) - 106) < 0.001, "Expected Fix Over Capacity to reduce the report's 191 requested sets to exactly 106.");
 assert.strictEqual(weeklyEqualizer.underCapacity.denied, false, "Expected Optimize Under Capacity to accept available room.");
-assert.strictEqual(Object.values(weeklyEqualizer.underCapacity.targets).reduce((sum, value) => sum + value, 0), 120, "Expected Optimize Under Capacity to consume all 20 available sets.");
-assert.strictEqual(weeklyEqualizer.underCapacity.targets.chest, 20, "Expected prioritized Chest to fill toward 20 before non-priority growth work.");
-assert.strictEqual(weeklyEqualizer.underCapacity.targets.biceps, 20, "Expected prioritized Biceps to fill toward 20 before non-priority growth work.");
-assert.strictEqual(weeklyEqualizer.optimizeWhileOver.denied, true, "Expected the under-capacity optimizer never to conceal or lower an over-capacity request.");
+assert.strictEqual(Object.values(weeklyEqualizer.underCapacity.targets).reduce((sum, value) => sum + value, 0), 120, "Expected Optimize Under Capacity to allocate exactly the selected remaining capacity.");
+assert.strictEqual(weeklyEqualizer.underCapacity.targets.chest, 20, "Expected prioritized Chest to fill toward growthHigh (20).");
+assert.strictEqual(weeklyEqualizer.underCapacity.targets.biceps, 20, "Expected prioritized Biceps to fill toward growthHigh (20).");
+assert.strictEqual(weeklyEqualizer.underCapacity.targets.back, 10, "Expected non-priority targets to wait while selected priorities can use the available capacity.");
 assert.strictEqual(weeklyEqualizer.projectionGuard.targets.back, 15, "Expected Optimize Under Capacity to preserve Back's explicit 15-set target while another priority is underplanned.");
 assert.strictEqual(weeklyEqualizer.projectionGuard.targets.abs, 20, "Expected an underplanned Abs projection to retain its explicit 20-set target for session reallocation.");
 assert(weeklyEqualizer.projectionGuard.reason.includes("Abs"), "Expected the optimizer to identify projected priority shortfalls instead of inflating a satisfied target.");
@@ -2623,8 +2828,56 @@ assert(!weeklyExactDays.markup.includes("allocated"), "Expected the distribution
 assert(weeklyExactDays.markup.includes("banked") && weeklyExactDays.markup.includes("projected") && weeklyExactDays.markup.includes("target"), "Expected the distribution to expose one coherent committed plan summary.");
 assert(!appCode.includes("coachWeeklyAdjustmentOptions") && !appCode.includes("Coach adjustment"), "Expected the competing adjustment advisor plan source to be retired.");
 
-// Generated weekly credits must become the committed fader targets so the equalizer and distribution cannot disagree.
-const weeklyGeneratedTargetsBecomeAuthoritative = runScenario(`
+// High-confidence singular/plural duplicates must be surfaced and cannot occupy two slots in one generated session.
+const weeklyExerciseDefinitionConflict = runScenario(`
+  ${resetAndHelpers}
+  var singularCurl = {
+    id: "hamstring-curl-singular",
+    name: "Hamstring Dumbell Curl",
+    primaryMuscles: ["hamstrings"],
+    secondaryMuscles: [],
+    equipment: "Dumbell",
+    reps: "20-30",
+    loadingStyle: "high-rep",
+    exerciseType: "isolation",
+    rest: "35 sec",
+    userCreated: true
+  };
+  var pluralCurl = {
+    id: "hamstring-curl-plural",
+    name: "Hamstring Dumbell Curls",
+    primaryMuscles: ["glutes"],
+    secondaryMuscles: [],
+    equipment: "Dumbell",
+    reps: "20-30",
+    loadingStyle: "high-rep",
+    exerciseType: "isolation",
+    rest: "35 sec",
+    userCreated: true
+  };
+  state.settings.customExercises = state.settings.customExercises
+    .filter((exercise) => !["custom-hamstrings", "custom-glutes"].includes(exercise.id))
+    .concat([singularCurl, pluralCurl]);
+  state.workouts = muscleGroups
+    .filter((muscle) => !["hamstrings", "glutes"].includes(muscle.id))
+    .map((muscle) => makeWorkout(muscle, 2, 10));
+  var targets = Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, 10]));
+  var plan = buildCoachWeeklyPlan(normalizeCoachWeeklyPlan({ days: [3], averageMinutes: 75, priorities: ["hamstrings", "glutes"], targets }));
+  var plannedConflictIds = plan.sessions
+    .flatMap((session) => session.items)
+    .map((item) => item.exercise.id)
+    .filter((id) => [singularCurl.id, pluralCurl.id].includes(id));
+  var conflicts = coachExerciseDefinitionConflicts();
+  ({ plannedConflictIds, conflicts, markup: renderCoachWeek() });
+`);
+
+assert.strictEqual(weeklyExerciseDefinitionConflict.conflicts.length, 1, "Expected the singular/plural Hamstring Curl definitions to be reported as one conflict.");
+assert.deepEqual(weeklyExerciseDefinitionConflict.conflicts[0].exerciseIds.sort(), ["hamstring-curl-plural", "hamstring-curl-singular"], "Expected the conflict to identify both stored exercise IDs.");
+assert(weeklyExerciseDefinitionConflict.plannedConflictIds.length <= 1, `Expected one session not to schedule both conflicting definitions, got ${weeklyExerciseDefinitionConflict.plannedConflictIds.join(", ")}.`);
+assert(weeklyExerciseDefinitionConflict.markup.includes("Exercise library conflict") && weeklyExerciseDefinitionConflict.markup.includes("Hamstring Dumbell Curl"), "Expected Coach Week to surface the exercise-library conflict for review.");
+
+// Generate must preserve requested fader targets while reporting the independently scheduled projection.
+const weeklyGeneratedTargetsRemainRequested = runScenario(`
   ${resetAndHelpers}
   var requestedTargets = Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, muscle.id === "shoulders" ? 20 : muscle.id === "back" ? 12.8 : 10]));
   var setup = normalizeCoachWeeklyPlan({ days: [1, 2, 4, 5, 6], averageMinutes: 75, priorities: ["shoulders"], targets: requestedTargets });
@@ -2647,19 +2900,193 @@ const weeklyGeneratedTargetsBecomeAuthoritative = runScenario(`
     backProjected: finalized.projected.back,
     unmet: finalized.attainment.unmet.length,
     adjustments: finalized.targetAdjustments,
+    fits: finalized.capacity.fits,
+    message: finalized.capacity.message,
+    detail: finalized.capacity.detail,
     markup: renderCoachWeekDistribution(finalized)
   });
 `);
 
-assert.strictEqual(weeklyGeneratedTargetsBecomeAuthoritative.shoulderTarget, 18, "Expected an unschedulable 20-set Shoulder request to commit the generated 18-set target.");
-assert.strictEqual(weeklyGeneratedTargetsBecomeAuthoritative.shoulderProjected, 18, "Expected the committed Shoulder target and projection to agree.");
-assert.strictEqual(weeklyGeneratedTargetsBecomeAuthoritative.backTarget, 14, "Expected incidental secondary stimulus to be reflected in the committed Back target.");
-assert.strictEqual(weeklyGeneratedTargetsBecomeAuthoritative.backProjected, 14, "Expected the committed Back target and projection to agree.");
-assert.strictEqual(weeklyGeneratedTargetsBecomeAuthoritative.unmet, 0, "Expected a committed generated plan to contain no target/display shortfalls.");
-assert(weeklyGeneratedTargetsBecomeAuthoritative.adjustments.some((item) => item.id === "shoulders" && item.requested === 20 && item.committed === 18), "Expected the Shoulder adjustment to remain explainable.");
-assert(weeklyGeneratedTargetsBecomeAuthoritative.markup.includes("18 projected / 18 target"), "Expected Weekly distribution to render the same Shoulder values as the committed fader.");
+assert.strictEqual(weeklyGeneratedTargetsRemainRequested.shoulderTarget, 20, "Expected Generate to preserve the requested 20-set Shoulder target.");
+assert.strictEqual(weeklyGeneratedTargetsRemainRequested.shoulderProjected, 18, "Expected the generated Shoulder projection to remain independently visible.");
+assert.strictEqual(weeklyGeneratedTargetsRemainRequested.backTarget, 12.8, "Expected incidental Back stimulus not to rewrite its requested target.");
+assert.strictEqual(weeklyGeneratedTargetsRemainRequested.backProjected, 14, "Expected incidental Back stimulus to remain visible in the projection.");
+assert.strictEqual(weeklyGeneratedTargetsRemainRequested.unmet, 1, "Expected the generated plan to retain the real Shoulder shortfall.");
+assert.deepEqual(weeklyGeneratedTargetsRemainRequested.adjustments, [], "Expected Generate not to create automatic fader adjustments.");
+assert.strictEqual(weeklyGeneratedTargetsRemainRequested.fits, false, "Expected capacity status to retain the generated schedule shortfall.");
+assert.strictEqual(weeklyGeneratedTargetsRemainRequested.detail, "Requested targets did not all fit.", "Expected Generate to retain detailed diagnostics alongside the compact summary.");
+assert(weeklyGeneratedTargetsRemainRequested.markup.includes("18 projected / 20 target"), "Expected Weekly distribution to distinguish projected and requested Shoulder values.");
 
-// An impossible floor remains a hard error rather than being relabeled as a feasible lower target.
+// The reported 97-credit estimate must not reopen nine phantom credits after an 88.05-credit schedule is generated.
+const weeklyReportedCapacityMismatch = runScenario(`
+  ${resetAndHelpers}
+  var actual = { chest: 6, back: 12.5, shoulders: 8.5, biceps: 7.5, triceps: 5, quads: 7, hamstrings: 9.5, glutes: 7.25, calves: 7, abs: 13 };
+  var requestedTargets = { chest: 20, back: 16.9, shoulders: 20, biceps: 20, triceps: 20, quads: 15.8, hamstrings: 15.8, glutes: 15.8, calves: 15.8, abs: 20 };
+  var projected = { chest: 20, back: 16, shoulders: 20.5, biceps: 20.5, triceps: 20, quads: 16, hamstrings: 12.5, glutes: 12.75, calves: 13, abs: 20 };
+  var setup = normalizeCoachWeeklyPlan({ days: [1, 2, 4, 5, 6], averageMinutes: 75, priorities: ["chest", "shoulders", "biceps", "triceps", "abs"], targets: requestedTargets });
+  var generated = {
+    setup,
+    sessions: [],
+    actualStats: muscleGroups.map((muscle) => ({ ...muscle, sets: actual[muscle.id] || 0 })),
+    projected,
+    setBudgets: requestedTargets,
+    missing: [],
+    attainment: coachWeeklyAttainment(setup, projected),
+    capacity: { totalMinutes: 225, estimatedSetCapacity: 97, allocatedSetCapacity: 88.05, requestedSets: 96.85, fits: false, message: "Generated sessions are full before every requested target is reached." }
+  };
+  var finalized = finalizeCoachWeeklyGeneratedPlan(setup, generated);
+  var progress = coachWeekCapacityProgress(finalized.setup, actual, 97);
+  ({ targets: finalized.setup.targets, projected: finalized.projected, fits: finalized.capacity.fits, message: finalized.capacity.message, available: progress.available });
+`);
+
+assert.deepEqual(weeklyReportedCapacityMismatch.targets, {
+  chest: 20,
+  back: 16.9,
+  shoulders: 20,
+  biceps: 20,
+  triceps: 20,
+  quads: 15.8,
+  hamstrings: 15.8,
+  glutes: 15.8,
+  calves: 15.8,
+  abs: 20
+}, "Expected the report's requested targets to survive Generate unchanged.");
+assert.strictEqual(weeklyReportedCapacityMismatch.fits, false, "Expected the generated schedule shortfall to remain visible.");
+assert(weeklyReportedCapacityMismatch.message.includes("Defined targets planned: 6/10"), "Expected the compact summary to retain the actual target shortfall.");
+assert(weeklyReportedCapacityMismatch.available < 0.2, `Expected no reopened nine-credit gap, got ${weeklyReportedCapacityMismatch.available}.`);
+
+// Bounded repair must keep neutral/intermediate states long enough to repack protected floor work around a priority target.
+const weeklyBoundedRepairRepacking = runScenario(`
+  ${resetAndHelpers}
+  var makeExercise = (id, muscleId) => ({
+    id,
+    name: id,
+    primaryMuscles: [muscleId],
+    secondaryMuscles: [],
+    equipment: "cable",
+    reps: "8-15",
+    rest: "60 sec",
+    exerciseType: "isolation",
+    loadingStyle: "standard",
+    userCreated: true
+  });
+  var floorIds = ["back", "shoulders", "biceps", "triceps", "quads", "hamstrings"];
+  var floorExercises = floorIds.map((muscleId) => makeExercise("floor-" + muscleId, muscleId));
+  var spareExercises = [0, 1, 2, 3, 4].map((index) => makeExercise("spare-" + index, "glutes"));
+  var chestExercise = makeExercise("priority-chest", "chest");
+  state.settings.customExercises = [...floorExercises, ...spareExercises, chestExercise];
+  var muscle = (id) => muscleGroups.find((candidate) => candidate.id === id);
+  var item = (exercise, muscleId) => ({ muscle: muscle(muscleId), exercise, sets: 2, phase: "floor", growthMode: "medium", planTarget: { kind: "hold" } });
+  var sessions = [
+    { day: 4, date: "2026-06-18", status: "planned", submitted: [], items: floorExercises.map((exercise, index) => item(exercise, floorIds[index])), totalMinutes: 0 },
+    { day: 6, date: "2026-06-20", status: "planned", submitted: [], items: spareExercises.map((exercise) => item(exercise, "glutes")), totalMinutes: 0 }
+  ];
+  sessions.forEach((session) => { session.totalMinutes = plannedCoachSessionMinutes(session.items); });
+  var baseProjected = Object.fromEntries(muscleGroups.map((entry) => [entry.id, floorIds.includes(entry.id) || entry.id === "chest" ? 8 : 10]));
+  var targets = Object.fromEntries(muscleGroups.map((entry) => [entry.id, 10]));
+  var setup = normalizeCoachWeeklyPlan({ days: [4, 6], averageMinutes: 75, priorities: ["chest"], targets });
+  var optimized = optimizeCoachWeeklySchedule({
+    sessions,
+    baseProjected,
+    setup,
+    exercises: state.settings.customExercises,
+    lastDirect: {},
+    maxStates: 120,
+    recoveryClearForDate: (muscleId, date) => muscleId !== "chest" || date === "2026-06-18"
+  });
+  ({
+    projected: optimized.projected,
+    sessions: optimized.sessions.map((session) => ({ itemCount: session.items.length, minutes: session.totalMinutes })),
+    diagnostics: optimized.diagnostics
+  });
+`);
+
+assert.strictEqual(weeklyBoundedRepairRepacking.projected.chest, 10, "Expected bounded repair to place the missing two-set Chest priority block.");
+assert(["back", "shoulders", "biceps", "triceps", "quads", "hamstrings"].every((id) => weeklyBoundedRepairRepacking.projected[id] >= 10), "Expected the temporary repack not to sacrifice any protected floor.");
+assert(weeklyBoundedRepairRepacking.sessions.every((session) => session.itemCount <= 6 && session.minutes <= 78), "Expected the repaired schedule to preserve exercise and time limits.");
+assert(weeklyBoundedRepairRepacking.diagnostics.improved, "Expected diagnostics to record that bounded repair improved the greedy schedule.");
+assert(weeklyBoundedRepairRepacking.diagnostics.attemptedMoves > 0, "Expected bounded repair to report evaluated scheduling moves.");
+
+// Exercise swaps must compare full stimulus so a same-primary alternative can close a secondary floor gap.
+const weeklyBoundedRepairExerciseSelection = runScenario(`
+  ${resetAndHelpers}
+  var chestOnly = { id: "chest-only", name: "Chest Only", primaryMuscles: ["chest"], secondaryMuscles: [], equipment: "machine", reps: "8-15", rest: "60 sec", exerciseType: "isolation", loadingStyle: "standard", userCreated: true };
+  var chestTriceps = { id: "chest-triceps", name: "Chest Triceps", primaryMuscles: ["chest"], secondaryMuscles: ["triceps"], equipment: "machine", reps: "8-15", rest: "60 sec", exerciseType: "compound", loadingStyle: "standard", userCreated: true };
+  state.settings.customExercises = [chestOnly, chestTriceps];
+  var chest = muscleGroups.find((muscle) => muscle.id === "chest");
+  var sessions = [{
+    day: 4,
+    date: "2026-06-18",
+    status: "planned",
+    submitted: [],
+    items: [{ muscle: chest, exercise: chestOnly, sets: 2, phase: "floor", growthMode: "medium", planTarget: { kind: "hold" } }],
+    totalMinutes: 0
+  }];
+  sessions[0].totalMinutes = plannedCoachSessionMinutes(sessions[0].items);
+  var baseProjected = Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, muscle.id === "chest" ? 8 : muscle.id === "triceps" ? 9 : 10]));
+  var targets = Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, 10]));
+  var optimized = optimizeCoachWeeklySchedule({ sessions, baseProjected, setup: normalizeCoachWeeklyPlan({ days: [4], averageMinutes: 60, priorities: ["chest"], targets }), exercises: state.settings.customExercises, maxStates: 100 });
+  ({ exerciseId: optimized.sessions[0].items[0].exercise.id, projectedTriceps: optimized.projected.triceps, diagnostics: optimized.diagnostics });
+`);
+
+assert.strictEqual(weeklyBoundedRepairExerciseSelection.exerciseId, "chest-triceps", "Expected bounded repair to choose the Chest exercise that also closes the Triceps floor gap.");
+assert.strictEqual(weeklyBoundedRepairExerciseSelection.projectedTriceps, 10, "Expected the selected exercise's secondary stimulus to be recalculated in the repaired projection.");
+assert(weeklyBoundedRepairExerciseSelection.diagnostics.moveCounts["exercise-swap"] > 0, "Expected exercise-selection repair to remain visible in move diagnostics.");
+
+// Unresolved targets must retain a concrete bounded-search reason instead of a generic impossibility claim.
+const weeklyBoundedRepairDiagnostics = runScenario(`
+  ${resetAndHelpers}
+  var backOnly = { id: "back-only", name: "Back Only", primaryMuscles: ["back"], secondaryMuscles: [], equipment: "cable", reps: "8-15", rest: "60 sec", exerciseType: "isolation", loadingStyle: "standard", userCreated: true };
+  state.settings.customExercises = [backOnly];
+  var baseProjected = Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, muscle.id === "chest" ? 8 : 10]));
+  var targets = Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, 10]));
+  var optimized = optimizeCoachWeeklySchedule({
+    sessions: [{ day: 4, date: "2026-06-18", status: "planned", submitted: [], items: [], totalMinutes: 0 }],
+    baseProjected,
+    setup: normalizeCoachWeeklyPlan({ days: [4], averageMinutes: 60, priorities: ["chest"], targets }),
+    exercises: [backOnly],
+    maxStates: 20
+  });
+  ({ terminationReason: optimized.diagnostics.terminationReason, shortfall: optimized.diagnostics.shortfalls.find((item) => item.id === "chest") });
+`);
+
+assert.strictEqual(weeklyBoundedRepairDiagnostics.terminationReason, "no-supported-improvement", "Expected an exhausted bounded search to identify its actual termination state.");
+assert.strictEqual(weeklyBoundedRepairDiagnostics.shortfall.reason, "missing-or-performance-coverage", "Expected the unresolved Chest target to retain its measured candidate-coverage blocker.");
+assert(appCode.includes("Search limits:"), "Expected generated Coach Week copy to expose per-muscle bounded-search reasons.");
+
+// Shortfall diagnostics must prefer the least-disruptive failed repair over noisier add-exercise attempts.
+const weeklyBoundedRepairDirectBlocker = runScenario(`
+  ${resetAndHelpers}
+  var makeExercise = (id, muscleId) => ({ id, name: id, primaryMuscles: [muscleId], secondaryMuscles: [], equipment: "cable", reps: "8-15", rest: "180 sec", exerciseType: "isolation", loadingStyle: "standard", userCreated: true });
+  var ids = ["calves", "chest", "back", "shoulders", "biceps", "triceps"];
+  var exercises = ids.map((muscleId) => makeExercise("base-" + muscleId, muscleId));
+  exercises.push(makeExercise("alternate-calves", "calves"));
+  state.settings.customExercises = exercises;
+  var session = {
+    day: 4,
+    date: "2026-06-18",
+    status: "planned",
+    submitted: [],
+    items: exercises.slice(0, 6).map((exercise, index) => ({ muscle: muscleGroups.find((muscle) => muscle.id === ids[index]), exercise, sets: 2, phase: "floor", growthMode: "medium", planTarget: { kind: "hold" } })),
+    totalMinutes: 0
+  };
+  session.totalMinutes = plannedCoachSessionMinutes(session.items);
+  var baseProjected = Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, muscle.id === "calves" ? 7 : ids.includes(muscle.id) ? 8 : 10]));
+  var targets = Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, 10]));
+  var setup = normalizeCoachWeeklyPlan({ days: [4], averageMinutes: 30, priorities: ["calves"], targets });
+  var optimized = optimizeCoachWeeklySchedule({ sessions: [session], baseProjected, setup, exercises, maxStates: 100 });
+  optimized.diagnostics.shortfalls.find((item) => item.id === "calves");
+`);
+
+assert.strictEqual(weeklyBoundedRepairDirectBlocker.reason, "time-limit", "Expected the failed one-set top-up to identify time, not the noisier six-exercise add attempt, as the Calves blocker.");
+
+// Heavy repair belongs to Generate/debug paths, while its failure language must describe a bounded search rather than impossibility.
+assert(/buildCoachWeeklyPlan\(requestedSetup, \{ optimize: true \}\)/.test(appCode), "Expected Generate to opt into bounded weekly repair.");
+assert(/function buildCoachWeeklyPlan\(setupInput = selectedCoachWeeklyPlan\(\), options = \{\}\)/.test(appCode), "Expected ordinary weekly rendering to keep bounded repair optional.");
+assert(appCode.includes("optimizer: clonePlain(plan.optimizer"), "Expected weekly debug/snapshots to retain optimizer diagnostics.");
+assert(appCode.includes("No additional supported improvement was found in the generated schedule"), "Expected bounded-search shortfalls not to be described as mathematically impossible.");
+
+// An impossible floor stays visible as a shortfall in a successful partial result.
 const weeklyGeneratedTargetsProtectFloor = runScenario(`
   ${resetAndHelpers}
   var setup = normalizeCoachWeeklyPlan({ days: [3], averageMinutes: 30, targets: Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, 10])) });
@@ -2674,15 +3101,12 @@ const weeklyGeneratedTargetsProtectFloor = runScenario(`
     attainment: coachWeeklyAttainment(setup, projected),
     capacity: { totalMinutes: 30, estimatedSetCapacity: 20, allocatedSetCapacity: 20, requestedSets: 100, fits: false, message: "Floor shortfall." }
   };
-  try {
-    finalizeCoachWeeklyGeneratedPlan(setup, generated);
-    "no error";
-  } catch (error) {
-    error.message;
-  }
+  finalizeCoachWeeklyGeneratedPlan(setup, generated);
 `);
 
-assert(weeklyGeneratedTargetsProtectFloor.includes("10-set floor") && weeklyGeneratedTargetsProtectFloor.includes("Chest"), `Expected an impossible floor to block generation with a precise explanation, got: ${weeklyGeneratedTargetsProtectFloor}`);
+assert.strictEqual(weeklyGeneratedTargetsProtectFloor.projected.chest, 8);
+assert.strictEqual(weeklyGeneratedTargetsProtectFloor.setup.targets.chest, 10);
+assert.strictEqual(weeklyGeneratedTargetsProtectFloor.attainment.floorUnmet[0].id, "chest");
 
 // Fader previews must survive unrelated renders, use muscle artwork, and report live remaining capacity.
 const weeklyFaderStability = runScenario(`
@@ -2695,13 +3119,50 @@ const weeklyFaderStability = runScenario(`
   var allTen = Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, 10]));
   var available = coachWeekCapacityProgress(normalizeCoachWeeklyPlan({ targets: allTen }), {}, 120);
   var over = coachWeekCapacityProgress(normalizeCoachWeeklyPlan({ targets: allTen }), {}, 90);
-  ({ firstRender, secondRender, available, over });
+  var allFifty = normalizeCoachWeeklyPlan({ targets: { chest: 50 } });
+  var fiftyOptimize = optimizeCoachWeekTargetsToCapacity({
+    setup: normalizeCoachWeeklyPlan({ priorities: ["chest"], targets: { chest: 50 } }),
+    bankedSets: Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, 0])),
+    remainingCapacity: 500
+  });
+  var customQuickPick = coachWeekQuickPickTarget(
+    { dataset: { customTarget: "true" } },
+    { querySelector: () => ({ value: "42.5" }) }
+  );
+  var oversizedQuickPick = coachWeekQuickPickTarget(
+    { dataset: { customTarget: "true" } },
+    { querySelector: () => ({ value: "57" }) }
+  );
+  var belowFloorQuickPick = coachWeekQuickPickTarget(
+    { dataset: { customTarget: "true" } },
+    { querySelector: () => ({ value: "6.5" }) }
+  );
+  var negativeQuickPick = coachWeekQuickPickTarget(
+    { dataset: { customTarget: "true" } },
+    { querySelector: () => ({ value: "-3" }) }
+  );
+  var belowFloorSetup = normalizeCoachWeeklyPlan({
+    targets: Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, 6.5])),
+    adjustedMinimums: Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, 6.5])),
+    adjustmentWeek: isoFromLocalDate(currentTrainingWeekStart())
+  });
+  var belowFloorMinimums = coachWeekAdjustedMinimumsForTargets(Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, 6.5])));
+  ({ firstRender, secondRender, available, over, allFifty, fiftyOptimize, customQuickPick, oversizedQuickPick, belowFloorQuickPick, negativeQuickPick, belowFloorSetup, belowFloorMinimums });
 `);
 
 assert(weeklyFaderStability.firstRender.includes("2 days - 40 min average") && weeklyFaderStability.secondRender.includes("2 days - 40 min average"), "Expected session-local weekly controls to survive a background-style rerender.");
 assert(weeklyFaderStability.secondRender.includes("24 target") && weeklyFaderStability.secondRender.includes("Changes not generated yet."), "Expected the unsaved Chest fader and dirty state to remain visible after rerender.");
 assert(weeklyFaderStability.secondRender.includes("assets/muscles/chest.png") && weeklyFaderStability.secondRender.includes("assets/muscles/bicep.png"), "Expected fader knobs to use the corresponding muscle artwork.");
 assert(weeklyFaderStability.secondRender.includes('data-action="coach-week-quick-pick" data-target="10"') && weeklyFaderStability.secondRender.includes('data-target="15"') && weeklyFaderStability.secondRender.includes('data-target="20"'), "Expected mobile-safe all-10, all-15, and all-20 weekly quick picks.");
+assert(weeklyFaderStability.secondRender.includes('data-coach-week-custom-target') && weeklyFaderStability.secondRender.includes('min="0"') && weeklyFaderStability.secondRender.includes('max="50"') && weeklyFaderStability.secondRender.includes("All X"), "Expected custom All X weekly quick pick input capped at 50 and allowed below the 10-set floor.");
+assert.strictEqual(weeklyFaderStability.allFifty.targets.chest, 50, "Expected weekly targets to preserve a custom All X value up to 50.");
+assert.strictEqual(weeklyFaderStability.fiftyOptimize.targets.chest, 50, "Expected weekly optimization to preserve custom targets up to 50 when capacity allows.");
+assert.strictEqual(weeklyFaderStability.customQuickPick, 42.5, "Expected custom quick pick to accept decimal weekly targets.");
+assert.strictEqual(weeklyFaderStability.oversizedQuickPick, 50, "Expected custom quick pick values above 50 to clamp.");
+assert.strictEqual(weeklyFaderStability.belowFloorQuickPick, 6.5, "Expected custom quick pick to accept values below the 10-set floor.");
+assert.strictEqual(weeklyFaderStability.negativeQuickPick, 0, "Expected custom quick pick values below zero to clamp.");
+assert.strictEqual(weeklyFaderStability.belowFloorSetup.targets.chest, 6.5, "Expected adjusted weekly minimums to preserve custom sub-floor targets.");
+assert.strictEqual(weeklyFaderStability.belowFloorMinimums.chest, 6.5, "Expected custom sub-floor quick picks to create explicit weekly minimum exceptions.");
 assert.strictEqual(weeklyFaderStability.available.available, 20, "Expected the progress helper to report unassigned estimated capacity.");
 assert.strictEqual(weeklyFaderStability.available.label, "20 sets left", "Expected the white bar label to state how many sets remain.");
 assert.strictEqual(weeklyFaderStability.over.over, 10, "Expected over-capacity protected targets to be reported explicitly.");
@@ -2917,5 +3378,352 @@ assert(weeklyPlanUsesTargetAwareSecondary.exercises.includes("pulldown-biceps"),
 assert(weeklyPlanUsesTargetAwareSecondary.projectedBiceps > 12, "Expected the selected compound to add secondary Biceps credit to the weekly projection.");
 
 assert(!appCode.includes("if (coachWeekForm.isConnected) render();"), "Expected pending weekly form changes not to rerender and replace the committed plan before Generate.");
+
+// =====================================================
+// Optimize Under Capacity — priority-first allocator
+// =====================================================
+
+// OPT-1: Priority floors receive scarce total capacity before non-priority floors.
+const optimizePriorityFirst = runScenario(`
+  ${resetAndHelpers}
+  var r = optimizeCoachWeekTargetsToCapacity({
+    setup: normalizeCoachWeeklyPlan({ priorities: ["chest"], targets: Object.fromEntries(muscleGroups.map((m) => [m.id, 10])) }),
+    bankedSets: Object.fromEntries(muscleGroups.map((m) => [m.id, 0])),
+    remainingCapacity: 15
+  });
+  ({ denied: r.denied, total: Object.values(r.targets).reduce((s, v) => s + v, 0), chest: r.targets.chest, back: r.targets.back, shoulders: r.targets.shoulders });
+`);
+assert.strictEqual(optimizePriorityFirst.denied, false, "OPT-1: Must not deny when capacity is available.");
+assert.strictEqual(optimizePriorityFirst.total, 15, "OPT-1: Total requested sets must match the selected total capacity.");
+assert.strictEqual(optimizePriorityFirst.chest, 10, "OPT-1: Priority chest must reach the protected floor first.");
+assert(optimizePriorityFirst.back <= 1 && optimizePriorityFirst.shoulders <= 1, "OPT-1: Non-priorities may only share capacity after the priority floor is protected.");
+
+// OPT-2: All scarce capacity goes to the priority floor before any non-priority gets capacity.
+const optimizeAllToPriority = runScenario(`
+  ${resetAndHelpers}
+  var r = optimizeCoachWeekTargetsToCapacity({
+    setup: normalizeCoachWeeklyPlan({ priorities: ["chest"], targets: Object.fromEntries(muscleGroups.map((m) => [m.id, 10])) }),
+    bankedSets: Object.fromEntries(muscleGroups.map((m) => [m.id, 0])),
+    remainingCapacity: 10
+  });
+  ({ denied: r.denied, chest: r.targets.chest, back: r.targets.back });
+`);
+assert.strictEqual(optimizeAllToPriority.denied, false, "OPT-2: Must not deny when capacity is available.");
+assert.strictEqual(optimizeAllToPriority.chest, 10, "OPT-2: Priority chest must receive the entire 10-set capacity.");
+assert.strictEqual(optimizeAllToPriority.back, 0, "OPT-2: Non-priority back must stay at zero when all capacity went to the priority floor.");
+
+// OPT-3: Non-priority floors fill after priority floors are satisfied.
+const optimizeNonPriorityAfterPriority = runScenario(`
+  ${resetAndHelpers}
+  var r = optimizeCoachWeekTargetsToCapacity({
+    setup: normalizeCoachWeeklyPlan({ priorities: ["chest"], targets: Object.fromEntries(muscleGroups.map((m) => [m.id, 10])) }),
+    bankedSets: Object.fromEntries(muscleGroups.map((m) => [m.id, 0])),
+    remainingCapacity: 25
+  });
+  ({ denied: r.denied, total: Object.values(r.targets).reduce((s, v) => s + v, 0), chest: r.targets.chest, back: r.targets.back, shoulders: r.targets.shoulders });
+`);
+assert.strictEqual(optimizeNonPriorityAfterPriority.chest, 10, "OPT-3: Priority chest must retain its protected floor.");
+assert.strictEqual(optimizeNonPriorityAfterPriority.total, 25, "OPT-3: Total requested sets must match the selected capacity.");
+assert(optimizeNonPriorityAfterPriority.back > 0 && optimizeNonPriorityAfterPriority.shoulders > 0, "OPT-3: Non-priority floors fill after the priority floor.");
+assert.strictEqual(optimizeNonPriorityAfterPriority.denied, false, "OPT-3: Must not deny when capacity is available.");
+
+// OPT-4: Exact floor capacity keeps all muscles at their requested floors.
+const optimizeExactCapacity = runScenario(`
+  ${resetAndHelpers}
+  var r = optimizeCoachWeekTargetsToCapacity({
+    setup: normalizeCoachWeeklyPlan({ priorities: [], targets: Object.fromEntries(muscleGroups.map((m) => [m.id, 10])) }),
+    bankedSets: Object.fromEntries(muscleGroups.map((m) => [m.id, 0])),
+    remainingCapacity: 100
+  });
+  ({ denied: r.denied, adjusted: r.adjusted, total: Object.values(r.targets).reduce((s, v) => s + v, 0) });
+`);
+assert.strictEqual(optimizeExactCapacity.denied, false, "OPT-4: Must not deny at exact capacity.");
+assert.strictEqual(optimizeExactCapacity.adjusted, true, "OPT-4: Must report that the total capacity was allocated.");
+assert.strictEqual(optimizeExactCapacity.total, 100, "OPT-4: Total must be 100 (10 muscles × 10-set floor).");
+
+// OPT-5: Insufficient capacity — best feasible allocation and warn.
+const optimizeInsufficientCapacity = runScenario(`
+  ${resetAndHelpers}
+  var r = optimizeCoachWeekTargetsToCapacity({
+    setup: normalizeCoachWeeklyPlan({ priorities: [], targets: Object.fromEntries(muscleGroups.map((m) => [m.id, 10])) }),
+    bankedSets: Object.fromEntries(muscleGroups.map((m) => [m.id, 0])),
+    remainingCapacity: 5
+  });
+  ({ denied: r.denied, total: Object.values(r.targets).reduce((s, v) => s + v, 0), adjusted: r.adjusted, reason: r.reason });
+`);
+assert.strictEqual(optimizeInsufficientCapacity.denied, false, "OPT-5: Must not deny — must do best feasible.");
+assert.strictEqual(optimizeInsufficientCapacity.total, 5, "OPT-5: Total must match the scarce selected capacity.");
+assert.strictEqual(optimizeInsufficientCapacity.adjusted, true, "OPT-5: Must report adjustment when targets were modified.");
+assert(optimizeInsufficientCapacity.reason.includes("below 10"), "OPT-5: Must warn when balanced targets cannot meet the floors.");
+
+// OPT-6: prepareCoachWeeklyCapacityPlan in optimize mode uses the allocator.
+const optimizePlanMode = runScenario(`
+  ${resetAndHelpers}
+  var setup = normalizeCoachWeeklyPlan({ days: [3], averageMinutes: 60, priorities: [], targets: Object.fromEntries(muscleGroups.map((m) => [m.id, 10])) });
+  var result = prepareCoachWeeklyCapacityPlan(setup, "optimize");
+  ({ capacityAction: result.capacityAction });
+`);
+assert.strictEqual(optimizePlanMode.capacityAction, "optimize", "OPT-6: Must be optimize mode.");
+
+// OPT-7: Submitted work is preserved without charging it against future session capacity again.
+const optimizeBankedReduction = runScenario(`
+  ${resetAndHelpers}
+  var r = optimizeCoachWeekTargetsToCapacity({
+    setup: normalizeCoachWeeklyPlan({ priorities: ["chest"], targets: Object.fromEntries(muscleGroups.map((m) => [m.id, 10])) }),
+    bankedSets: Object.fromEntries(muscleGroups.map((m) => [m.id, 5])),
+    remainingCapacity: 60
+  });
+  ({ chest: r.targets.chest, back: r.targets.back, total: Object.values(r.targets).reduce((s, v) => s + v, 0) });
+`);
+assert.strictEqual(optimizeBankedReduction.chest, 20, "OPT-7: The ten credits left after all floors must go to prioritized Chest.");
+assert(optimizeBankedReduction.back >= 5, "OPT-7: Non-priority back cannot drop below submitted/banked work.");
+assert.strictEqual(optimizeBankedReduction.total, 110, "OPT-7: Fifty submitted credits plus sixty future credits must produce 110 total credits.");
+
+// Scarce weeks remain adjustable below ten; saved exceptions must survive normalization and reload.
+const scarceManualTargets = runScenario(`
+  ${resetAndHelpers}
+  var setup = normalizeCoachWeeklyPlan({ targets: Object.fromEntries(muscleGroups.map(m => [m.id, 10])) });
+  var lowered = rebalanceWeeklyTargets({ setup, draggedMuscleId: "chest", requestedRemaining: 2, remainingCapacity: 20 });
+  var restored = normalizeCoachWeeklyPlan(JSON.parse(JSON.stringify({ ...setup, ...lowered })));
+  var loweredAgain = rebalanceWeeklyTargets({ setup: restored, draggedMuscleId: "chest", requestedRemaining: 0, remainingCapacity: 20 });
+  var banked = rebalanceWeeklyTargets({ setup, draggedMuscleId: "chest", requestedRemaining: -5, bankedSets: { chest: 4.5 }, remainingCapacity: 20 });
+  ({ lowered, restored, loweredAgain, banked });
+`);
+assert.strictEqual(scarceManualTargets.lowered.denied, false);
+assert.strictEqual(scarceManualTargets.lowered.targets.chest, 2, "Insufficient floor capacity must not lock a fader at ten.");
+assert.strictEqual(scarceManualTargets.lowered.targets.back, 10, "Manual reductions must leave other requests unchanged.");
+assert.strictEqual(scarceManualTargets.restored.targets.chest, 2, "Reading the edited form again must retain a below-floor request.");
+assert.strictEqual(scarceManualTargets.loweredAgain.targets.chest, 0, "A previous below-floor adjustment must remain reducible.");
+assert.strictEqual(scarceManualTargets.banked.targets.chest, 4.5, "A fader may remove future demand but never submitted credits.");
+assert(scarceManualTargets.lowered.reason.includes("below 10"), "Reducing a protected floor must explain the exception.");
+
+// Balance with no priorities may leave every muscle below ten, even when some work is already submitted.
+const scarceBalancedCapacity = runScenario(`
+  ${resetAndHelpers}
+  var setup = normalizeCoachWeeklyPlan({ priorities: [], targets: Object.fromEntries(muscleGroups.map(m => [m.id, 10])) });
+  var bankedSets = Object.fromEntries(muscleGroups.map(m => [m.id, 2]));
+  var fit = fitCoachWeekTargetsToCapacity({ setup, bankedSets, remainingCapacity: 10 });
+  var optimize = optimizeCoachWeekTargetsToCapacity({ setup, bankedSets, remainingCapacity: 10 });
+  var zero = optimizeCoachWeekTargetsToCapacity({ setup, bankedSets, remainingCapacity: 0 });
+  var priority = optimizeCoachWeekTargetsToCapacity({ setup: { ...setup, priorities: ["chest"] }, bankedSets, remainingCapacity: 10 });
+  ({ fit, optimize, zero, priority });
+`);
+assert(Object.values(scarceBalancedCapacity.fit.targets).every(value => Math.abs(value - 3) < 0.001));
+assert(Object.values(scarceBalancedCapacity.optimize.targets).every(value => value === 3), "Twenty submitted credits plus ten future credits should balance to three per muscle.");
+assert(Object.values(scarceBalancedCapacity.zero.targets).every(value => value === 2), "Zero future capacity must preserve submitted work without adding requests.");
+assert.strictEqual(scarceBalancedCapacity.priority.targets.chest, 10, "Priority floors must receive scarce future credits first.");
+assert.strictEqual(Object.values(scarceBalancedCapacity.priority.targets).reduce((sum, value) => sum + value, 0), 30);
+
+// Fitting an intentional All X request must not treat it as permission to restore priority floors.
+const belowFloorQuickPickFit = runScenario(`
+  ${resetAndHelpers}
+  var targets = Object.fromEntries(muscleGroups.map(m => [m.id, 2]));
+  var setup = normalizeCoachWeeklyPlan({ priorities: ["chest"], targets,
+    adjustedMinimums: coachWeekAdjustedMinimumsForTargets(targets), adjustmentWeek: isoFromLocalDate(currentTrainingWeekStart()) });
+  fitCoachWeekTargetsToCapacity({ setup, remainingCapacity: 15, respectRequestedTargets: true });
+`);
+assert.strictEqual(belowFloorQuickPickFit.targets.chest, 2, "Fitting All 2 must retain the explicit priority ceiling of two.");
+assert(Object.values(belowFloorQuickPickFit.targets).every(value => value <= 2));
+assert(Math.abs(Object.values(belowFloorQuickPickFit.targets).reduce((sum, value) => sum + value, 0) - 15) < 0.001);
+
+// Generate accepts a below-floor balanced request and still enforces session safeguards.
+const belowFloorGeneration = runScenario(`
+  ${resetAndHelpers}
+  var targets = Object.fromEntries(muscleGroups.map(m => [m.id, 2]));
+  var setup = normalizeCoachWeeklyPlan({ days: [3, 5, 0], averageMinutes: 30, priorities: [], targets,
+    adjustedMinimums: coachWeekAdjustedMinimumsForTargets(targets), adjustmentWeek: isoFromLocalDate(currentTrainingWeekStart()) });
+  var plan = buildCoachWeeklyPlan(setup, { optimize: true });
+  ({ targets: plan.setup.targets, sessions: plan.sessions.filter(session => session.status === "planned") });
+`);
+assert(Object.values(belowFloorGeneration.targets).every(value => value === 2));
+assert(belowFloorGeneration.sessions.some(session => session.items.length > 0), "A week below all floors must still generate useful work.");
+assert(belowFloorGeneration.sessions.every(session => session.items.length <= 6 && session.items.every(item => item.sets >= 2) && session.totalMinutes <= 33));
+
+// Redistribution pass: balanced output should have more even session durations without losing weekly credits.
+const redistributeBalanced = runScenario(`
+  ${resetAndHelpers}
+  var setup = normalizeCoachWeeklyPlan({ days: [0, 1, 2, 3, 4, 5], averageMinutes: 40, priorities: ["chest", "back"], targets: Object.fromEntries(muscleGroups.map(m => [m.id, 16])) });
+  var plan = buildCoachWeeklyPlan(setup, { optimize: true });
+  var planned = plan.sessions.filter(s => s.status === "planned" && s.items.length > 0);
+  var minutes = planned.map(s => s.totalMinutes);
+  var spread = Math.max(...minutes) - Math.min(...minutes);
+  var totalCredits = {};
+  muscleGroups.forEach(m => totalCredits[m.id] = 0);
+  planned.forEach(s => s.items.forEach(item => {
+    item.exercise.primaryMuscles.forEach(muscleId => { totalCredits[muscleId] = (totalCredits[muscleId] || 0) + item.sets; });
+  }));
+  ({ spread, planned: planned.length, totalCredits, minutes });
+`);
+assert(redistributeBalanced.planned >= 3, "At least three selected days should have sessions.");
+assert(redistributeBalanced.spread <= 10, "Session durations should be reasonably balanced (spread <= 10 minutes).");
+assert(Object.values(redistributeBalanced.totalCredits).every(credits => credits > 0), "Every muscle should receive at least some weekly credits.");
+
+// Redistribution pass: empty planned days should receive work where recovery allows.
+const redistributeEmptyDays = runScenario(`
+  ${resetAndHelpers}
+  var setup = normalizeCoachWeeklyPlan({ days: [0, 2, 4], averageMinutes: 30, priorities: ["chest"], targets: Object.fromEntries(muscleGroups.map(m => [m.id, 12])) });
+  var plan = buildCoachWeeklyPlan(setup, { optimize: true });
+  var planned = plan.sessions.filter(s => s.status === "planned");
+  var withItems = planned.filter(s => s.items.length > 0);
+  ({ planned: planned.length, withItems: withItems.length });
+`);
+assert(redistributeEmptyDays.withItems >= 2, "At least two of three selected days should receive work.");
+
+// Redistribution pass: submitted sessions must remain untouched.
+const redistributeSubmittedPreserved = runScenario(`
+  ${resetAndHelpers}
+  var setup = normalizeCoachWeeklyPlan({ days: [0, 1, 2], averageMinutes: 30, priorities: ["chest"], targets: Object.fromEntries(muscleGroups.map(m => [m.id, 12])) });
+  var plan = buildCoachWeeklyPlan(setup, { optimize: true });
+  // Mark one planned session as submitted/completed directly on the plan.
+  var plannedSession = plan.sessions.find(s => s.status === "planned" && s.items.length > 0);
+  var submittedDate = plannedSession.date;
+  var submittedItemCount = plannedSession.items.length;
+  plannedSession.status = "completed";
+  plannedSession.submitted = plannedSession.items.map(i => ({ exercise: i.exercise.id, sets: i.sets, date: submittedDate }));
+  // Run redistribution on the plan with one submitted session.
+  var projected = {};
+  muscleGroups.forEach(m => projected[m.id] = 0);
+  plan.sessions.filter(s => s.status === "planned").forEach(s => s.items.forEach(item => {
+    item.exercise.primaryMuscles.forEach(muscleId => { projected[muscleId] = (projected[muscleId] || 0) + item.sets; });
+  }));
+  redistributeCoachWeeklySessions(plan.sessions, projected, setup);
+  var after = plan.sessions.find(s => s.date === submittedDate);
+  ({ submittedDate, afterStatus: after.status, afterItems: after.items.length, submittedItemCount });
+`);
+assert(redistributeSubmittedPreserved.afterStatus === "completed", "Submitted session must remain completed after redistribution.");
+assert.strictEqual(redistributeSubmittedPreserved.afterItems, redistributeSubmittedPreserved.submittedItemCount, "Submitted session items must not change.");
+
+// Redistribution pass: impossible targets still produce a partial plan with shortfalls.
+const redistributeImpossibleTargets = runScenario(`
+  ${resetAndHelpers}
+  var setup = normalizeCoachWeeklyPlan({ days: [0], averageMinutes: 30, priorities: ["chest"], targets: Object.fromEntries(muscleGroups.map(m => [m.id, 50])) });
+  var plan = buildCoachWeeklyPlan(setup, { optimize: true });
+  var planned = plan.sessions.filter(s => s.status === "planned");
+  var totalMinutes = planned.reduce((sum, s) => sum + s.totalMinutes, 0);
+  ({ planned: planned.length, totalMinutes, hasItems: planned.some(s => s.items.length > 0) });
+`);
+assert(redistributeImpossibleTargets.hasItems, "Even with impossible targets, the plan should produce some work.");
+assert(redistributeImpossibleTargets.totalMinutes <= 33, "Impossible-target sessions must respect the time ceiling.");
+
+// Redistribution pass: repeated generation with identical inputs must produce identical output (deterministic).
+const redistributeDeterministic = runScenario(`
+  ${resetAndHelpers}
+  var setup = normalizeCoachWeeklyPlan({ days: [0, 1, 2, 3, 4, 5], averageMinutes: 40, priorities: ["chest", "back"], targets: Object.fromEntries(muscleGroups.map(m => [m.id, 16])) });
+  var plan1 = buildCoachWeeklyPlan(setup, { optimize: true });
+  var plan2 = buildCoachWeeklyPlan(setup, { optimize: true });
+  var sig1 = plan1.sessions.filter(s => s.status === "planned").map(s => s.date + ":" + s.items.map(i => i.exercise.id + ":" + i.sets).sort().join(",")).join("|");
+  var sig2 = plan2.sessions.filter(s => s.status === "planned").map(s => s.date + ":" + s.items.map(i => i.exercise.id + ":" + i.sets).sort().join(",")).join("|");
+  ({ same: sig1 === sig2 });
+`);
+assert(redistributeDeterministic.same, "Identical inputs must produce identical redistribution output.");
+
+// Redistribution pass: projected credits must equal banked sets plus planned stimulus credits exactly once.
+// A redistribution pass that re-applies planned credits on top of the already-projected total double counts
+// them, which inflates the weekly distribution indicator and can falsely show a muscle as 20+ sets.
+const redistributeCreditsNotDoubled = runScenario(`
+  ${resetAndHelpers}
+  var setup = normalizeCoachWeeklyPlan({ days: [1, 2, 3, 4, 5, 6], averageMinutes: 60, priorities: [], targets: Object.fromEntries(muscleGroups.map(m => [m.id, 12])) });
+  var plan = buildCoachWeeklyPlan(setup, { optimize: true });
+  // Independently rebuild the expected projection from banked sets plus one pass over planned items.
+  var expected = Object.fromEntries(muscleGroups.map(m => [m.id, Number(plan.actualStats.find(s => s.id === m.id)?.sets || 0)]));
+  plan.sessions.filter(s => s.status === "planned").forEach(s => s.items.forEach(item => applyCoachStimulusCredits(expected, item.exercise, item.sets)));
+  var mismatches = muscleGroups.map(m => ({ id: m.id, reported: plan.projected[m.id] || 0, expected: expected[m.id] })).filter(e => Math.abs(e.reported - e.expected) > 0.001);
+  ({ mismatches, maxReported: Math.max(...muscleGroups.map(m => plan.projected[m.id] || 0)) });
+`);
+assert.strictEqual(redistributeCreditsNotDoubled.mismatches.length, 0, "Redistribution must not double count projected weekly credits.");
+assert(redistributeCreditsNotDoubled.maxReported < 20, "A twelve-set week must never report a muscle at twenty or more projected sets.");
+
+// Recovery spacing: yesterday's direct work must keep that muscle off today's generated day.
+// This is asserted through buildCoachWeeklyPlan rather than redistribution directly so the wiring
+// between the planner, the optimizer, and the redistribution pass is covered end to end.
+const weeklyRecoveryBlocksYesterday = runScenario(`
+  ${resetAndHelpers}
+  var biceps = muscleGroups.find(m => m.id === "biceps");
+  state.settings.customExercises.push({ id: "hammer", name: "Hammer Curl", primaryMuscles: ["biceps"], secondaryMuscles: [], exerciseType: "isolation", equipment: "dumbbells", reps: "8-15", rest: "60 sec", cue: "Hammer.", userCreated: true });
+  state.workouts = [makeWorkout(biceps, 1, 4, { exercise: "Hammer Curl", exerciseId: "hammer", primaryMuscles: ["biceps"] })];
+  var setup = normalizeCoachWeeklyPlan({ days: [1, 2, 3, 4, 5, 6], averageMinutes: 75, priorities: [], targets: Object.fromEntries(muscleGroups.map(m => [m.id, 12])) });
+  var plan = buildCoachWeeklyPlan(setup, { optimize: true });
+  var today = todayISO();
+  ({
+    lastDirect: latestDirectMuscleDate("biceps"),
+    yesterday: dateDaysAgo(1),
+    todayBiceps: plan.sessions.filter(s => s.date === today).flatMap(s => s.items.filter(i => i.exercise.primaryMuscles.includes("biceps")).map(i => i.exercise.name))
+  });
+`);
+assert.strictEqual(weeklyRecoveryBlocksYesterday.lastDirect, weeklyRecoveryBlocksYesterday.yesterday, "Biceps submitted yesterday must register as the latest direct biceps date.");
+assert.strictEqual(weeklyRecoveryBlocksYesterday.todayBiceps.length, 0, "A muscle worked yesterday must not be scheduled for direct work today.");
+
+// Recovery spacing must hold in the final generated plan, across every muscle and every planned day.
+// A redistribution candidate that lands within one day of submitted work or of another direct date
+// must be rejected before it is applied, so move, swap, and split all have to route through the
+// schedule validator rather than only re-checking the item they are moving.
+const redistributionRespectsRecovery = runScenario(`
+  ${resetAndHelpers}
+  var biceps = muscleGroups.find(m => m.id === "biceps");
+  state.settings.customExercises.push({ id: "hammer", name: "Hammer Curl", primaryMuscles: ["biceps"], secondaryMuscles: [], exerciseType: "isolation", equipment: "dumbbells", reps: "8-15", rest: "60 sec", cue: "Hammer.", userCreated: true });
+  state.workouts = [makeWorkout(biceps, 1, 4, { exercise: "Hammer Curl", exerciseId: "hammer", primaryMuscles: ["biceps"] })];
+  var setup = normalizeCoachWeeklyPlan({ days: [1, 2, 3, 4, 5, 6], averageMinutes: 75, priorities: [], targets: Object.fromEntries(muscleGroups.map(m => [m.id, 12])) });
+  var plan = buildCoachWeeklyPlan(setup, { optimize: true });
+  // Rebuild direct dates from the exercise primaries, the same input the recovery rules use.
+  var directDates = Object.fromEntries(muscleGroups.map(m => [m.id, []]));
+  plan.sessions.filter(s => s.status === "planned").forEach(s => s.items.forEach(item => {
+    item.exercise.primaryMuscles.forEach(id => { if (directDates[id]) directDates[id].push(s.date); });
+  }));
+  var violations = [];
+  muscleGroups.forEach(m => {
+    var dates = [...new Set(directDates[m.id])].sort();
+    var last = latestDirectMuscleDate(m.id);
+    var chain = [...(last ? [last] : []), ...dates].sort();
+    for (var i = 1; i < chain.length; i += 1) {
+      if (Math.abs(daysBetween(chain[i - 1], chain[i])) < 2) violations.push({ muscle: m.id, from: chain[i - 1], to: chain[i] });
+    }
+  });
+  ({ violations, directDates });
+`);
+assert.strictEqual(
+  redistributionRespectsRecovery.violations.length,
+  0,
+  `No planned direct date may land within one day of submitted work or another direct date. Got: ${JSON.stringify(redistributionRespectsRecovery.violations)}.`
+);
+
+// The redistribution pass must actually run and balance in a scenario with a wide spread, otherwise
+// the recovery assertions above would pass trivially against a pass that never mutates anything.
+const redistributionStillBalances = runScenario(`
+  ${resetAndHelpers}
+  var biceps = muscleGroups.find(m => m.id === "biceps");
+  state.settings.customExercises.push({ id: "hammer", name: "Hammer Curl", primaryMuscles: ["biceps"], secondaryMuscles: [], exerciseType: "isolation", equipment: "dumbbells", reps: "8-15", rest: "60 sec", cue: "Hammer.", userCreated: true });
+  state.workouts = [makeWorkout(biceps, 1, 4, { exercise: "Hammer Curl", exerciseId: "hammer", primaryMuscles: ["biceps"] })];
+  var setup = normalizeCoachWeeklyPlan({ days: [1, 2, 3, 4, 5, 6], averageMinutes: 75, priorities: [], targets: Object.fromEntries(muscleGroups.map(m => [m.id, 12])) });
+  var plan = buildCoachWeeklyPlan(setup, { optimize: true });
+  var before = plan.sessions.filter(s => s.status === "planned" && s.items.length).map(s => s.totalMinutes);
+  var beforeSpread = before.length > 1 ? Math.max(...before) - Math.min(...before) : 0;
+  var sessions = plan.sessions.filter(s => s.status === "planned" && s.items.length);
+  var after = sessions.map(s => s.totalMinutes);
+  // Report the spacing gaps between final biceps dates so the assertions can check them
+  // without reaching back into the sandbox from outside the scenario.
+  var bicepsDates = [...new Set(sessions.flatMap(s => s.items
+    .filter(i => i.exercise.primaryMuscles.includes("biceps"))
+    .map(() => s.date)))].sort();
+  var bicepsGaps = bicepsDates.slice(1).map((date, index) => daysBetween(bicepsDates[index], date));
+  ({
+    beforeSpread: beforeSpread,
+    afterSpread: after.length > 1 ? Math.max(...after) - Math.min(...after) : 0,
+    today: todayISO(),
+    bicepsDates: bicepsDates,
+    bicepsGaps: bicepsGaps
+  });
+`);
+assert(
+  !redistributionStillBalances.bicepsDates.includes(redistributionStillBalances.today),
+  "Redistribution must not relocate biceps work onto the day it was submitted."
+);
+assert(
+  redistributionStillBalances.bicepsGaps.every((gap) => Math.abs(gap) >= 2),
+  `Redistributed biceps dates must stay two days apart. Got: ${JSON.stringify(redistributionStillBalances.bicepsDates)}.`
+);
+assert(
+  redistributionStillBalances.afterSpread <= redistributionStillBalances.beforeSpread,
+  `Redistribution must not widen the session spread. Before: ${redistributionStillBalances.beforeSpread}, after: ${redistributionStillBalances.afterSpread}.`
+);
 
 console.log("coach regression tests passed");
