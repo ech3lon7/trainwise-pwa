@@ -6469,6 +6469,51 @@ function redistributeCoachWeeklySessions(sessions, projected, setup = {}) {
   // one block into halves that sum to the original sets), so the caller's totals stay accurate.
 }
 
+// TEMPORARY DEBUG INSTRUMENTATION - remove once the recovery-spacing regression is fixed.
+// Rebuilds each muscle's planned direct-work dates from the item's real exercise primaries,
+// because recovery spacing is enforced on those rather than on the item's target slot.
+function coachWeeklyDirectDates(sessions) {
+  const dates = Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, []]));
+  for (const session of sessions.filter((candidate) => candidate.status === "planned")) {
+    for (const item of session.items) {
+      for (const muscleId of item.exercise.primaryMuscles) {
+        if (dates[muscleId]) dates[muscleId].push(session.date);
+      }
+    }
+  }
+  return Object.fromEntries(Object.entries(dates).map(([muscleId, values]) => [muscleId, [...new Set(values)].sort()]));
+}
+
+// TEMPORARY DEBUG INSTRUMENTATION - remove once the recovery-spacing regression is fixed.
+// Flags any planned direct date that lands within one day of submitted work or of another
+// planned direct date, so the export can show which build stage first introduced the conflict.
+function coachWeeklyRecoveryViolations(directDates, lastDirect) {
+  const violations = [];
+  for (const muscle of muscleGroups) {
+    const planned = directDates[muscle.id] || [];
+    const last = lastDirect?.[muscle.id] || "";
+    const chain = [...(last ? [last] : []), ...planned].sort();
+    for (let index = 1; index < chain.length; index += 1) {
+      if (Math.abs(daysBetween(chain[index - 1], chain[index])) >= 2) continue;
+      const fromSubmitted = Boolean(last) && chain[index - 1] === last && planned.includes(chain[index]);
+      violations.push({
+        muscle: muscle.id,
+        from: chain[index - 1],
+        to: chain[index],
+        source: fromSubmitted ? "submitted->planned" : "planned->planned"
+      });
+    }
+  }
+  return violations;
+}
+
+// TEMPORARY DEBUG INSTRUMENTATION - remove once the recovery-spacing regression is fixed.
+// Captures direct dates plus violations for one point in the build pipeline.
+function coachWeeklyRecoverySnapshot(sessions, lastDirect) {
+  const directDates = coachWeeklyDirectDates(sessions);
+  return { directDates, violations: coachWeeklyRecoveryViolations(directDates, lastDirect) };
+}
+
 function buildCoachWeeklyPlan(setupInput = selectedCoachWeeklyPlan(), options = {}) {
   const setup = normalizeCoachWeeklyPlan(setupInput);
   // Solve floors independently before allowing growth; a blocked floor keeps the usable floor-only schedule.
@@ -6613,6 +6658,9 @@ function buildCoachWeeklyPlan(setupInput = selectedCoachWeeklyPlan(), options = 
       });
     }
   });
+  // TEMPORARY DEBUG INSTRUMENTATION - snapshots the plan after greedy placement so the export
+  // can attribute a recovery violation to the stage that introduced it.
+  const recoveryTrace = { lastDirect: clonePlain(lastDirect), afterGreedy: coachWeeklyRecoverySnapshot(sessions, lastDirect) };
   topUpCoachWeeklySessionSets(sessions, projected, setBudgets, setup);
   reallocateCoachWeeklyPriorityShortfalls(sessions, projected, setBudgets, setup, recoveryClearForDate);
   plannedSessions.forEach((session) => {
@@ -6629,6 +6677,7 @@ function buildCoachWeeklyPlan(setupInput = selectedCoachWeeklyPlan(), options = 
     session.items = orderCoachSessionItems(session.items);
     session.totalMinutes = plannedCoachSessionMinutes(session.items);
   });
+  recoveryTrace.afterRepair = coachWeeklyRecoverySnapshot(sessions, lastDirect);
 
   // Run the heavier bounded repair only for Generate, explicit optimization, and debug callers that opt in.
   let optimizer = { mode: "not-run", improved: false, attemptedMoves: 0, acceptedMoves: 0, moveCounts: {}, rejected: {}, shortfalls: [], terminationReason: "not-run", maxStates: 0 };
@@ -6644,11 +6693,13 @@ function buildCoachWeeklyPlan(setupInput = selectedCoachWeeklyPlan(), options = 
     Object.assign(projected, optimized.projected);
     optimizer = optimized.diagnostics;
   }
+  recoveryTrace.afterOptimizer = coachWeeklyRecoverySnapshot(sessions, lastDirect);
 
   // Redistribution pass: balance session durations after the optimizer has filled targets.
   if (options.optimize === true) {
     redistributeCoachWeeklySessions(sessions, projected, setup);
   }
+  recoveryTrace.afterRedistribution = coachWeeklyRecoverySnapshot(sessions, lastDirect);
 
   const remainingSets = muscleGroups.reduce((sum, muscle) => sum + Math.max(0, setup.targets[muscle.id] - (actualStats.find((stat) => stat.id === muscle.id)?.sets || 0)), 0);
   const missing = muscleGroups.filter((muscle) => setup.targets[muscle.id] > (projected[muscle.id] || 0) && !hasPrimaryExerciseForMuscle(muscle.id));
@@ -6685,6 +6736,7 @@ function buildCoachWeeklyPlan(setupInput = selectedCoachWeeklyPlan(), options = 
     missing,
     attainment,
     optimizer,
+    recoveryTrace,
     capacity: {
       ...capacity,
       allocatedSetCapacity: budgetAllocation.allocatedCapacity,
@@ -11501,6 +11553,7 @@ function coachDebugWeeklyPlan() {
     capacity: clonePlain(plan.capacity),
     attainment: clonePlain(plan.attainment),
     optimizer: clonePlain(plan.optimizer || null),
+    recoveryTrace: clonePlain(plan.recoveryTrace || null),
     actualSets: Object.fromEntries(plan.actualStats.map((stat) => [stat.id, stat.sets])),
     setBudgets: clonePlain(plan.setBudgets || {}),
     projectedSets: clonePlain(plan.projected),
@@ -11511,6 +11564,9 @@ function coachDebugWeeklyPlan() {
       submittedSets: session.submitted.reduce((sum, workout) => sum + setRowsFromWorkout(workout).length, 0),
       items: session.items.map((item) => ({
         exercise: item.exercise.name,
+        // TEMPORARY DEBUG INSTRUMENTATION - the slot label alone hid which muscle recovery
+        // actually books, so the export now carries the exercise's real primary muscles.
+        primaryMuscles: [...(item.exercise.primaryMuscles || [])],
         muscle: item.muscle.id,
         sets: item.sets,
         configuredLoadingStyle: normalizeLoadingStyle(item.exercise.loadingStyle),
