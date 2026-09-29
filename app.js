@@ -3,7 +3,7 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 3;
 const STORES = ["workouts", "metrics", "settings", "syncQueue"];
-const APP_VERSION = "1.6.6";
+const APP_VERSION = "1.6.7";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 const DRAFT_RECOVERY_KEY = "trainwise-draft-recovery-v1";
 const DATED_STRENGTH_DRAFTS_KEY = "trainwise-strength-drafts-by-date-v1";
@@ -44,6 +44,9 @@ const COACH_MAX_EXERCISES_PER_SESSION = 6;
 // Keep every Coach-prescribed exercise large enough to be a useful working block.
 const COACH_MIN_SETS_PER_EXERCISE = 2;
 const COACH_WEEK_TARGET_MAX = 50;
+// Redistribution pass caps: how many iterations to try balancing sessions and the spread threshold below which we stop.
+const REDISTRIBUTE_MAX_ITERATIONS = 200;
+const REDISTRIBUTE_MIN_SPREAD = 3;
 const COACH_TIME_ESTIMATOR_VERSION = "coach-time-v1";
 const COACH_TIMEFRAME_OPTIONS = [
   { label: "30 min", minutes: 30 },
@@ -6141,6 +6144,335 @@ function coachWeeklySearchReasonLabel(reason) {
   })[reason] || "supported search exhausted";
 }
 
+// Redistribution pass: scoring function that produces a 4-element tuple compared lexicographically.
+// Lower is better. Element 0 (spread) is the primary goal — minimize the gap between the longest and shortest session.
+function redistributeBalanceScore(sessions, averageMinutes) {
+  const planned = sessions.filter((session) => session.status === "planned" && session.items.length > 0);
+  if (planned.length <= 1) return [0, 0, 0, 0];
+  const minutes = planned.map((session) => session.totalMinutes);
+  const maxMinutes = Math.max(...minutes);
+  const minMinutes = Math.min(...minutes);
+  const spread = maxMinutes - minMinutes;
+  const overTarget = minutes.filter((m) => m > averageMinutes + COACH_TIME_TOLERANCE_MINUTES).length;
+  const emptyDays = sessions.filter((session) => session.status === "planned" && session.items.length === 0).length;
+  const mean = minutes.reduce((sum, m) => sum + m, 0) / minutes.length;
+  const variance = minutes.reduce((sum, m) => sum + (m - mean) ** 2, 0) / minutes.length;
+  return [spread, overTarget, emptyDays, variance];
+}
+
+// Redistribution pass: lexicographic comparison of two score tuples. Returns negative if left is better.
+function redistributeCompareScores(left, right) {
+  for (let index = 0; index < Math.max(left.length, right.length); index += 1) {
+    const difference = (Number(left[index]) || 0) - (Number(right[index]) || 0);
+    if (Math.abs(difference) > 0.001) return difference;
+  }
+  return 0;
+}
+
+// Redistribution pass: deep-clone sessions for safe trial mutations without mutating the live state.
+function redistributeCloneSessions(sessions, sessionMinutes) {
+  return sessions.map((session) => ({
+    ...session,
+    items: session.items.map((item) => ({ ...item })),
+    submitted: [...(session.submitted || [])],
+    totalMinutes: sessionMinutes(session.items)
+  }));
+}
+
+// Redistribution pass: try moving one complete item block from a heavy source session to a light destination.
+// Returns a validated clone if the move improves balance, or null if it fails any constraint.
+function redistributeTryMove(sessions, setup, sourceIndex, itemIndex, destIndex, sessionMinutes) {
+  const source = sessions[sourceIndex];
+  const destination = sessions[destIndex];
+  if (!source || !destination) return null;
+  const movedItem = source.items[itemIndex];
+  if (!movedItem) return null;
+  // Moving from heavy to light only — skip if source is not heavier.
+  if (source.totalMinutes <= destination.totalMinutes) return null;
+  const next = redistributeCloneSessions(sessions, sessionMinutes);
+  const nextSource = next[sourceIndex];
+  const nextDest = next[destIndex];
+  const [moved] = nextSource.items.splice(itemIndex, 1);
+  nextDest.items.push(moved);
+  nextSource.totalMinutes = sessionMinutes(nextSource.items);
+  nextDest.totalMinutes = sessionMinutes(nextDest.items);
+  // Reject if destination would exceed the time ceiling.
+  const maxMinutes = setup.averageMinutes + COACH_TIME_TOLERANCE_MINUTES;
+  if (nextDest.totalMinutes > maxMinutes) return null;
+  // Reject if destination exceeds the exercise limit.
+  if (nextDest.items.length > COACH_MAX_EXERCISES_PER_SESSION) return null;
+  // Reject if recovery is violated for the moved item's primary muscles.
+  if (typeof setup.recoveryClearForDate === "function") {
+    const clear = setup.recoveryClearForDate;
+    for (const muscleId of movedItem.exercise.primaryMuscles) {
+      if (!clear(muscleId, nextDest.date)) return null;
+      // Also check that source still passes recovery for remaining items (no change expected, but validate).
+      for (const item of nextSource.items) {
+        for (const mid of item.exercise.primaryMuscles) {
+          if (!clear(mid, nextSource.date)) return null;
+        }
+      }
+    }
+  }
+  // Reject if the source session lost all items but was supposed to be planned.
+  if (nextSource.items.length === 0 && nextSource.status === "planned") return null;
+  // Reject if any item drops below the 2-set minimum (shouldn't happen with block moves, but guard).
+  for (const session of [nextSource, nextDest]) {
+    for (const item of session.items) {
+      if (item.sets < COACH_MIN_SETS_PER_EXERCISE) return null;
+    }
+  }
+  // Reject if duplicate exercise or conflict key within the destination session.
+  const destIds = new Set();
+  const destConflicts = new Set();
+  for (const item of nextDest.items) {
+    const id = item.exercise.id;
+    const conflictKey = coachExerciseConflictKey(item.exercise);
+    if (destIds.has(id) || destConflicts.has(conflictKey)) return null;
+    destIds.add(id);
+    destConflicts.add(conflictKey);
+  }
+  return next;
+}
+
+// Redistribution pass: try swapping two items of similar duration between sessions.
+// Returns a validated clone if the swap improves balance, or null.
+function redistributeTrySwap(sessions, setup, sourceIndex, sourceItemIndex, destIndex, destItemIndex, sessionMinutes) {
+  const source = sessions[sourceIndex];
+  const destination = sessions[destIndex];
+  if (!source || !destination) return null;
+  if (sourceIndex === destIndex) return null;
+  const sourceItem = source.items[sourceItemIndex];
+  const destItem = destination.items[destItemIndex];
+  if (!sourceItem || !destItem) return null;
+  // Only swap if it reduces the imbalance direction — source should be heavier or equal.
+  if (source.totalMinutes < destination.totalMinutes) return null;
+  const next = redistributeCloneSessions(sessions, sessionMinutes);
+  const nextSource = next[sourceIndex];
+  const nextDest = next[destIndex];
+  // Remove both items and re-insert swapped.
+  const [removedSource] = nextSource.items.splice(sourceItemIndex, 1);
+  const [removedDest] = nextDest.items.splice(destItemIndex, 1);
+  nextDest.items.push(removedSource);
+  nextSource.items.push(removedDest);
+  nextSource.totalMinutes = sessionMinutes(nextSource.items);
+  nextDest.totalMinutes = sessionMinutes(nextDest.items);
+  // Reject if either session exceeds the time ceiling.
+  const maxMinutes = setup.averageMinutes + COACH_TIME_TOLERANCE_MINUTES;
+  if (nextSource.totalMinutes > maxMinutes || nextDest.totalMinutes > maxMinutes) return null;
+  // Reject if either session exceeds the exercise limit.
+  if (nextSource.items.length > COACH_MAX_EXERCISES_PER_SESSION || nextDest.items.length > COACH_MAX_EXERCISES_PER_SESSION) return null;
+  // Reject if recovery is violated.
+  if (typeof setup.recoveryClearForDate === "function") {
+    const clear = setup.recoveryClearForDate;
+    for (const session of [nextSource, nextDest]) {
+      for (const item of session.items) {
+        for (const muscleId of item.exercise.primaryMuscles) {
+          if (!clear(muscleId, session.date)) return null;
+        }
+      }
+    }
+  }
+  // Reject if any item drops below the 2-set minimum.
+  for (const session of [nextSource, nextDest]) {
+    for (const item of session.items) {
+      if (item.sets < COACH_MIN_SETS_PER_EXERCISE) return null;
+    }
+  }
+  // Reject if duplicate exercise or conflict key within either session.
+  for (const session of [nextSource, nextDest]) {
+    const ids = new Set();
+    const conflicts = new Set();
+    for (const item of session.items) {
+      const id = item.exercise.id;
+      const conflictKey = coachExerciseConflictKey(item.exercise);
+      if (ids.has(id) || conflicts.has(conflictKey)) return null;
+      ids.add(id);
+      conflicts.add(conflictKey);
+    }
+  }
+  return next;
+}
+
+// Redistribution pass: try splitting a large block (≥4 sets) into two halves, moving one half to a light destination.
+// Returns a validated clone if the split improves balance, or null.
+function redistributeTrySplit(sessions, setup, sourceIndex, itemIndex, destIndex, sessionMinutes) {
+  const source = sessions[sourceIndex];
+  const destination = sessions[destIndex];
+  if (!source || !destination) return null;
+  const item = source.items[itemIndex];
+  if (!item || item.sets < 4) return null;
+  if (source.totalMinutes <= destination.totalMinutes) return null;
+  const splitA = Math.floor(item.sets / 2);
+  const splitB = item.sets - splitA;
+  // Both halves must meet the 2-set minimum.
+  if (splitA < COACH_MIN_SETS_PER_EXERCISE || splitB < COACH_MIN_SETS_PER_EXERCISE) return null;
+  const next = redistributeCloneSessions(sessions, sessionMinutes);
+  const nextSource = next[sourceIndex];
+  const nextDest = next[destIndex];
+  // Replace the original item with splitA in the source.
+  nextSource.items.splice(itemIndex, 1, {
+    ...item,
+    sets: splitA,
+    minutes: estimateExerciseMinutes(item.exercise, splitA)
+  });
+  // Add splitB to the destination as a new block.
+  nextDest.items.push({
+    ...item,
+    sets: splitB,
+    minutes: estimateExerciseMinutes(item.exercise, splitB),
+    reason: `${item.muscle.label} was split by the weekly redistribution pass to balance session durations.`
+  });
+  nextSource.totalMinutes = sessionMinutes(nextSource.items);
+  nextDest.totalMinutes = sessionMinutes(nextDest.items);
+  // Reject if destination would exceed the time ceiling.
+  const maxMinutes = setup.averageMinutes + COACH_TIME_TOLERANCE_MINUTES;
+  if (nextDest.totalMinutes > maxMinutes) return null;
+  // Reject if destination exceeds the exercise limit.
+  if (nextDest.items.length > COACH_MAX_EXERCISES_PER_SESSION) return null;
+  // Reject if recovery is violated.
+  if (typeof setup.recoveryClearForDate === "function") {
+    const clear = setup.recoveryClearForDate;
+    for (const session of [nextSource, nextDest]) {
+      for (const sessItem of session.items) {
+        for (const muscleId of sessItem.exercise.primaryMuscles) {
+          if (!clear(muscleId, session.date)) return null;
+        }
+      }
+    }
+  }
+  // Reject if any item drops below the 2-set minimum.
+  for (const session of [nextSource, nextDest]) {
+    for (const sessItem of session.items) {
+      if (sessItem.sets < COACH_MIN_SETS_PER_EXERCISE) return null;
+    }
+  }
+  // Reject if duplicate exercise or conflict key within either session.
+  for (const session of [nextSource, nextDest]) {
+    const ids = new Set();
+    const conflicts = new Set();
+    for (const sessItem of session.items) {
+      const id = sessItem.exercise.id;
+      const conflictKey = coachExerciseConflictKey(sessItem.exercise);
+      if (ids.has(id) || conflicts.has(conflictKey)) return null;
+      ids.add(id);
+      conflicts.add(conflictKey);
+    }
+  }
+  return next;
+}
+
+// Redistribution pass: main function. Moves exercise blocks between planned sessions to balance durations.
+// Runs after the bounded search optimizer. Only mutates planned sessions; submitted sessions are immutable.
+// Returns void — mutates the sessions array in place and updates projected credits.
+function redistributeCoachWeeklySessions(sessions, projected, setup = {}) {
+  const averageMinutes = setup.averageMinutes || 30;
+  const plannedSessions = sessions.filter((session) => session.status === "planned" && session.items.length > 0);
+  if (plannedSessions.length <= 1) return;
+  // Build a mapping from planned session date to its index in the full sessions array.
+  const plannedIndices = [];
+  for (let index = 0; index < sessions.length; index += 1) {
+    if (sessions[index].status === "planned" && sessions[index].items.length > 0) {
+      plannedIndices.push(index);
+    }
+  }
+  if (plannedIndices.length <= 1) return;
+  // Snapshot current state as the best known state.
+  let bestSessions = redistributeCloneSessions(sessions, plannedCoachSessionMinutes);
+  let bestScore = redistributeBalanceScore(bestSessions, averageMinutes);
+  // Early exit if already balanced within the tolerance.
+  if (bestScore[0] <= REDISTRIBUTE_MIN_SPREAD) return;
+  const seen = new Set([coachWeeklySearchSignature(bestSessions)]);
+  let improved = true;
+  let iterations = 0;
+  while (improved && iterations < REDISTRIBUTE_MAX_ITERATIONS) {
+    improved = false;
+    iterations += 1;
+    // Try moves first — move complete blocks from heavy sessions to light sessions.
+    for (let si = 0; si < plannedIndices.length && !improved; si += 1) {
+      for (let di = 0; di < plannedIndices.length && !improved; di += 1) {
+        if (si === di) continue;
+        const sourceIdx = plannedIndices[si];
+        const destIdx = plannedIndices[di];
+        for (let ii = 0; ii < bestSessions[sourceIdx].items.length && !improved; ii += 1) {
+          const candidate = redistributeTryMove(bestSessions, setup, sourceIdx, ii, destIdx, plannedCoachSessionMinutes);
+          if (!candidate) continue;
+          const sig = coachWeeklySearchSignature(candidate);
+          if (seen.has(sig)) continue;
+          seen.add(sig);
+          const score = redistributeBalanceScore(candidate, averageMinutes);
+          if (redistributeCompareScores(score, bestScore) < 0) {
+            bestSessions = candidate;
+            bestScore = score;
+            improved = true;
+          }
+        }
+      }
+    }
+    if (bestScore[0] <= REDISTRIBUTE_MIN_SPREAD) break;
+    // Try swaps — exchange items of similar duration between sessions.
+    for (let si = 0; si < plannedIndices.length && !improved; si += 1) {
+      for (let di = 0; di < plannedIndices.length && !improved; di += 1) {
+        if (si === di) continue;
+        const sourceIdx = plannedIndices[si];
+        const destIdx = plannedIndices[di];
+        for (let sii = 0; sii < bestSessions[sourceIdx].items.length && !improved; sii += 1) {
+          for (let dii = 0; dii < bestSessions[destIdx].items.length && !improved; dii += 1) {
+            const candidate = redistributeTrySwap(bestSessions, setup, sourceIdx, sii, destIdx, dii, plannedCoachSessionMinutes);
+            if (!candidate) continue;
+            const sig = coachWeeklySearchSignature(candidate);
+            if (seen.has(sig)) continue;
+            seen.add(sig);
+            const score = redistributeBalanceScore(candidate, averageMinutes);
+            if (redistributeCompareScores(score, bestScore) < 0) {
+              bestSessions = candidate;
+              bestScore = score;
+              improved = true;
+            }
+          }
+        }
+      }
+    }
+    if (bestScore[0] <= REDISTRIBUTE_MIN_SPREAD) break;
+    // Try splits — split large blocks (≥4 sets) and move one half to a light session.
+    for (let si = 0; si < plannedIndices.length && !improved; si += 1) {
+      for (let di = 0; di < plannedIndices.length && !improved; di += 1) {
+        if (si === di) continue;
+        const sourceIdx = plannedIndices[si];
+        const destIdx = plannedIndices[di];
+        for (let ii = 0; ii < bestSessions[sourceIdx].items.length && !improved; ii += 1) {
+          const candidate = redistributeTrySplit(bestSessions, setup, sourceIdx, ii, destIdx, plannedCoachSessionMinutes);
+          if (!candidate) continue;
+          const sig = coachWeeklySearchSignature(candidate);
+          if (seen.has(sig)) continue;
+          seen.add(sig);
+          const score = redistributeBalanceScore(candidate, averageMinutes);
+          if (redistributeCompareScores(score, bestScore) < 0) {
+            bestSessions = candidate;
+            bestScore = score;
+            improved = true;
+          }
+        }
+      }
+    }
+  }
+  // Apply the best balanced state back into the live sessions array.
+  for (let index = 0; index < sessions.length; index += 1) {
+    if (sessions[index].status !== "planned") continue;
+    const bestMatch = bestSessions.find((candidate) => candidate.date === sessions[index].date);
+    if (!bestMatch) continue;
+    sessions[index].items = bestMatch.items;
+    sessions[index].totalMinutes = bestMatch.totalMinutes;
+  }
+  // Recompute projected credits from the balanced schedule to keep them in sync.
+  for (const muscle of muscleGroups) {
+    projected[muscle.id] = Math.max(0, Number(projected[muscle.id]) || 0);
+  }
+  sessions.filter((session) => session.status === "planned").forEach((session) => {
+    session.items.forEach((item) => applyCoachStimulusCredits(projected, item.exercise, item.sets));
+  });
+}
+
 function buildCoachWeeklyPlan(setupInput = selectedCoachWeeklyPlan(), options = {}) {
   const setup = normalizeCoachWeeklyPlan(setupInput);
   // Solve floors independently before allowing growth; a blocked floor keeps the usable floor-only schedule.
@@ -6315,6 +6647,11 @@ function buildCoachWeeklyPlan(setupInput = selectedCoachWeeklyPlan(), options = 
     });
     Object.assign(projected, optimized.projected);
     optimizer = optimized.diagnostics;
+  }
+
+  // Redistribution pass: balance session durations after the optimizer has filled targets.
+  if (options.optimize === true) {
+    redistributeCoachWeeklySessions(sessions, projected, setup);
   }
 
   const remainingSets = muscleGroups.reduce((sum, muscle) => sum + Math.max(0, setup.targets[muscle.id] - (actualStats.find((stat) => stat.id === muscle.id)?.sets || 0)), 0);

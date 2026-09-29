@@ -3513,4 +3513,82 @@ assert(Object.values(belowFloorGeneration.targets).every(value => value === 2));
 assert(belowFloorGeneration.sessions.some(session => session.items.length > 0), "A week below all floors must still generate useful work.");
 assert(belowFloorGeneration.sessions.every(session => session.items.length <= 6 && session.items.every(item => item.sets >= 2) && session.totalMinutes <= 33));
 
+// Redistribution pass: balanced output should have more even session durations without losing weekly credits.
+const redistributeBalanced = runScenario(`
+  ${resetAndHelpers}
+  var setup = normalizeCoachWeeklyPlan({ days: [0, 1, 2, 3, 4, 5], averageMinutes: 40, priorities: ["chest", "back"], targets: Object.fromEntries(muscleGroups.map(m => [m.id, 16])) });
+  var plan = buildCoachWeeklyPlan(setup, { optimize: true });
+  var planned = plan.sessions.filter(s => s.status === "planned" && s.items.length > 0);
+  var minutes = planned.map(s => s.totalMinutes);
+  var spread = Math.max(...minutes) - Math.min(...minutes);
+  var totalCredits = {};
+  muscleGroups.forEach(m => totalCredits[m.id] = 0);
+  planned.forEach(s => s.items.forEach(item => {
+    item.exercise.primaryMuscles.forEach(muscleId => { totalCredits[muscleId] = (totalCredits[muscleId] || 0) + item.sets; });
+  }));
+  ({ spread, planned: planned.length, totalCredits, minutes });
+`);
+assert(redistributeBalanced.planned >= 3, "At least three selected days should have sessions.");
+assert(redistributeBalanced.spread <= 10, "Session durations should be reasonably balanced (spread <= 10 minutes).");
+assert(Object.values(redistributeBalanced.totalCredits).every(credits => credits > 0), "Every muscle should receive at least some weekly credits.");
+
+// Redistribution pass: empty planned days should receive work where recovery allows.
+const redistributeEmptyDays = runScenario(`
+  ${resetAndHelpers}
+  var setup = normalizeCoachWeeklyPlan({ days: [0, 2, 4], averageMinutes: 30, priorities: ["chest"], targets: Object.fromEntries(muscleGroups.map(m => [m.id, 12])) });
+  var plan = buildCoachWeeklyPlan(setup, { optimize: true });
+  var planned = plan.sessions.filter(s => s.status === "planned");
+  var withItems = planned.filter(s => s.items.length > 0);
+  ({ planned: planned.length, withItems: withItems.length });
+`);
+assert(redistributeEmptyDays.withItems >= 2, "At least two of three selected days should receive work.");
+
+// Redistribution pass: submitted sessions must remain untouched.
+const redistributeSubmittedPreserved = runScenario(`
+  ${resetAndHelpers}
+  var setup = normalizeCoachWeeklyPlan({ days: [0, 1, 2], averageMinutes: 30, priorities: ["chest"], targets: Object.fromEntries(muscleGroups.map(m => [m.id, 12])) });
+  var plan = buildCoachWeeklyPlan(setup, { optimize: true });
+  // Mark one planned session as submitted/completed directly on the plan.
+  var plannedSession = plan.sessions.find(s => s.status === "planned" && s.items.length > 0);
+  var submittedDate = plannedSession.date;
+  var submittedItemCount = plannedSession.items.length;
+  plannedSession.status = "completed";
+  plannedSession.submitted = plannedSession.items.map(i => ({ exercise: i.exercise.id, sets: i.sets, date: submittedDate }));
+  // Run redistribution on the plan with one submitted session.
+  var projected = {};
+  muscleGroups.forEach(m => projected[m.id] = 0);
+  plan.sessions.filter(s => s.status === "planned").forEach(s => s.items.forEach(item => {
+    item.exercise.primaryMuscles.forEach(muscleId => { projected[muscleId] = (projected[muscleId] || 0) + item.sets; });
+  }));
+  redistributeCoachWeeklySessions(plan.sessions, projected, setup);
+  var after = plan.sessions.find(s => s.date === submittedDate);
+  ({ submittedDate, afterStatus: after.status, afterItems: after.items.length, submittedItemCount });
+`);
+assert(redistributeSubmittedPreserved.afterStatus === "completed", "Submitted session must remain completed after redistribution.");
+assert.strictEqual(redistributeSubmittedPreserved.afterItems, redistributeSubmittedPreserved.submittedItemCount, "Submitted session items must not change.");
+
+// Redistribution pass: impossible targets still produce a partial plan with shortfalls.
+const redistributeImpossibleTargets = runScenario(`
+  ${resetAndHelpers}
+  var setup = normalizeCoachWeeklyPlan({ days: [0], averageMinutes: 30, priorities: ["chest"], targets: Object.fromEntries(muscleGroups.map(m => [m.id, 50])) });
+  var plan = buildCoachWeeklyPlan(setup, { optimize: true });
+  var planned = plan.sessions.filter(s => s.status === "planned");
+  var totalMinutes = planned.reduce((sum, s) => sum + s.totalMinutes, 0);
+  ({ planned: planned.length, totalMinutes, hasItems: planned.some(s => s.items.length > 0) });
+`);
+assert(redistributeImpossibleTargets.hasItems, "Even with impossible targets, the plan should produce some work.");
+assert(redistributeImpossibleTargets.totalMinutes <= 33, "Impossible-target sessions must respect the time ceiling.");
+
+// Redistribution pass: repeated generation with identical inputs must produce identical output (deterministic).
+const redistributeDeterministic = runScenario(`
+  ${resetAndHelpers}
+  var setup = normalizeCoachWeeklyPlan({ days: [0, 1, 2, 3, 4, 5], averageMinutes: 40, priorities: ["chest", "back"], targets: Object.fromEntries(muscleGroups.map(m => [m.id, 16])) });
+  var plan1 = buildCoachWeeklyPlan(setup, { optimize: true });
+  var plan2 = buildCoachWeeklyPlan(setup, { optimize: true });
+  var sig1 = plan1.sessions.filter(s => s.status === "planned").map(s => s.date + ":" + s.items.map(i => i.exercise.id + ":" + i.sets).sort().join(",")).join("|");
+  var sig2 = plan2.sessions.filter(s => s.status === "planned").map(s => s.date + ":" + s.items.map(i => i.exercise.id + ":" + i.sets).sort().join(",")).join("|");
+  ({ same: sig1 === sig2 });
+`);
+assert(redistributeDeterministic.same, "Identical inputs must produce identical redistribution output.");
+
 console.log("coach regression tests passed");

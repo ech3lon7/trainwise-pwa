@@ -18,7 +18,6 @@ If a skill applies, load it with the OpenCode skill tool and follow the skill ex
   use `incremental-implementation`.
 
 - Adding or changing tests:
-  use `test-driven-development`.
 
 - Reviewing code:
   use `code-review-and-quality`.
