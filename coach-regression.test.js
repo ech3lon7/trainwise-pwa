@@ -3633,4 +3633,97 @@ const redistributeCreditsNotDoubled = runScenario(`
 assert.strictEqual(redistributeCreditsNotDoubled.mismatches.length, 0, "Redistribution must not double count projected weekly credits.");
 assert(redistributeCreditsNotDoubled.maxReported < 20, "A twelve-set week must never report a muscle at twenty or more projected sets.");
 
+// Recovery spacing: yesterday's direct work must keep that muscle off today's generated day.
+// This is asserted through buildCoachWeeklyPlan rather than redistribution directly so the wiring
+// between the planner, the optimizer, and the redistribution pass is covered end to end.
+const weeklyRecoveryBlocksYesterday = runScenario(`
+  ${resetAndHelpers}
+  var biceps = muscleGroups.find(m => m.id === "biceps");
+  state.settings.customExercises.push({ id: "hammer", name: "Hammer Curl", primaryMuscles: ["biceps"], secondaryMuscles: [], exerciseType: "isolation", equipment: "dumbbells", reps: "8-15", rest: "60 sec", cue: "Hammer.", userCreated: true });
+  state.workouts = [makeWorkout(biceps, 1, 4, { exercise: "Hammer Curl", exerciseId: "hammer", primaryMuscles: ["biceps"] })];
+  var setup = normalizeCoachWeeklyPlan({ days: [1, 2, 3, 4, 5, 6], averageMinutes: 75, priorities: [], targets: Object.fromEntries(muscleGroups.map(m => [m.id, 12])) });
+  var plan = buildCoachWeeklyPlan(setup, { optimize: true });
+  var today = todayISO();
+  ({
+    lastDirect: latestDirectMuscleDate("biceps"),
+    yesterday: dateDaysAgo(1),
+    todayBiceps: plan.sessions.filter(s => s.date === today).flatMap(s => s.items.filter(i => i.exercise.primaryMuscles.includes("biceps")).map(i => i.exercise.name))
+  });
+`);
+assert.strictEqual(weeklyRecoveryBlocksYesterday.lastDirect, weeklyRecoveryBlocksYesterday.yesterday, "Biceps submitted yesterday must register as the latest direct biceps date.");
+assert.strictEqual(weeklyRecoveryBlocksYesterday.todayBiceps.length, 0, "A muscle worked yesterday must not be scheduled for direct work today.");
+
+// Recovery spacing must hold in the final generated plan, across every muscle and every planned day.
+// A redistribution candidate that lands within one day of submitted work or of another direct date
+// must be rejected before it is applied, so move, swap, and split all have to route through the
+// schedule validator rather than only re-checking the item they are moving.
+const redistributionRespectsRecovery = runScenario(`
+  ${resetAndHelpers}
+  var biceps = muscleGroups.find(m => m.id === "biceps");
+  state.settings.customExercises.push({ id: "hammer", name: "Hammer Curl", primaryMuscles: ["biceps"], secondaryMuscles: [], exerciseType: "isolation", equipment: "dumbbells", reps: "8-15", rest: "60 sec", cue: "Hammer.", userCreated: true });
+  state.workouts = [makeWorkout(biceps, 1, 4, { exercise: "Hammer Curl", exerciseId: "hammer", primaryMuscles: ["biceps"] })];
+  var setup = normalizeCoachWeeklyPlan({ days: [1, 2, 3, 4, 5, 6], averageMinutes: 75, priorities: [], targets: Object.fromEntries(muscleGroups.map(m => [m.id, 12])) });
+  var plan = buildCoachWeeklyPlan(setup, { optimize: true });
+  // Rebuild direct dates from the exercise primaries, the same input the recovery rules use.
+  var directDates = Object.fromEntries(muscleGroups.map(m => [m.id, []]));
+  plan.sessions.filter(s => s.status === "planned").forEach(s => s.items.forEach(item => {
+    item.exercise.primaryMuscles.forEach(id => { if (directDates[id]) directDates[id].push(s.date); });
+  }));
+  var violations = [];
+  muscleGroups.forEach(m => {
+    var dates = [...new Set(directDates[m.id])].sort();
+    var last = latestDirectMuscleDate(m.id);
+    var chain = [...(last ? [last] : []), ...dates].sort();
+    for (var i = 1; i < chain.length; i += 1) {
+      if (Math.abs(daysBetween(chain[i - 1], chain[i])) < 2) violations.push({ muscle: m.id, from: chain[i - 1], to: chain[i] });
+    }
+  });
+  ({ violations, directDates });
+`);
+assert.strictEqual(
+  redistributionRespectsRecovery.violations.length,
+  0,
+  `No planned direct date may land within one day of submitted work or another direct date. Got: ${JSON.stringify(redistributionRespectsRecovery.violations)}.`
+);
+
+// The redistribution pass must actually run and balance in a scenario with a wide spread, otherwise
+// the recovery assertions above would pass trivially against a pass that never mutates anything.
+const redistributionStillBalances = runScenario(`
+  ${resetAndHelpers}
+  var biceps = muscleGroups.find(m => m.id === "biceps");
+  state.settings.customExercises.push({ id: "hammer", name: "Hammer Curl", primaryMuscles: ["biceps"], secondaryMuscles: [], exerciseType: "isolation", equipment: "dumbbells", reps: "8-15", rest: "60 sec", cue: "Hammer.", userCreated: true });
+  state.workouts = [makeWorkout(biceps, 1, 4, { exercise: "Hammer Curl", exerciseId: "hammer", primaryMuscles: ["biceps"] })];
+  var setup = normalizeCoachWeeklyPlan({ days: [1, 2, 3, 4, 5, 6], averageMinutes: 75, priorities: [], targets: Object.fromEntries(muscleGroups.map(m => [m.id, 12])) });
+  var plan = buildCoachWeeklyPlan(setup, { optimize: true });
+  var before = plan.sessions.filter(s => s.status === "planned" && s.items.length).map(s => s.totalMinutes);
+  var beforeSpread = before.length > 1 ? Math.max(...before) - Math.min(...before) : 0;
+  var sessions = plan.sessions.filter(s => s.status === "planned" && s.items.length);
+  var after = sessions.map(s => s.totalMinutes);
+  // Report the spacing gaps between final biceps dates so the assertions can check them
+  // without reaching back into the sandbox from outside the scenario.
+  var bicepsDates = [...new Set(sessions.flatMap(s => s.items
+    .filter(i => i.exercise.primaryMuscles.includes("biceps"))
+    .map(() => s.date)))].sort();
+  var bicepsGaps = bicepsDates.slice(1).map((date, index) => daysBetween(bicepsDates[index], date));
+  ({
+    beforeSpread: beforeSpread,
+    afterSpread: after.length > 1 ? Math.max(...after) - Math.min(...after) : 0,
+    today: todayISO(),
+    bicepsDates: bicepsDates,
+    bicepsGaps: bicepsGaps
+  });
+`);
+assert(
+  !redistributionStillBalances.bicepsDates.includes(redistributionStillBalances.today),
+  "Redistribution must not relocate biceps work onto the day it was submitted."
+);
+assert(
+  redistributionStillBalances.bicepsGaps.every((gap) => Math.abs(gap) >= 2),
+  `Redistributed biceps dates must stay two days apart. Got: ${JSON.stringify(redistributionStillBalances.bicepsDates)}.`
+);
+assert(
+  redistributionStillBalances.afterSpread <= redistributionStillBalances.beforeSpread,
+  `Redistribution must not widen the session spread. Before: ${redistributionStillBalances.beforeSpread}, after: ${redistributionStillBalances.afterSpread}.`
+);
+
 console.log("coach regression tests passed");

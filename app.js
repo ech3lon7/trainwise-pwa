@@ -6179,124 +6179,58 @@ function redistributeCloneSessions(sessions, sessionMinutes) {
   }));
 }
 
+// Redistribution pass: shared gate for every candidate mutation.
+// validateCoachWeeklySearchSchedule rebuilds direct dates from the candidate sessions themselves,
+// so recovery is judged against the schedule the mutation actually produces rather than the
+// pre-redistribution planned dates, and it re-checks submitted history, the time ceiling, the
+// per-session exercise limit, the two-set minimum, the per-exercise set cap, and duplicate keys.
+// The source must keep at least one item because an empty planned day cannot be balanced further.
+function redistributeValidateCandidate(candidate, setup, sessionMinutes, lastDirect) {
+  if (candidate.some((session) => session.status === "planned" && session.items.length === 0)) return null;
+  if (!validateCoachWeeklySearchSchedule(candidate, setup, { lastDirect, sessionMinutes }).valid) return null;
+  return candidate;
+}
+
 // Redistribution pass: try moving one complete item block from a heavy source session to a light destination.
 // Returns a validated clone if the move improves balance, or null if it fails any constraint.
-function redistributeTryMove(sessions, setup, sourceIndex, itemIndex, destIndex, sessionMinutes) {
+function redistributeTryMove(sessions, setup, sourceIndex, itemIndex, destIndex, sessionMinutes, lastDirect) {
   const source = sessions[sourceIndex];
   const destination = sessions[destIndex];
   if (!source || !destination) return null;
-  const movedItem = source.items[itemIndex];
-  if (!movedItem) return null;
+  if (!source.items[itemIndex]) return null;
   // Moving from heavy to light only — skip if source is not heavier.
   if (source.totalMinutes <= destination.totalMinutes) return null;
   const next = redistributeCloneSessions(sessions, sessionMinutes);
-  const nextSource = next[sourceIndex];
-  const nextDest = next[destIndex];
-  const [moved] = nextSource.items.splice(itemIndex, 1);
-  nextDest.items.push(moved);
-  nextSource.totalMinutes = sessionMinutes(nextSource.items);
-  nextDest.totalMinutes = sessionMinutes(nextDest.items);
-  // Reject if destination would exceed the time ceiling.
-  const maxMinutes = setup.averageMinutes + COACH_TIME_TOLERANCE_MINUTES;
-  if (nextDest.totalMinutes > maxMinutes) return null;
-  // Reject if destination exceeds the exercise limit.
-  if (nextDest.items.length > COACH_MAX_EXERCISES_PER_SESSION) return null;
-  // Reject if recovery is violated for the moved item's primary muscles.
-  if (typeof setup.recoveryClearForDate === "function") {
-    const clear = setup.recoveryClearForDate;
-    for (const muscleId of movedItem.exercise.primaryMuscles) {
-      if (!clear(muscleId, nextDest.date)) return null;
-      // Also check that source still passes recovery for remaining items (no change expected, but validate).
-      for (const item of nextSource.items) {
-        for (const mid of item.exercise.primaryMuscles) {
-          if (!clear(mid, nextSource.date)) return null;
-        }
-      }
-    }
-  }
-  // Reject if the source session lost all items but was supposed to be planned.
-  if (nextSource.items.length === 0 && nextSource.status === "planned") return null;
-  // Reject if any item drops below the 2-set minimum (shouldn't happen with block moves, but guard).
-  for (const session of [nextSource, nextDest]) {
-    for (const item of session.items) {
-      if (item.sets < COACH_MIN_SETS_PER_EXERCISE) return null;
-    }
-  }
-  // Reject if duplicate exercise or conflict key within the destination session.
-  const destIds = new Set();
-  const destConflicts = new Set();
-  for (const item of nextDest.items) {
-    const id = item.exercise.id;
-    const conflictKey = coachExerciseConflictKey(item.exercise);
-    if (destIds.has(id) || destConflicts.has(conflictKey)) return null;
-    destIds.add(id);
-    destConflicts.add(conflictKey);
-  }
-  return next;
+  const [moved] = next[sourceIndex].items.splice(itemIndex, 1);
+  next[destIndex].items.push(moved);
+  next[sourceIndex].totalMinutes = sessionMinutes(next[sourceIndex].items);
+  next[destIndex].totalMinutes = sessionMinutes(next[destIndex].items);
+  return redistributeValidateCandidate(next, setup, sessionMinutes, lastDirect);
 }
 
 // Redistribution pass: try swapping two items of similar duration between sessions.
 // Returns a validated clone if the swap improves balance, or null.
-function redistributeTrySwap(sessions, setup, sourceIndex, sourceItemIndex, destIndex, destItemIndex, sessionMinutes) {
+function redistributeTrySwap(sessions, setup, sourceIndex, sourceItemIndex, destIndex, destItemIndex, sessionMinutes, lastDirect) {
+  if (sourceIndex === destIndex) return null;
   const source = sessions[sourceIndex];
   const destination = sessions[destIndex];
   if (!source || !destination) return null;
-  if (sourceIndex === destIndex) return null;
-  const sourceItem = source.items[sourceItemIndex];
-  const destItem = destination.items[destItemIndex];
-  if (!sourceItem || !destItem) return null;
+  if (!source.items[sourceItemIndex] || !destination.items[destItemIndex]) return null;
   // Only swap if it reduces the imbalance direction — source should be heavier or equal.
   if (source.totalMinutes < destination.totalMinutes) return null;
   const next = redistributeCloneSessions(sessions, sessionMinutes);
-  const nextSource = next[sourceIndex];
-  const nextDest = next[destIndex];
-  // Remove both items and re-insert swapped.
-  const [removedSource] = nextSource.items.splice(sourceItemIndex, 1);
-  const [removedDest] = nextDest.items.splice(destItemIndex, 1);
-  nextDest.items.push(removedSource);
-  nextSource.items.push(removedDest);
-  nextSource.totalMinutes = sessionMinutes(nextSource.items);
-  nextDest.totalMinutes = sessionMinutes(nextDest.items);
-  // Reject if either session exceeds the time ceiling.
-  const maxMinutes = setup.averageMinutes + COACH_TIME_TOLERANCE_MINUTES;
-  if (nextSource.totalMinutes > maxMinutes || nextDest.totalMinutes > maxMinutes) return null;
-  // Reject if either session exceeds the exercise limit.
-  if (nextSource.items.length > COACH_MAX_EXERCISES_PER_SESSION || nextDest.items.length > COACH_MAX_EXERCISES_PER_SESSION) return null;
-  // Reject if recovery is violated.
-  if (typeof setup.recoveryClearForDate === "function") {
-    const clear = setup.recoveryClearForDate;
-    for (const session of [nextSource, nextDest]) {
-      for (const item of session.items) {
-        for (const muscleId of item.exercise.primaryMuscles) {
-          if (!clear(muscleId, session.date)) return null;
-        }
-      }
-    }
-  }
-  // Reject if any item drops below the 2-set minimum.
-  for (const session of [nextSource, nextDest]) {
-    for (const item of session.items) {
-      if (item.sets < COACH_MIN_SETS_PER_EXERCISE) return null;
-    }
-  }
-  // Reject if duplicate exercise or conflict key within either session.
-  for (const session of [nextSource, nextDest]) {
-    const ids = new Set();
-    const conflicts = new Set();
-    for (const item of session.items) {
-      const id = item.exercise.id;
-      const conflictKey = coachExerciseConflictKey(item.exercise);
-      if (ids.has(id) || conflicts.has(conflictKey)) return null;
-      ids.add(id);
-      conflicts.add(conflictKey);
-    }
-  }
-  return next;
+  const [movedSource] = next[sourceIndex].items.splice(sourceItemIndex, 1);
+  const [movedDest] = next[destIndex].items.splice(destItemIndex, 1);
+  next[destIndex].items.push(movedSource);
+  next[sourceIndex].items.push(movedDest);
+  next[sourceIndex].totalMinutes = sessionMinutes(next[sourceIndex].items);
+  next[destIndex].totalMinutes = sessionMinutes(next[destIndex].items);
+  return redistributeValidateCandidate(next, setup, sessionMinutes, lastDirect);
 }
 
 // Redistribution pass: try splitting a large block (≥4 sets) into two halves, moving one half to a light destination.
 // Returns a validated clone if the split improves balance, or null.
-function redistributeTrySplit(sessions, setup, sourceIndex, itemIndex, destIndex, sessionMinutes) {
+function redistributeTrySplit(sessions, setup, sourceIndex, itemIndex, destIndex, sessionMinutes, lastDirect) {
   const source = sessions[sourceIndex];
   const destination = sessions[destIndex];
   if (!source || !destination) return null;
@@ -6308,64 +6242,29 @@ function redistributeTrySplit(sessions, setup, sourceIndex, itemIndex, destIndex
   // Both halves must meet the 2-set minimum.
   if (splitA < COACH_MIN_SETS_PER_EXERCISE || splitB < COACH_MIN_SETS_PER_EXERCISE) return null;
   const next = redistributeCloneSessions(sessions, sessionMinutes);
-  const nextSource = next[sourceIndex];
-  const nextDest = next[destIndex];
   // Replace the original item with splitA in the source.
-  nextSource.items.splice(itemIndex, 1, {
+  next[sourceIndex].items.splice(itemIndex, 1, {
     ...item,
     sets: splitA,
     minutes: estimateExerciseMinutes(item.exercise, splitA)
   });
   // Add splitB to the destination as a new block.
-  nextDest.items.push({
+  next[destIndex].items.push({
     ...item,
     sets: splitB,
     minutes: estimateExerciseMinutes(item.exercise, splitB),
     reason: `${item.muscle.label} was split by the weekly redistribution pass to balance session durations.`
   });
-  nextSource.totalMinutes = sessionMinutes(nextSource.items);
-  nextDest.totalMinutes = sessionMinutes(nextDest.items);
-  // Reject if destination would exceed the time ceiling.
-  const maxMinutes = setup.averageMinutes + COACH_TIME_TOLERANCE_MINUTES;
-  if (nextDest.totalMinutes > maxMinutes) return null;
-  // Reject if destination exceeds the exercise limit.
-  if (nextDest.items.length > COACH_MAX_EXERCISES_PER_SESSION) return null;
-  // Reject if recovery is violated.
-  if (typeof setup.recoveryClearForDate === "function") {
-    const clear = setup.recoveryClearForDate;
-    for (const session of [nextSource, nextDest]) {
-      for (const sessItem of session.items) {
-        for (const muscleId of sessItem.exercise.primaryMuscles) {
-          if (!clear(muscleId, session.date)) return null;
-        }
-      }
-    }
-  }
-  // Reject if any item drops below the 2-set minimum.
-  for (const session of [nextSource, nextDest]) {
-    for (const sessItem of session.items) {
-      if (sessItem.sets < COACH_MIN_SETS_PER_EXERCISE) return null;
-    }
-  }
-  // Reject if duplicate exercise or conflict key within either session.
-  for (const session of [nextSource, nextDest]) {
-    const ids = new Set();
-    const conflicts = new Set();
-    for (const sessItem of session.items) {
-      const id = sessItem.exercise.id;
-      const conflictKey = coachExerciseConflictKey(sessItem.exercise);
-      if (ids.has(id) || conflicts.has(conflictKey)) return null;
-      ids.add(id);
-      conflicts.add(conflictKey);
-    }
-  }
-  return next;
+  next[sourceIndex].totalMinutes = sessionMinutes(next[sourceIndex].items);
+  next[destIndex].totalMinutes = sessionMinutes(next[destIndex].items);
+  return redistributeValidateCandidate(next, setup, sessionMinutes, lastDirect);
 }
 
 // Redistribution pass: main function. Moves exercise blocks between planned sessions to balance durations.
 // Runs after the bounded search optimizer. Only mutates planned sessions; submitted sessions are immutable.
+// lastDirect carries submitted primary-muscle dates so every candidate is checked against real history.
 // Returns void — mutates the sessions array in place and updates projected credits.
-function redistributeCoachWeeklySessions(sessions, projected, setup = {}) {
+function redistributeCoachWeeklySessions(sessions, projected, setup = {}, lastDirect = {}) {
   const averageMinutes = setup.averageMinutes || 30;
   const plannedSessions = sessions.filter((session) => session.status === "planned" && session.items.length > 0);
   if (plannedSessions.length <= 1) return;
@@ -6395,7 +6294,7 @@ function redistributeCoachWeeklySessions(sessions, projected, setup = {}) {
         const sourceIdx = plannedIndices[si];
         const destIdx = plannedIndices[di];
         for (let ii = 0; ii < bestSessions[sourceIdx].items.length && !improved; ii += 1) {
-          const candidate = redistributeTryMove(bestSessions, setup, sourceIdx, ii, destIdx, plannedCoachSessionMinutes);
+          const candidate = redistributeTryMove(bestSessions, setup, sourceIdx, ii, destIdx, plannedCoachSessionMinutes, lastDirect);
           if (!candidate) continue;
           const sig = coachWeeklySearchSignature(candidate);
           if (seen.has(sig)) continue;
@@ -6418,7 +6317,7 @@ function redistributeCoachWeeklySessions(sessions, projected, setup = {}) {
         const destIdx = plannedIndices[di];
         for (let sii = 0; sii < bestSessions[sourceIdx].items.length && !improved; sii += 1) {
           for (let dii = 0; dii < bestSessions[destIdx].items.length && !improved; dii += 1) {
-            const candidate = redistributeTrySwap(bestSessions, setup, sourceIdx, sii, destIdx, dii, plannedCoachSessionMinutes);
+            const candidate = redistributeTrySwap(bestSessions, setup, sourceIdx, sii, destIdx, dii, plannedCoachSessionMinutes, lastDirect);
             if (!candidate) continue;
             const sig = coachWeeklySearchSignature(candidate);
             if (seen.has(sig)) continue;
@@ -6441,7 +6340,7 @@ function redistributeCoachWeeklySessions(sessions, projected, setup = {}) {
         const sourceIdx = plannedIndices[si];
         const destIdx = plannedIndices[di];
         for (let ii = 0; ii < bestSessions[sourceIdx].items.length && !improved; ii += 1) {
-          const candidate = redistributeTrySplit(bestSessions, setup, sourceIdx, ii, destIdx, plannedCoachSessionMinutes);
+          const candidate = redistributeTrySplit(bestSessions, setup, sourceIdx, ii, destIdx, plannedCoachSessionMinutes, lastDirect);
           if (!candidate) continue;
           const sig = coachWeeklySearchSignature(candidate);
           if (seen.has(sig)) continue;
@@ -6467,51 +6366,6 @@ function redistributeCoachWeeklySessions(sessions, projected, setup = {}) {
   // Projected credits are intentionally left untouched: every redistribution mutation preserves
   // stimulus credits exactly (move relocates a block, swap exchanges two blocks, split partitions
   // one block into halves that sum to the original sets), so the caller's totals stay accurate.
-}
-
-// TEMPORARY DEBUG INSTRUMENTATION - remove once the recovery-spacing regression is fixed.
-// Rebuilds each muscle's planned direct-work dates from the item's real exercise primaries,
-// because recovery spacing is enforced on those rather than on the item's target slot.
-function coachWeeklyDirectDates(sessions) {
-  const dates = Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, []]));
-  for (const session of sessions.filter((candidate) => candidate.status === "planned")) {
-    for (const item of session.items) {
-      for (const muscleId of item.exercise.primaryMuscles) {
-        if (dates[muscleId]) dates[muscleId].push(session.date);
-      }
-    }
-  }
-  return Object.fromEntries(Object.entries(dates).map(([muscleId, values]) => [muscleId, [...new Set(values)].sort()]));
-}
-
-// TEMPORARY DEBUG INSTRUMENTATION - remove once the recovery-spacing regression is fixed.
-// Flags any planned direct date that lands within one day of submitted work or of another
-// planned direct date, so the export can show which build stage first introduced the conflict.
-function coachWeeklyRecoveryViolations(directDates, lastDirect) {
-  const violations = [];
-  for (const muscle of muscleGroups) {
-    const planned = directDates[muscle.id] || [];
-    const last = lastDirect?.[muscle.id] || "";
-    const chain = [...(last ? [last] : []), ...planned].sort();
-    for (let index = 1; index < chain.length; index += 1) {
-      if (Math.abs(daysBetween(chain[index - 1], chain[index])) >= 2) continue;
-      const fromSubmitted = Boolean(last) && chain[index - 1] === last && planned.includes(chain[index]);
-      violations.push({
-        muscle: muscle.id,
-        from: chain[index - 1],
-        to: chain[index],
-        source: fromSubmitted ? "submitted->planned" : "planned->planned"
-      });
-    }
-  }
-  return violations;
-}
-
-// TEMPORARY DEBUG INSTRUMENTATION - remove once the recovery-spacing regression is fixed.
-// Captures direct dates plus violations for one point in the build pipeline.
-function coachWeeklyRecoverySnapshot(sessions, lastDirect) {
-  const directDates = coachWeeklyDirectDates(sessions);
-  return { directDates, violations: coachWeeklyRecoveryViolations(directDates, lastDirect) };
 }
 
 function buildCoachWeeklyPlan(setupInput = selectedCoachWeeklyPlan(), options = {}) {
@@ -6658,9 +6512,6 @@ function buildCoachWeeklyPlan(setupInput = selectedCoachWeeklyPlan(), options = 
       });
     }
   });
-  // TEMPORARY DEBUG INSTRUMENTATION - snapshots the plan after greedy placement so the export
-  // can attribute a recovery violation to the stage that introduced it.
-  const recoveryTrace = { lastDirect: clonePlain(lastDirect), afterGreedy: coachWeeklyRecoverySnapshot(sessions, lastDirect) };
   topUpCoachWeeklySessionSets(sessions, projected, setBudgets, setup);
   reallocateCoachWeeklyPriorityShortfalls(sessions, projected, setBudgets, setup, recoveryClearForDate);
   plannedSessions.forEach((session) => {
@@ -6677,7 +6528,6 @@ function buildCoachWeeklyPlan(setupInput = selectedCoachWeeklyPlan(), options = 
     session.items = orderCoachSessionItems(session.items);
     session.totalMinutes = plannedCoachSessionMinutes(session.items);
   });
-  recoveryTrace.afterRepair = coachWeeklyRecoverySnapshot(sessions, lastDirect);
 
   // Run the heavier bounded repair only for Generate, explicit optimization, and debug callers that opt in.
   let optimizer = { mode: "not-run", improved: false, attemptedMoves: 0, acceptedMoves: 0, moveCounts: {}, rejected: {}, shortfalls: [], terminationReason: "not-run", maxStates: 0 };
@@ -6693,13 +6543,11 @@ function buildCoachWeeklyPlan(setupInput = selectedCoachWeeklyPlan(), options = 
     Object.assign(projected, optimized.projected);
     optimizer = optimized.diagnostics;
   }
-  recoveryTrace.afterOptimizer = coachWeeklyRecoverySnapshot(sessions, lastDirect);
 
   // Redistribution pass: balance session durations after the optimizer has filled targets.
   if (options.optimize === true) {
-    redistributeCoachWeeklySessions(sessions, projected, setup);
+    redistributeCoachWeeklySessions(sessions, projected, setup, lastDirect);
   }
-  recoveryTrace.afterRedistribution = coachWeeklyRecoverySnapshot(sessions, lastDirect);
 
   const remainingSets = muscleGroups.reduce((sum, muscle) => sum + Math.max(0, setup.targets[muscle.id] - (actualStats.find((stat) => stat.id === muscle.id)?.sets || 0)), 0);
   const missing = muscleGroups.filter((muscle) => setup.targets[muscle.id] > (projected[muscle.id] || 0) && !hasPrimaryExerciseForMuscle(muscle.id));
@@ -6736,7 +6584,6 @@ function buildCoachWeeklyPlan(setupInput = selectedCoachWeeklyPlan(), options = 
     missing,
     attainment,
     optimizer,
-    recoveryTrace,
     capacity: {
       ...capacity,
       allocatedSetCapacity: budgetAllocation.allocatedCapacity,
@@ -11553,7 +11400,6 @@ function coachDebugWeeklyPlan() {
     capacity: clonePlain(plan.capacity),
     attainment: clonePlain(plan.attainment),
     optimizer: clonePlain(plan.optimizer || null),
-    recoveryTrace: clonePlain(plan.recoveryTrace || null),
     actualSets: Object.fromEntries(plan.actualStats.map((stat) => [stat.id, stat.sets])),
     setBudgets: clonePlain(plan.setBudgets || {}),
     projectedSets: clonePlain(plan.projected),
@@ -11564,9 +11410,6 @@ function coachDebugWeeklyPlan() {
       submittedSets: session.submitted.reduce((sum, workout) => sum + setRowsFromWorkout(workout).length, 0),
       items: session.items.map((item) => ({
         exercise: item.exercise.name,
-        // TEMPORARY DEBUG INSTRUMENTATION - the slot label alone hid which muscle recovery
-        // actually books, so the export now carries the exercise's real primary muscles.
-        primaryMuscles: [...(item.exercise.primaryMuscles || [])],
         muscle: item.muscle.id,
         sets: item.sets,
         configuredLoadingStyle: normalizeLoadingStyle(item.exercise.loadingStyle),
