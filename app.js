@@ -3,7 +3,7 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 3;
 const STORES = ["workouts", "metrics", "settings", "syncQueue"];
-const APP_VERSION = "1.6.7";
+const APP_VERSION = "1.6.8";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 const DRAFT_RECOVERY_KEY = "trainwise-draft-recovery-v1";
 const DATED_STRENGTH_DRAFTS_KEY = "trainwise-strength-drafts-by-date-v1";
@@ -6464,13 +6464,9 @@ function redistributeCoachWeeklySessions(sessions, projected, setup = {}) {
     sessions[index].items = bestMatch.items;
     sessions[index].totalMinutes = bestMatch.totalMinutes;
   }
-  // Recompute projected credits from the balanced schedule to keep them in sync.
-  for (const muscle of muscleGroups) {
-    projected[muscle.id] = Math.max(0, Number(projected[muscle.id]) || 0);
-  }
-  sessions.filter((session) => session.status === "planned").forEach((session) => {
-    session.items.forEach((item) => applyCoachStimulusCredits(projected, item.exercise, item.sets));
-  });
+  // Projected credits are intentionally left untouched: every redistribution mutation preserves
+  // stimulus credits exactly (move relocates a block, swap exchanges two blocks, split partitions
+  // one block into halves that sum to the original sets), so the caller's totals stay accurate.
 }
 
 function buildCoachWeeklyPlan(setupInput = selectedCoachWeeklyPlan(), options = {}) {
@@ -9727,14 +9723,20 @@ function renderCoachWeekDistribution(plan) {
         const projected = plan.projected[muscle.id] || current;
         const target = plan.setup.targets[muscle.id] ?? HYPERTROPHY.minimumSets;
         const width = Math.min(100, (projected / Math.max(target, 1)) * 100);
-        const status = projected < HYPERTROPHY.minimumSets
-          ? { tone: "below-minimum", label: "Below 10-set minimum" }
-          : projected < HYPERTROPHY.growthHigh
-            ? { tone: "below-upper", label: "Below 20 planned sets" }
-            : { tone: "upper-met", label: "20 planned sets reached" };
+        // Weekly marks are independent flags, not mutually exclusive states: red warns that a muscle
+        // sits below the ten-set floor, green confirms the muscle reached its own weekly target, and
+        // orange covers the in-between case where the floor is met but the target is not. A reduced
+        // request can be met while still sitting under the floor, so red and green render together.
+        const belowFloor = projected + 0.001 < HYPERTROPHY.minimumSets;
+        const targetMet = projected + 0.001 >= target;
+        const marks = [
+          ...(belowFloor ? [{ tone: "below-minimum", label: `Below the ${HYPERTROPHY.minimumSets}-set weekly floor` }] : []),
+          ...(targetMet ? [{ tone: "upper-met", label: `Weekly target of ${fmt(target, 1)} sets met` }] : []),
+          ...(!belowFloor && !targetMet ? [{ tone: "below-upper", label: `Below the ${fmt(target, 1)}-set weekly target` }] : [])
+        ];
         return `
           <div class="coach-week-muscle ${plan.setup.priorities.includes(muscle.id) ? "is-priority" : ""}">
-            <div><span class="coach-week-muscle-name"><strong>${escapeHtml(muscle.label)}</strong><span class="coach-week-muscle-status ${status.tone}" role="img" aria-label="${escapeHtml(status.label)}" title="${escapeHtml(status.label)}"></span></span><span>${fmt(current, 1)} banked / ${fmt(projected, 1)} projected / ${fmt(target)} target</span></div>
+            <div><span class="coach-week-muscle-name"><strong>${escapeHtml(muscle.label)}</strong><span class="coach-week-muscle-marks">${marks.map((mark) => `<span class="coach-week-muscle-status ${mark.tone}" role="img" aria-label="${escapeHtml(mark.label)}" title="${escapeHtml(mark.label)}"></span>`).join("")}</span></span><span>${fmt(current, 1)} banked / ${fmt(projected, 1)} projected / ${fmt(target)} target</span></div>
             <div class="progress-track"><span style="width:${width}%"></span></div>
           </div>
         `;

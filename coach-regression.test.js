@@ -2216,9 +2216,35 @@ const weeklyDistributionIndicators = runScenario(`
   });
 `);
 
-assert(weeklyDistributionIndicators.includes("coach-week-muscle-status below-minimum") && weeklyDistributionIndicators.includes('aria-label="Below 10-set minimum"'), "Expected red weekly indicator for projected totals below 10 sets.");
-assert(weeklyDistributionIndicators.includes("coach-week-muscle-status below-upper") && weeklyDistributionIndicators.includes('aria-label="Below 20 planned sets"'), "Expected orange weekly indicator for projected totals from 10 through under 20 sets.");
-assert(weeklyDistributionIndicators.includes("coach-week-muscle-status upper-met") && weeklyDistributionIndicators.includes('aria-label="20 planned sets reached"'), "Expected green weekly indicator at 20 or more projected sets.");
+assert(weeklyDistributionIndicators.includes("coach-week-muscle-status below-minimum") && weeklyDistributionIndicators.includes('aria-label="Below the 10-set weekly floor"'), "Expected red weekly indicator for projected totals below 10 sets.");
+assert(weeklyDistributionIndicators.includes("coach-week-muscle-status below-upper") && weeklyDistributionIndicators.includes('aria-label="Below the 20-set weekly target"'), "Expected orange weekly indicator when the floor is met but the target is not.");
+assert(weeklyDistributionIndicators.includes("coach-week-muscle-status upper-met") && weeklyDistributionIndicators.includes('aria-label="Weekly target of 20 sets met"'), "Expected green weekly indicator once the muscle reaches its own weekly target.");
+
+// Green must follow the per-muscle target rather than the old fixed twenty-set threshold, so a
+// twelve-set week reads as met instead of permanently short.
+const weeklyDistributionTargetDriven = runScenario(`
+  ${resetAndHelpers}
+  renderCoachWeekDistribution({
+    actualStats: muscleGroups.map((muscle) => ({ id: muscle.id, sets: muscle.id === "chest" ? 12 : 0 })),
+    projected: Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, muscle.id === "chest" ? 12 : 6])),
+    setup: { priorities: [], targets: Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, 12])) }
+  });
+`);
+assert(weeklyDistributionTargetDriven.includes('aria-label="Weekly target of 12 sets met"'), "A muscle at its twelve-set target must show the green mark.");
+assert(!weeklyDistributionTargetDriven.includes('aria-label="Below the 12-set weekly target"'), "A muscle at its twelve-set target must not show the orange mark.");
+
+// A reduced request can be met while still sitting under the ten-set floor, so both marks render together.
+const weeklyDistributionReducedWeek = runScenario(`
+  ${resetAndHelpers}
+  renderCoachWeekDistribution({
+    actualStats: muscleGroups.map((muscle) => ({ id: muscle.id, sets: 2 })),
+    projected: Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, 2])),
+    setup: { priorities: [], targets: Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, 2])) }
+  });
+`);
+assert(weeklyDistributionReducedWeek.includes('aria-label="Below the 10-set weekly floor"'), "A reduced two-set week must still warn that it is below the weekly floor.");
+assert(weeklyDistributionReducedWeek.includes('aria-label="Weekly target of 2 sets met"'), "A reduced two-set week must also confirm the requested target was met.");
+assert(weeklyDistributionReducedWeek.includes("below-minimum") && weeklyDistributionReducedWeek.match(/coach-week-muscle-status/g).length >= 20, "Every reduced muscle must render both a red and a green mark in the same row.");
 
 const weeklySetBudgetAllocation = runScenario(`
   ${resetAndHelpers}
@@ -3590,5 +3616,21 @@ const redistributeDeterministic = runScenario(`
   ({ same: sig1 === sig2 });
 `);
 assert(redistributeDeterministic.same, "Identical inputs must produce identical redistribution output.");
+
+// Redistribution pass: projected credits must equal banked sets plus planned stimulus credits exactly once.
+// A redistribution pass that re-applies planned credits on top of the already-projected total double counts
+// them, which inflates the weekly distribution indicator and can falsely show a muscle as 20+ sets.
+const redistributeCreditsNotDoubled = runScenario(`
+  ${resetAndHelpers}
+  var setup = normalizeCoachWeeklyPlan({ days: [1, 2, 3, 4, 5, 6], averageMinutes: 60, priorities: [], targets: Object.fromEntries(muscleGroups.map(m => [m.id, 12])) });
+  var plan = buildCoachWeeklyPlan(setup, { optimize: true });
+  // Independently rebuild the expected projection from banked sets plus one pass over planned items.
+  var expected = Object.fromEntries(muscleGroups.map(m => [m.id, Number(plan.actualStats.find(s => s.id === m.id)?.sets || 0)]));
+  plan.sessions.filter(s => s.status === "planned").forEach(s => s.items.forEach(item => applyCoachStimulusCredits(expected, item.exercise, item.sets)));
+  var mismatches = muscleGroups.map(m => ({ id: m.id, reported: plan.projected[m.id] || 0, expected: expected[m.id] })).filter(e => Math.abs(e.reported - e.expected) > 0.001);
+  ({ mismatches, maxReported: Math.max(...muscleGroups.map(m => plan.projected[m.id] || 0)) });
+`);
+assert.strictEqual(redistributeCreditsNotDoubled.mismatches.length, 0, "Redistribution must not double count projected weekly credits.");
+assert(redistributeCreditsNotDoubled.maxReported < 20, "A twelve-set week must never report a muscle at twenty or more projected sets.");
 
 console.log("coach regression tests passed");

@@ -4489,6 +4489,13 @@ textarea {
   text-align: left;
 }
 
+/* Lays out the independent weekly marks, which can be one or two dots side by side. */
+.coach-week-muscle .coach-week-muscle-marks {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
 .coach-week-muscle .coach-week-muscle-status {
   width: 8px;
   height: 8px;
