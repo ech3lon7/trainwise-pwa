@@ -1,13 +1,14 @@
 "use strict";
 
-const CACHE_NAME = "trainwise-cache-v132";
+// Use a fresh cache for the versioned Coach rotation shell while retaining unchanged image assets.
+const CACHE_NAME = "trainwise-cache-v133";
 const ASSETS = [
   "./",
   "./index.html",
-  "./styles.css?v=1.6.9",
-  "./app.js?v=1.6.9",
-  "./manifest.webmanifest?v=1.6.9",
-  "./icon.svg?v=1.6.9",
+  "./styles.css?v=1.6.10",
+  "./app.js?v=1.6.10",
+  "./manifest.webmanifest?v=1.6.10",
+  "./icon.svg?v=1.6.10",
   "./icon-512.png?v=1.6.6",
   "./apple-touch-icon.png?v=1.6.6",
   "./assets/muscles/abs.png?v=1.5.43",

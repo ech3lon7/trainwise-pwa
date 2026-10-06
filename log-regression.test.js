@@ -197,9 +197,10 @@ assert(!appCode.includes('selectedExercise: "Push-up"'), "Expected Log startup n
 assert(!appCode.includes('showBanner("Unsaved draft restored."'), "Expected startup draft recovery not to show a top banner.");
 assert(appCode.includes("notifyMetricSaved"), "Expected metrics saves to use a dedicated bottom-only notification helper.");
 assert(!stylesCode.includes(".mobile-quick-toggle"), "Expected floating quick action button styling to be removed.");
-assert(indexCode.includes("v=1.6.9"), "Expected index shell references to use bumped app version.");
+// Keep shell/cache expectations aligned with the release that contains exercise rotation.
+assert(indexCode.includes("v=1.6.10"), "Expected index shell references to use bumped app version.");
 assert(!indexCode.includes('id="app" class="app-content" aria-live'), "Expected broad app aria-live to be removed in favor of targeted live regions.");
-assert(serviceWorkerCode.includes("trainwise-cache-v132"), "Expected service worker cache version bump.");
+assert(serviceWorkerCode.includes("trainwise-cache-v133"), "Expected service worker cache version bump.");
 // The mobile tab bar must anchor to the visible bottom edge and compact only during active scrolling.
 assert(/\.tabbar\s*\{[^}]*top:\s*auto;[^}]*bottom:\s*env\(safe-area-inset-bottom\)/s.test(stylesCode), "Expected the tab bar to use a stable bottom safe-area anchor instead of a dynamic viewport top offset.");
 assert(stylesCode.includes(".tabbar.is-scrolling") && appCode.includes("updateTabbarScrollState"), "Expected the tab bar to shrink during scrolling and restore after scrolling stops.");
@@ -3029,5 +3030,33 @@ const exerciseAliasRollback = runScenario(`
 assert.strictEqual(exerciseAliasRollback.aliasRemoved, true, "Expected rollback to remove only the selected alias.");
 assert.strictEqual(exerciseAliasRollback.restoredArchivedAt, "", "Expected rollback to restore a duplicate archived by the merge.");
 assert.strictEqual(exerciseAliasRollback.laterArchivePreserved, "2026-07-01T12:00:00.000Z", "Expected rollback not to undo a later independent archive choice.");
+
+// Saved rotation notices must survive serialization and legacy reload without regenerating placements or touching Log drafts.
+const rotationSnapshotReload = runScenario(`
+  ${reset}
+  var setup = normalizeCoachWeeklyPlan({ days: [new Date().getDay()], averageMinutes: 60 });
+  var sessions = [{ day: new Date().getDay(), date: todayISO(), status: "planned", submitted: [], items: [coachWeeklySearchItem(resolveExerciseMeta("Bench Press"), muscleGroups.find(m => m.id === "chest"), 4)], totalMinutes: 12 }];
+  var audit = coachExerciseRotationAudit(sessions, setup, { terminationReason: "candidate-limit" });
+  var plan = { setup, sessions, actualStats: muscleGroups.map(m => ({ ...m, sets: 0 })), projected: {}, setBudgets: {}, missing: [], capacity: {}, attainment: { unmet: [], floorUnmet: [] }, rotation: audit };
+  setup.generatedPlan = JSON.parse(JSON.stringify(compactCoachWeeklyPlanSnapshot(plan)));
+  state.settings.coachWeeklyPlan = setup;
+  var draftBefore = JSON.stringify(state.workoutDraft);
+  var restored = displayedCoachWeeklyPlan(setup);
+  var markup = renderCoachExerciseRotation(restored.rotation);
+  var savedItems = JSON.stringify(restored.sessions.map(s => s.items.map(i => ({ id: i.exercise.id, sets: i.sets }))));
+  var rotateBefore = rotateCoachWeeklyExercises;
+  rotateCoachWeeklyExercises = () => { throw new Error("Viewing a snapshot must not run rotation"); };
+  delete setup.generatedPlan.rotation;
+  var legacy = displayedCoachWeeklyPlan(setup);
+  rotateCoachWeeklyExercises = rotateBefore;
+  var escaped = renderCoachExerciseRotation({ entries: [{ exercise: "<script>bad</script>", status: "deferred", plannedDates: [], reason: "<img src=x>" }] });
+  ({ auditRestored: JSON.stringify(restored.rotation) === JSON.stringify(audit), legacyEntries: legacy.rotation.entries.length,
+     placementsUnchanged: savedItems === JSON.stringify(legacy.sessions.map(s => s.items.map(i => ({ id: i.exercise.id, sets: i.sets })))),
+     draftUnchanged: draftBefore === JSON.stringify(state.workoutDraft), markup, escaped });
+`);
+assert(rotationSnapshotReload.auditRestored && rotationSnapshotReload.placementsUnchanged && rotationSnapshotReload.draftUnchanged, "Reload must preserve saved explanations, exercise placements, prescriptions, and the current draft.");
+assert.strictEqual(rotationSnapshotReload.legacyEntries, 2, "Older snapshots need a complete active-library audit without regeneration.");
+assert(rotationSnapshotReload.markup.includes("1 deferred / 2 active") && rotationSnapshotReload.markup.includes("still queued, not proven impossible"), "The visible summary and disclosure must expose deferred work and honest search limits.");
+assert(rotationSnapshotReload.escaped.includes("&lt;script&gt;") && !rotationSnapshotReload.escaped.includes("<script>"), "Exercise names and explanations must remain escaped in the UI.");
 
 console.log("log regression tests passed");

@@ -3,7 +3,8 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 3;
 const STORES = ["workouts", "metrics", "settings", "syncQueue"];
-const APP_VERSION = "1.6.9";
+// Advance the installed shell version so the service worker can deliver the rotation fix.
+const APP_VERSION = "1.6.10";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 const DRAFT_RECOVERY_KEY = "trainwise-draft-recovery-v1";
 const DATED_STRENGTH_DRAFTS_KEY = "trainwise-strength-drafts-by-date-v1";
@@ -3593,6 +3594,14 @@ function scoreExerciseForMuscle(exercise, muscleId, options = {}) {
   return familiarityScore + customScore + selectedScore + specificityScore + targetScore + effortScore + progressionScore + stimulusPriorityScore - recencyPenalty - weeklyUsePenalty - performancePenalty;
 }
 
+// Give every eligible definition a turn before newer submitted uses; ordinary scores break equal-date ties.
+function compareCoachExerciseRotation(a, b) {
+  return Number(b.eligible) - Number(a.eligible)
+    || String(a.memory.last?.date || "").localeCompare(String(b.memory.last?.date || ""))
+    || b.score - a.score
+    || a.exercise.id.localeCompare(b.exercise.id);
+}
+
 function coachExerciseCandidates(muscleId, usedExerciseIds = new Set(), options = {}) {
   const workouts = options.workouts || coachWorkoutEntries();
   const usedExerciseConflictKeys = options.usedExerciseConflictKeys instanceof Set ? options.usedExerciseConflictKeys : new Set();
@@ -3603,7 +3612,12 @@ function coachExerciseCandidates(muscleId, usedExerciseIds = new Set(), options 
       && !usedExerciseConflictKeys.has(coachExerciseConflictKey(exercise))
     ));
   if (!candidates.length) return [];
-  const memories = candidates.map((exercise) => coachExerciseMemory(exercise, workouts));
+  // Evaluate cooldowns on the proposed session date without advancing rotation from unsaved plans.
+  const memories = candidates.map((exercise) => {
+    const memory = coachExerciseMemory(exercise, workouts);
+    const daysSince = memory.last ? daysBetween(memory.last.date, options.date || todayISO()) : null;
+    return { ...memory, daysSince, recentlyUsed: daysSince !== null && daysSince < COACH_SAME_EXERCISE_COOLDOWN_DAYS };
+  });
   const maxWeeklyUses = Math.max(0, ...memories.map((memory) => memory.weeklyUses));
   const maxLifetimeUses = Math.max(0, ...memories.map((memory) => memory.history.length));
   return candidates
@@ -3626,7 +3640,7 @@ function coachExerciseCandidates(muscleId, usedExerciseIds = new Set(), options 
           && !memory.usedThisWeekTooOften
       };
     })
-    .sort((a, b) => b.score - a.score);
+    .sort(compareCoachExerciseRotation);
 }
 
 function chooseExerciseForMuscle(muscleId, usedExerciseIds = new Set(), options = {}) {
@@ -5068,7 +5082,10 @@ function coachBriefingSummary(plan) {
 }
 
 function attachCoachBriefing(plan) {
-  return { ...plan, briefing: coachBriefingSummary(plan) };
+  // Explain Today omissions from the actual session without generating or advancing another plan.
+  const sessions = [{ date: todayISO(), status: "planned", items: plan.sessionPlan?.items || [] }];
+  const targets = Object.fromEntries(coachMuscleSetStats().map((muscle) => [muscle.id, Math.max(HYPERTROPHY.minimumSets, muscle.sets)]));
+  return { ...plan, rotation: plan.rotation || coachExerciseRotationAudit(sessions, { targets }), briefing: coachBriefingSummary(plan) };
 }
 
 function normalizeCoachWeeklyPlan(value = {}) {
@@ -5550,7 +5567,9 @@ function finalizeCoachWeeklyGeneratedPlan(setupInput, generatedPlan) {
     projected,
     attainment,
     capacity: { ...generatedPlan.capacity, detail: generatedPlan.capacity.detail || generatedPlan.capacity.message, requestedSets: muscleGroups.reduce((sum, muscle) => sum + Math.max(0, setup.targets[muscle.id] - (generatedPlan.actualStats?.find((stat) => stat.id === muscle.id)?.sets || 0)), 0), fits: !attainment.unmet.length, message: `${summary}${floorWarning}` },
-    targetAdjustments: generatedPlan.targetAdjustments || []
+    targetAdjustments: generatedPlan.targetAdjustments || [],
+    // Store omission explanations against the final selected schedule, including partial plans.
+    rotation: coachExerciseRotationAudit(generatedPlan.sessions, setup, generatedPlan.rotationSearch)
   };
 }
 
@@ -5951,7 +5970,9 @@ function optimizeCoachWeeklySchedule({ sessions = [], baseProjected = {}, setup:
   let best = initialState;
   let frontier = [initialState];
   let hitLimit = false;
-  const candidateCatalog = new Map(muscleGroups.map((muscle) => [muscle.id, coachExerciseCandidates(muscle.id).filter((candidate) => candidate.eligible)]));
+  // Future sessions may use an exercise after today's cooldown clears; the full validator still checks recovery.
+  const lastPlannedDate = sessions.filter((session) => session.status === "planned").map((session) => session.date).sort().at(-1);
+  const candidateCatalog = new Map(muscleGroups.map((muscle) => [muscle.id, coachExerciseCandidates(muscle.id, new Set(), { date: lastPlannedDate }).filter((candidate) => candidate.eligible)]));
   const performanceByExercise = new Map();
   candidateCatalog.forEach((candidates) => candidates.forEach((candidate) => performanceByExercise.set(candidate.exercise.id, { performanceSignal: candidate.signal, planTarget: coachPlanTargetForExercise(candidate.exercise, candidate.signal) })));
 
@@ -5997,6 +6018,17 @@ function optimizeCoachWeeklySchedule({ sessions = [], baseProjected = {}, setup:
     }
     attemptedMoves += 1;
     moveCounts[kind] = (moveCounts[kind] || 0) + 1;
+    // A future-eligible candidate must also clear its cooldown and failure guard on the actual proposed date.
+    const blockedExercise = nextSessions.filter((session) => session.status === "planned").some((session) => session.items.some((item) => {
+      const candidate = (candidateCatalog.get(item.muscle.id) || []).find((entry) => entry.exercise.id === item.exercise.id);
+      if (!candidate?.memory.last) return false;
+      const gap = daysBetween(candidate.memory.last.date, session.date);
+      return gap < COACH_SAME_EXERCISE_COOLDOWN_DAYS || (candidate.signal.status === "repeated-failure" && gap < COACH_FAILURE_ROTATION_DAYS);
+    }));
+    if (blockedExercise) {
+      recordRejected(muscleId, "missing-or-performance-coverage", kind);
+      return;
+    }
     const validation = validateCoachWeeklySearchSchedule(nextSessions, setup, { exercises, lastDirect, recoveryClearForDate, sessionMinutes: timing.sessionMinutes });
     if (!validation.valid) {
       recordRejected(muscleId, validation.reason, kind);
@@ -6368,6 +6400,150 @@ function redistributeCoachWeeklySessions(sessions, projected, setup = {}, lastDi
   // one block into halves that sum to the original sets), so the caller's totals stay accurate.
 }
 
+// Restore waiting exercise turns after target repair by exchanging existing work, never padding the week.
+function rotateCoachWeeklyExercises(plan, options = {}) {
+  const exercises = exerciseDatabase();
+  const setup = plan.setup;
+  const timing = coachWeeklySearchTiming(exercises);
+  const lastDirect = Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, latestDirectMuscleDate(muscle.id)]));
+  const baseProjected = Object.fromEntries(plan.actualStats.map((muscle) => [muscle.id, muscle.sets]));
+  const diagnostics = { attemptedCandidates: 0, maxCandidates: Math.max(0, Number(options.maxRotationCandidates ?? 1200)), rejected: {}, terminationReason: "complete" };
+  let sessions = cloneCoachWeeklySearchSessions(plan.sessions, timing.sessionMinutes);
+  const seed = validateCoachWeeklySearchSchedule(sessions, setup, { exercises, lastDirect, sessionMinutes: timing.sessionMinutes });
+  if (!seed.valid) return { ...plan, rotationSearch: { ...diagnostics, terminationReason: "invalid-seed" } };
+
+  // Freeze history and prescriptions once; newly planned turns do not become submitted history.
+  const dates = sessions.filter((session) => session.status === "planned").map((session) => session.date);
+  const catalog = muscleGroups.flatMap((muscle) => coachExerciseCandidates(muscle.id, new Set(), { date: dates.at(-1) || todayISO() }));
+  const candidates = [...new Map(catalog.map((candidate) => [candidate.exercise.id, candidate])).values()].sort(compareCoachExerciseRotation);
+  const submitted = new Set(coachWeeklyWorkouts().map((workout) => effectiveWorkoutExerciseId(workout)));
+  const protectedTurns = new Set();
+  const coverage = (schedule, id) => submitted.has(id) || schedule.some((session) => session.status === "planned" && session.items.some((item) => item.exercise.id === id));
+  const required = Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, Math.min(setup.targets[muscle.id], plan.projected[muscle.id] || 0)]));
+
+  // Try small splits first, then complete replacements, retaining every accepted older turn.
+  for (const candidate of candidates) {
+    if (!candidate.eligible || coverage(sessions, candidate.exercise.id)) continue;
+    const exercise = candidate.exercise;
+    const performanceSignal = candidate.signal;
+    const planTarget = coachPlanTargetForExercise(exercise, performanceSignal);
+    let placed = false;
+    const rejected = {};
+    for (const portion of ["split", "whole"]) {
+      for (let sourceIndex = 0; sourceIndex < sessions.length && !placed; sourceIndex += 1) {
+        const source = sessions[sourceIndex];
+        if (source.status !== "planned") continue;
+        for (let itemIndex = 0; itemIndex < source.items.length && !placed; itemIndex += 1) {
+          const donor = source.items[itemIndex];
+          if (["reset", "deload"].includes(donor.planTarget?.kind)) continue;
+          const sets = portion === "split" ? COACH_MIN_SETS_PER_EXERCISE : donor.sets;
+          if (portion === "split" && donor.sets < COACH_MIN_SETS_PER_EXERCISE * 2) continue;
+          for (let destIndex = 0; destIndex < sessions.length && !placed; destIndex += 1) {
+            if (sessions[destIndex].status !== "planned") continue;
+            if (diagnostics.attemptedCandidates >= diagnostics.maxCandidates) {
+              diagnostics.terminationReason = "candidate-limit";
+              break;
+            }
+            diagnostics.attemptedCandidates += 1;
+            const next = cloneCoachWeeklySearchSessions(sessions, timing.sessionMinutes);
+            const nextSource = next[sourceIndex];
+            if (portion === "split") nextSource.items[itemIndex].sets -= sets;
+            else nextSource.items.splice(itemIndex, 1);
+            const muscle = muscleGroups.find((group) => exercise.primaryMuscles.includes(group.id));
+            if (!muscle) continue;
+            next[destIndex].items.push(coachWeeklySearchItem(exercise, muscle, sets, "rotation", { performanceSignal, planTarget, exerciseMinutes: timing.exerciseMinutes }));
+
+            // Check cooldowns, actual and planned recovery, coverage, targets, conflicts, and time on the entire trial.
+            const daysSince = candidate.memory.last ? daysBetween(candidate.memory.last.date, next[destIndex].date) : null;
+            let reason = daysSince !== null && daysSince < COACH_SAME_EXERCISE_COOLDOWN_DAYS ? "exercise-cooldown" : "";
+            // Preserve the longer failure rotation window even when a later selected day made the candidate eligible.
+            if (!reason && candidate.signal.status === "repeated-failure" && daysSince !== null && daysSince < COACH_FAILURE_ROTATION_DAYS) reason = "performance-safeguard";
+            if (!reason && protectedTurns.has(donor.exercise.id) && !coverage(next, donor.exercise.id)) reason = "queued-rotation";
+            if (!reason && portion === "whole" && !coverage(next, donor.exercise.id)) {
+              const donorMemory = candidates.find((entry) => entry.exercise.id === donor.exercise.id)?.memory;
+              if (String(candidate.memory.last?.date || "") >= String(donorMemory?.last?.date || "")) reason = "queued-rotation";
+            }
+            if (!reason) reason = validateCoachWeeklySearchSchedule(next, setup, { exercises, lastDirect, sessionMinutes: timing.sessionMinutes }).reason;
+            const projected = coachWeeklySearchProjection(baseProjected, next);
+            if (!reason && muscleGroups.some((group) => projected[group.id] + 0.001 < required[group.id])) reason = "target-volume";
+            if (reason) {
+              rejected[reason] = (rejected[reason] || 0) + 1;
+              continue;
+            }
+            sessions = next;
+            protectedTurns.add(exercise.id);
+            placed = true;
+          }
+          if (diagnostics.terminationReason === "candidate-limit") break;
+        }
+        if (diagnostics.terminationReason === "candidate-limit") break;
+      }
+      if (placed || diagnostics.terminationReason === "candidate-limit") break;
+    }
+    diagnostics.rejected[exercise.id] = rejected;
+    if (diagnostics.terminationReason === "candidate-limit") break;
+  }
+
+  // Recalculate credits once and return ordered sessions; past/completed sessions keep their original objects.
+  const finalSessions = plan.sessions.map((session, index) => session.status === "planned"
+    ? { ...sessions[index], items: orderCoachSessionItems(sessions[index].items) } : session);
+  return { ...plan, sessions: finalSessions, projected: coachWeeklySearchProjection(baseProjected, finalSessions), rotationSearch: diagnostics };
+}
+
+// Account for every active exercise and report measured constraints instead of silently omitting a definition.
+function coachExerciseRotationAudit(sessions = [], setup = {}, search = {}) {
+  const planned = sessions.filter((session) => session.status === "planned" && session.date >= todayISO());
+  const dates = planned.map((session) => session.date).sort();
+  const conflicts = coachExerciseDefinitionConflicts();
+  const lastDirect = Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, latestDirectMuscleDate(muscle.id)]));
+  const catalog = muscleGroups.flatMap((muscle) => coachExerciseCandidates(muscle.id, new Set(), { date: dates.at(-1) || todayISO() }));
+  // Exact-name duplicates are filtered from selection, but their active IDs still need an explicit conflict notice.
+  activeExerciseDefinitionsById().filter((exercise) => !catalog.some((candidate) => candidate.exercise.id === exercise.id)).forEach((exercise) => {
+    catalog.push({ exercise, memory: coachExerciseMemory(exercise), signal: coachExercisePerformanceSignal(exercise), eligible: false, score: 0 });
+  });
+  const candidates = [...new Map(catalog.map((candidate) => [candidate.exercise.id, candidate])).values()].sort(compareCoachExerciseRotation);
+  const submitted = coachWeeklyWorkouts();
+  // Distinguish already-covered muscle volume from an exercise turn that still waits in the rotation queue.
+  const baseProjected = Object.fromEntries(muscleSetStats(submitted).map((muscle) => [muscle.id, muscle.sets]));
+  const projected = coachWeeklySearchProjection(baseProjected, planned);
+  const entries = candidates.map((candidate) => {
+    const exercise = candidate.exercise;
+    const submittedDates = [...new Set(exerciseHistoryForDefinition(exercise, submitted).map((workout) => workout.date))];
+    const plannedDates = planned.filter((session) => session.items.some((item) => item.exercise.id === exercise.id)).map((session) => session.date);
+    const status = submittedDates.length ? "submitted" : plannedDates.length ? "planned" : "deferred";
+    let reason = submittedDates.length ? `Submitted ${submittedDates.join(", ")}.` : plannedDates.length ? `Planned ${plannedDates.join(", ")}.` : "";
+    const conflict = conflicts.find((item) => item.key === coachExerciseConflictKey(exercise));
+
+    // Recovery and cooldown exclusions take precedence over softer packing and volume explanations.
+    if (status === "deferred") {
+      const recoveryDates = dates.filter((date) => exercise.primaryMuscles.every((id) => !lastDirect[id] || daysBetween(lastDirect[id], date) >= COACH_MUSCLE_RECOVERY_DAYS));
+      const cooldownDates = recoveryDates.filter((date) => !candidate.memory.last || daysBetween(candidate.memory.last.date, date) >= COACH_SAME_EXERCISE_COOLDOWN_DAYS);
+      const failureDates = cooldownDates.filter((date) => candidate.signal.status !== "repeated-failure" || !candidate.memory.last || daysBetween(candidate.memory.last.date, date) >= COACH_FAILURE_ROTATION_DAYS);
+      const rejections = search.rejected?.[exercise.id] || {};
+      if (!dates.length) reason = "No remaining selected training date; queued for the next plan.";
+      else if (!recoveryDates.length) reason = "Primary-muscle recovery blocks the remaining dates; queued until recovery clears.";
+      else if (!cooldownDates.length) reason = "Same-exercise cooldown blocks the remaining dates; queued until it clears.";
+      else if (!failureDates.length) reason = "Repeated-failure safeguard blocks the remaining dates; queued until it clears.";
+      else if (candidate.memory.usedThisWeekTooOften) reason = "Weekly exercise use cap reached; queued for next week.";
+      else if (conflict) reason = `Exercise library conflict: ${conflict.names.join(" / ")}. Review these definitions in Exercises.`;
+      else if (search.terminationReason === "candidate-limit") reason = "Rotation search reached its limit; still queued, not proven impossible.";
+      else if (search.terminationReason === "invalid-seed") reason = "Existing schedule failed validation; rotation left it unchanged.";
+      else if (rejections["target-volume"]) reason = "No tested replacement preserved muscle target coverage; still queued.";
+      else if (rejections["time-limit"]) reason = "Tested replacements exceeded the selected timeframe; still queued.";
+      else if (rejections["exercise-limit"]) reason = "Tested replacements exceeded the six-exercise session limit; still queued.";
+      else if (rejections["recovery-spacing"] || rejections["exercise-cooldown"]) reason = "Tested replacements conflicted with recovery or cooldown spacing; still queued.";
+      else if (rejections["performance-safeguard"]) reason = "Tested replacements conflicted with the repeated-failure safeguard; still queued.";
+      else if (rejections["duplicate-conflict"]) reason = "Tested replacements conflicted with an exercise already in the session; still queued.";
+      else if (exercise.primaryMuscles.every((id) => projected[id] >= (setup.targets?.[id] ?? HYPERTROPHY.minimumSets))) reason = "Muscle target volume is already covered; exercise remains queued for a later direct turn.";
+      else reason = "Queued for a later rotation turn; available work is assigned to the current plan.";
+    }
+    // A submitted or planned definition can still belong to a conflicting family that needs review.
+    if (status !== "deferred" && conflict) reason += ` Exercise library conflict: ${conflict.names.join(" / ")}. Review in Exercises.`;
+    return { exerciseId: exercise.id, exercise: exercise.name, lastSubmittedDate: candidate.memory.last?.date || "", status, submittedDates, plannedDates, reason };
+  });
+  return { version: "exercise-rotation-v1", entries, search: clonePlain(search) };
+}
+
 function buildCoachWeeklyPlan(setupInput = selectedCoachWeeklyPlan(), options = {}) {
   const setup = normalizeCoachWeeklyPlan(setupInput);
   // Solve floors independently before allowing growth; a blocked floor keeps the usable floor-only schedule.
@@ -6375,10 +6551,13 @@ function buildCoachWeeklyPlan(setupInput = selectedCoachWeeklyPlan(), options = 
     const floorSetup = normalizeCoachWeeklyPlan({ ...setup, priorities: [], targets: Object.fromEntries(muscleGroups.map((muscle) => [muscle.id, Math.min(10, setup.targets[muscle.id])])) });
     const floorPlan = buildCoachWeeklyPlan(floorSetup, { ...options, floorPass: true });
     if (floorPlan.attainment.floorUnmet.length || muscleGroups.every((muscle) => setup.targets[muscle.id] <= 10)) {
-      return finalizeCoachWeeklyGeneratedPlan(setup, floorPlan);
+      // Apply exercise rotation once, after the outer floor/growth result has been chosen.
+      return finalizeCoachWeeklyGeneratedPlan(setup, options.optimize === true ? rotateCoachWeeklyExercises(floorPlan, options) : floorPlan);
     }
     const growthPlan = buildCoachWeeklyPlan(setup, { ...options, floorPass: true });
-    return finalizeCoachWeeklyGeneratedPlan(setup, growthPlan.attainment.floorUnmet.length ? floorPlan : growthPlan);
+    // Protect final exercise turns from subsequent target trimming or recursive repair.
+    const chosenPlan = growthPlan.attainment.floorUnmet.length ? floorPlan : growthPlan;
+    return finalizeCoachWeeklyGeneratedPlan(setup, options.optimize === true ? rotateCoachWeeklyExercises(chosenPlan, options) : chosenPlan);
   }
   const weekStart = currentTrainingWeekStart();
   const selectedDates = setup.days
@@ -6456,8 +6635,9 @@ function buildCoachWeeklyPlan(setupInput = selectedCoachWeeklyPlan(), options = 
     }));
     // Exclude singular/plural duplicates of exercises already assigned to this generated day.
     const usedExerciseConflictKeys = new Set(session.items.map((item) => coachExerciseConflictKey(item.exercise)));
-    const exerciseCandidates = coachExerciseCandidates(muscle.id, session.usedExercises, { stimulusNeeds, usedExerciseConflictKeys })
-      .sort((a, b) => (plannedExerciseUses.get(a.exercise.id) || 0) - (plannedExerciseUses.get(b.exercise.id) || 0) || b.score - a.score);
+    // Avoid repeating a planned exercise while another eligible definition is waiting for its turn.
+    const exerciseCandidates = coachExerciseCandidates(muscle.id, session.usedExercises, { stimulusNeeds, usedExerciseConflictKeys, date: session.date })
+      .sort((a, b) => Number(b.eligible) - Number(a.eligible) || (plannedExerciseUses.get(a.exercise.id) || 0) - (plannedExerciseUses.get(b.exercise.id) || 0) || compareCoachExerciseRotation(a, b));
     const chosen = exerciseCandidates.find((candidate) => candidate.eligible) || exerciseCandidates[0];
     if (!chosen || !isActiveCoachExercise(chosen.exercise)) return false;
     // Weekly sessions use the same two-set minimum as Today's Plan, even for a one-set remaining gap.
@@ -6624,7 +6804,9 @@ function compactCoachWeeklyPlanSnapshot(plan) {
     attainment: clonePlain(plan.attainment),
     optimizer: clonePlain(plan.optimizer || null),
     targetAdjustments: clonePlain(plan.targetAdjustments || []),
-    capacityAction: plan.capacityAction || ""
+    capacityAction: plan.capacityAction || "",
+    // Persist the generation-time audit alongside placements, without changing older snapshot requirements.
+    rotation: clonePlain(plan.rotation || null)
   };
 }
 
@@ -6678,6 +6860,8 @@ function displayedCoachWeeklyPlan(setupInput = selectedCoachWeeklyPlan()) {
     capacity: clonePlain(snapshot.capacity || {}),
     attainment: clonePlain(snapshot.attainment || {}),
     optimizer: clonePlain(snapshot.optimizer || null),
+    // Older snapshots gain explanations only; restoring a view never reruns rotation or moves exercises.
+    rotation: clonePlain(snapshot.rotation || coachExerciseRotationAudit(sessions, setup)),
     targetAdjustments: clonePlain(snapshot.targetAdjustments || []),
     capacityAction: snapshot.capacityAction || "",
     stale: invalidExercise || !setup.sourceFingerprint || setup.sourceFingerprint !== currentFingerprint
@@ -9669,6 +9853,16 @@ function coachWeeklyTargetAdjustmentMessage(adjustments = []) {
   return `${visible.join(", ")}${remainder ? `, and ${remainder} more` : ""}.`;
 }
 
+// Reuse the existing disclosure and warning styles to expose every scheduled or deferred exercise by name.
+function renderCoachExerciseRotation(rotation) {
+  if (!rotation?.entries?.length) return "";
+  const deferred = rotation.entries.filter((entry) => entry.status === "deferred");
+  return `<details class="section chart-panel collapsible-panel"><summary><span>Exercise rotation</span><small>${deferred.length} deferred / ${rotation.entries.length} active</small></summary>
+    <p>${deferred.length ? "Deferred exercises stay in rotation. Review their constraints below." : "Every active exercise is submitted or planned."}</p>
+    ${rotation.entries.map((entry) => `<p><strong>${escapeHtml(entry.exercise)}</strong>: ${escapeHtml(entry.reason)}${entry.status === "submitted" && entry.plannedDates.length ? ` Also planned ${escapeHtml(entry.plannedDates.join(", "))}.` : ""}</p>`).join("")}
+  </details>`;
+}
+
 // Surface active near-duplicate definitions without guessing which stored muscle assignment is correct.
 function renderCoachWeekExerciseConflictWarning(conflicts = coachExerciseDefinitionConflicts()) {
   if (!conflicts.length) return "";
@@ -9700,6 +9894,7 @@ function renderCoachWeek() {
     ${plan.capacityAction ? `<section class="section coach-week-capacity"><strong>${plan.capacityAction === "fix" ? "Capacity adjustment" : "Optimization result"}</strong><p>${plan.targetAdjustments?.length ? escapeHtml(coachWeeklyTargetAdjustmentMessage(plan.targetAdjustments)) : "Targets unchanged."} ${plan.attainment.unmet.length ? `${plan.attainment.unmet.length} targets remain short in the feasible schedule.` : "All requested targets are covered."}</p></section>` : ""}
     <section class="section coach-week-capacity ${plan.capacity.fits ? "good" : "warn"}"><strong>${plan.capacity.fits ? "All weekly targets are planned" : "Some weekly targets remain short"}</strong><p>${escapeHtml(plan.capacity.message)}</p></section>
     ${plan.attainment.unmet.length ? `<details class="section collapsible-panel"><summary><span>Target shortfalls</span><small>${plan.attainment.unmet.length} muscles</small></summary>${plan.attainment.unmet.map((item) => `<p><strong>${escapeHtml(item.label)}</strong>: ${fmt(item.planned, 1)}/${fmt(item.target, 1)} (${fmt(item.target - item.planned, 1)} short). ${escapeHtml(plan.attainment.floorUnmet.length && item.planned >= 10 ? "Above-floor work waits for all weekly floors." : coachWeeklySearchReasonLabel(plan.optimizer?.shortfalls?.find((shortfall) => shortfall.id === item.id)?.reason))}</p>`).join("")}</details>` : ""}
+    ${renderCoachExerciseRotation(plan.rotation)}
     <details class="section chart-panel collapsible-panel" open><summary><span>Weekly distribution</span><small>${escapeHtml(coachWeekScheduleSummary(plan.setup))}</small></summary>${renderCoachWeekDistribution(plan)}</details>
     <section class="section coach-week-days">${plan.sessions.map(renderCoachWeekDay).join("")}</section>
   `;
@@ -9948,6 +10143,7 @@ function renderCoach() {
     ${renderCoachGrowthModeSelector()}
     ${renderCoachTargetSelector()}
     ${renderTodayPlan(todayPlan)}
+    ${renderCoachExerciseRotation(todayPlan.rotation)}
     <details class="section chart-panel collapsible-panel muscle-audit-panel" open>
       <summary><span>Muscle set audit</span><small>10 set floor, 12-20 growth zone</small></summary>
       ${muscleProgressMarkup(coachMuscleSetStats())}
@@ -11165,6 +11361,8 @@ function coachDebugPlanSummary(plan) {
     restart: Boolean(sessionPlan.restart),
     shortfallReason: sessionPlan.shortfallReason || "",
     contractNotes: sessionPlan.contractNotes || [],
+    // Export the same exercise explanations displayed for Today, without inferring them from muscle totals.
+    rotation: clonePlain(plan.rotation || null),
     items: (sessionPlan.items || []).map((item) => ({
       muscle: item.muscle?.label || "",
       muscleId: item.muscle?.id || "",
@@ -11395,6 +11593,10 @@ function coachDebugWeeklyPlan() {
   // Debug exports run bounded repair so rejected moves and termination reasons describe the generated path users receive.
   const plan = buildCoachWeeklyPlan(normalizeCoachWeeklyPlan(state.settings.coachWeeklyPlan || {}), { optimize: true });
   return {
+    // Keep the existing recalculated fields while identifying saved placements and their original explanations separately.
+    calculationSource: "recalculated",
+    savedPlan: clonePlain(state.settings.coachWeeklyPlan?.generatedPlan || null),
+    rotation: clonePlain(plan.rotation || null),
     setup: clonePlain(plan.setup),
     remainingDates: plan.sessions.filter((session) => session.status === "planned").map((session) => session.date),
     capacity: clonePlain(plan.capacity),

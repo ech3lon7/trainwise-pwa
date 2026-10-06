@@ -3726,4 +3726,143 @@ assert(
   `Redistribution must not widen the session spread. Before: ${redistributionStillBalances.beforeSpread}, after: ${redistributionStillBalances.afterSpread}.`
 );
 
+// Verify that secondary rewards cannot bury an older eligible exercise and submitted turns rotate the whole library.
+const exerciseRotationTurns = runScenario(`
+  ${resetAndHelpers}
+  state.settings.customExercises = [
+    { id: "raise", name: "Lateral Raises", primaryMuscles: ["shoulders"], secondaryMuscles: [], userCreated: true },
+    { id: "press", name: "Overhead Press", primaryMuscles: ["shoulders"], secondaryMuscles: ["back", "abs"], userCreated: true },
+    { id: "face", name: "Face Pulls", primaryMuscles: ["shoulders"], secondaryMuscles: ["back"], userCreated: true },
+    { id: "archived", name: "Archived Raise", primaryMuscles: ["shoulders"], secondaryMuscles: [], archivedAt: "2026-01-01" }
+  ];
+  state.workouts = [
+    { id: "old", exerciseId: "raise", exercise: "Lateral Raises", date: "2026-05-24", sets: 4, reps: 20, weight: 20, rir: 1, primaryMuscles: ["shoulders"] },
+    { id: "new", exerciseId: "press", exercise: "Overhead Press", date: "2026-06-04", sets: 4, reps: 10, weight: 50, rir: 1, primaryMuscles: ["shoulders"] }
+  ];
+  var order = [];
+  for (var turn = 0; turn < 3; turn += 1) {
+    var date = "2026-06-" + String(17 + turn * 2).padStart(2, "0");
+    var chosen = coachExerciseCandidates("shoulders", new Set(), { date, workouts: state.workouts, stimulusNeeds: { back: { floorGap: 10 }, abs: { floorGap: 10 } } }).find(c => c.eligible);
+    order.push(chosen.exercise.id);
+    state.workouts.push({ id: "turn-" + turn, exerciseId: chosen.exercise.id, exercise: chosen.exercise.name, date, sets: 2, reps: 10, weight: 20, rir: 1, primaryMuscles: ["shoulders"] });
+  }
+  var today = coachExerciseCandidates("shoulders", new Set(), { date: "2026-06-22", workouts: state.workouts }).find(c => c.exercise.id === "press");
+  var later = coachExerciseCandidates("shoulders", new Set(), { date: "2026-06-25", workouts: state.workouts }).find(c => c.exercise.id === "press");
+  ({ order, blocked: !today.eligible, later: later.eligible });
+`);
+assert.deepStrictEqual(Array.from(exerciseRotationTurns.order), ["face", "raise", "press"], "Never-used and oldest-used eligible definitions must all receive a turn before repeats.");
+assert(exerciseRotationTurns.blocked && exerciseRotationTurns.later, "Weekly cooldowns must use the proposed date while manual submissions advance rotation.");
+
+// Exercise turns must survive secondary coverage by exchanging work while preserving target attainment and valid spacing.
+const weeklyRotationCoverage = runScenario(`
+  ${resetAndHelpers}
+  state.settings.customExercises = [
+    { id: "raise", name: "Lateral Raises", primaryMuscles: ["shoulders"], secondaryMuscles: [], exerciseType: "isolation", rest: "60 sec", userCreated: true },
+    { id: "row", name: "Rows", primaryMuscles: ["back"], secondaryMuscles: ["shoulders"], rest: "60 sec", userCreated: true }
+  ];
+  state.workouts = [{ id: "old", exerciseId: "raise", exercise: "Lateral Raises", date: "2026-05-24", sets: 4, reps: 20, weight: 20, rir: 1, primaryMuscles: ["shoulders"] }];
+  var setup = normalizeCoachWeeklyPlan({ days: [3, 5], averageMinutes: 30 });
+  var actualStats = muscleGroups.map(m => ({ ...m, sets: m.id === "back" ? 10 : 0 }));
+  var base = Object.fromEntries(actualStats.map(m => [m.id, m.sets]));
+  var sessions = [
+    { date: "2026-06-17", status: "planned", submitted: [], items: [coachWeeklySearchItem(resolveExerciseMeta("Rows"), muscleGroups.find(m => m.id === "back"), 4)] },
+    { date: "2026-06-19", status: "planned", submitted: [], items: [] }
+  ];
+  var seed = { setup, actualStats, sessions, projected: coachWeeklySearchProjection(base, sessions) };
+  var before = JSON.stringify(seed);
+  var rotated = rotateCoachWeeklyExercises(seed);
+  var again = rotateCoachWeeklyExercises(seed);
+  var rotation = coachExerciseRotationAudit(rotated.sessions, setup, rotated.rotationSearch);
+  var capped = rotateCoachWeeklyExercises(seed, { maxRotationCandidates: 0 });
+  var frozen = { ...seed, sessions: [{ ...sessions[0], status: "completed" }, sessions[1]] };
+  var frozenResult = rotateCoachWeeklyExercises(frozen);
+  ({
+    raises: rotated.sessions.flatMap(s => s.items).filter(i => i.exercise.id === "raise").reduce((sum, i) => sum + i.sets, 0),
+    totalSets: rotated.sessions.flatMap(s => s.items).reduce((sum, i) => sum + i.sets, 0),
+    backMet: rotated.projected.back >= setup.targets.back,
+    shoulderPreserved: rotated.projected.shoulders >= seed.projected.shoulders,
+    valid: validateCoachWeeklySearchSchedule(rotated.sessions, setup).valid,
+    immutable: before === JSON.stringify(seed),
+    repeat: coachWeeklySearchSignature(rotated.sessions) === coachWeeklySearchSignature(again.sessions),
+    audit: rotation.entries.map(e => ({ id: e.exerciseId, status: e.status, reason: e.reason })),
+    limit: capped.rotationSearch.terminationReason,
+    limitAttempts: capped.rotationSearch.attemptedCandidates,
+    completedIdentity: frozenResult.sessions[0] === frozen.sessions[0]
+  });
+`);
+assert.strictEqual(weeklyRotationCoverage.raises, 2, "A due isolation exercise must receive a direct turn despite secondary muscle coverage.");
+assert.strictEqual(weeklyRotationCoverage.totalSets, 4, "Rotation must exchange existing sets rather than pad the week.");
+assert(weeklyRotationCoverage.backMet && weeklyRotationCoverage.shoulderPreserved && weeklyRotationCoverage.valid, "Rotation must retain attained targets and legal sessions.");
+assert(weeklyRotationCoverage.immutable && weeklyRotationCoverage.repeat && weeklyRotationCoverage.completedIdentity, "Rotation must preserve inputs/history and be repeatable before submission.");
+assert.strictEqual(weeklyRotationCoverage.audit.length, 2, "Every active definition needs an audit entry.");
+assert(weeklyRotationCoverage.audit.every(e => e.status === "planned" && e.reason), "Both retained and newly rotated definitions must be explained.");
+assert.strictEqual(weeklyRotationCoverage.limit, "candidate-limit", "Exhaustion must be explicit rather than claiming impossibility.");
+assert.strictEqual(weeklyRotationCoverage.limitAttempts, 0, "The configured candidate budget must be respected.");
+
+// Recovery and target conflicts leave useful plans intact and produce a named deferral instead of extra volume.
+const weeklyRotationDeferrals = runScenario(`
+  ${resetAndHelpers}
+  state.settings.customExercises = [
+    { id: "raise", name: "Lateral Raises", primaryMuscles: ["shoulders"], secondaryMuscles: [], rest: "60 sec", userCreated: true },
+    { id: "row", name: "Rows", primaryMuscles: ["back"], secondaryMuscles: ["shoulders"], rest: "60 sec", userCreated: true }
+  ];
+  var setup = normalizeCoachWeeklyPlan({ days: [3], averageMinutes: 30 });
+  var actualStats = muscleGroups.map(m => ({ ...m, sets: 0 }));
+  var sessions = [{ date: todayISO(), status: "planned", submitted: [], items: [coachWeeklySearchItem(resolveExerciseMeta("Rows"), muscleGroups.find(m => m.id === "back"), 4)] }];
+  var base = Object.fromEntries(actualStats.map(m => [m.id, m.sets]));
+  var seed = { setup, actualStats, sessions, projected: coachWeeklySearchProjection(base, sessions) };
+  var rotated = rotateCoachWeeklyExercises(seed);
+  var deferred = coachExerciseRotationAudit(rotated.sessions, setup, rotated.rotationSearch).entries.find(e => e.exerciseId === "raise");
+  state.workouts = [{ id: "recent", exerciseId: "raise", exercise: "Lateral Raises", date: "2026-06-16", sets: 4, reps: 20, weight: 20, rir: 1, primaryMuscles: ["shoulders"] }];
+  var submitted = coachExerciseRotationAudit(sessions, setup).entries.find(e => e.exerciseId === "raise");
+  var peer = { id: "peer", name: "Other Raise", primaryMuscles: ["shoulders"], secondaryMuscles: [], userCreated: true };
+  state.settings.customExercises.push(peer);
+  var recovery = coachExerciseRotationAudit(sessions, setup).entries.find(e => e.exerciseId === "peer");
+  ({ unchanged: coachWeeklySearchSignature(rotated.sessions) === coachWeeklySearchSignature(seed.sessions), deferred, submitted, recovery });
+`);
+assert(weeklyRotationDeferrals.unchanged, "Rotation must not sacrifice another muscle's attained volume to force an exercise.");
+assert.strictEqual(weeklyRotationDeferrals.deferred.status, "deferred");
+assert(weeklyRotationDeferrals.deferred.reason.includes("target coverage"), "Target-preserving replacement failures must remain visible.");
+assert.strictEqual(weeklyRotationDeferrals.submitted.status, "submitted", "Manual work must count as a rotation turn.");
+assert(weeklyRotationDeferrals.recovery.reason.includes("recovery"), "Other exercises sharing a recently trained primary muscle need a recovery explanation.");
+
+// An exercise eligible late in the week must not be moved into an earlier date inside its failure window.
+const rotationFailureWindow = runScenario(`
+  ${resetAndHelpers}
+  state.settings.customExercises = [
+    { id: "raise", name: "Lateral Raises", primaryMuscles: ["shoulders"], secondaryMuscles: [], rest: "60 sec", userCreated: true },
+    { id: "row", name: "Rows", primaryMuscles: ["back"], secondaryMuscles: ["shoulders"], rest: "60 sec", userCreated: true }
+  ];
+  state.workouts = [{ id: "recent", exerciseId: "raise", exercise: "Lateral Raises", date: "2026-06-14", sets: 4, reps: 20, weight: 20, rir: 1, primaryMuscles: ["shoulders"] }];
+  var signalBefore = coachExercisePerformanceSignal;
+  coachExercisePerformanceSignal = (exercise, workouts) => exercise.id === "raise" ? { status: "repeated-failure" } : signalBefore(exercise, workouts);
+  var setup = normalizeCoachWeeklyPlan({ days: [5, 0], averageMinutes: 30 });
+  var actualStats = muscleGroups.map(m => ({ ...m, sets: m.id === "back" ? 10 : 0 }));
+  var base = Object.fromEntries(actualStats.map(m => [m.id, m.sets]));
+  var sessions = [
+    { date: "2026-06-19", status: "planned", submitted: [], items: [coachWeeklySearchItem(resolveExerciseMeta("Rows"), muscleGroups.find(m => m.id === "back"), 4)] },
+    { date: "2026-06-21", status: "planned", submitted: [], items: [] }
+  ];
+  var rotated = rotateCoachWeeklyExercises({ setup, actualStats, sessions, projected: coachWeeklySearchProjection(base, sessions) });
+  coachExercisePerformanceSignal = signalBefore;
+  ({ dates: rotated.sessions.filter(s => s.items.some(i => i.exercise.id === "raise")).map(s => s.date), rejections: rotated.rotationSearch.rejected.raise });
+`);
+assert.deepStrictEqual(Array.from(rotationFailureWindow.dates), ["2026-06-21"], "A repeated-failure exercise must wait for the full seven-day safeguard.");
+assert(rotationFailureWindow.rejections["performance-safeguard"] > 0, "Rejected earlier failure-window attempts must be recorded.");
+
+// Definition conflicts must name the omitted exercise, and recursive floor/growth planning must rotate only its final result.
+const rotationConflictAndBoundary = runScenario(`
+  ${resetAndHelpers}
+  state.settings.customExercises.push({ id: "duplicate", name: "Chest Exercise", primaryMuscles: ["chest"], secondaryMuscles: [], equipment: "dumbbells", userCreated: true });
+  var duplicateAudit = coachExerciseRotationAudit([{ date: todayISO(), status: "planned", items: [] }]).entries.find(e => e.exerciseId === "duplicate");
+  var rotateBefore = rotateCoachWeeklyExercises;
+  var count = 0;
+  rotateCoachWeeklyExercises = (plan, options) => { count += 1; return rotateBefore(plan, options); };
+  buildCoachWeeklyPlan(normalizeCoachWeeklyPlan({ days: [3, 5, 0], averageMinutes: 60, targets: Object.fromEntries(muscleGroups.map(m => [m.id, 12])) }), { optimize: true });
+  rotateCoachWeeklyExercises = rotateBefore;
+  ({ duplicateAudit, count });
+`);
+assert(rotationConflictAndBoundary.duplicateAudit.reason.includes("Exercise library conflict"), "A deferred duplicate must expose its library conflict by name.");
+assert.strictEqual(rotationConflictAndBoundary.count, 1, "Only the outer chosen weekly result may undergo rotation.");
+
 console.log("coach regression tests passed");
