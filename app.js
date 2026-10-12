@@ -3,8 +3,8 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 3;
 const STORES = ["workouts", "metrics", "settings", "syncQueue"];
-// Advance the installed shell version so the service worker can deliver the rotation fix.
-const APP_VERSION = "1.6.10";
+// Advance the installed shell version for grading and shadow timing calibration.
+const APP_VERSION = "1.6.11";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 const DRAFT_RECOVERY_KEY = "trainwise-draft-recovery-v1";
 const DATED_STRENGTH_DRAFTS_KEY = "trainwise-strength-drafts-by-date-v1";
@@ -49,6 +49,7 @@ const COACH_WEEK_TARGET_MAX = 50;
 const REDISTRIBUTE_MAX_ITERATIONS = 200;
 const REDISTRIBUTE_MIN_SPREAD = 3;
 const COACH_TIME_ESTIMATOR_VERSION = "coach-time-v1";
+const COACH_SET_TIMING_VERSION = "coach-set-time-v1";
 const COACH_TIMEFRAME_OPTIONS = [
   { label: "30 min", minutes: 30 },
   { label: "40 min", minutes: 40 },
@@ -2179,7 +2180,7 @@ function convertSetRowToLoadingStyle(row, exercise, sourceStyle, targetStyle = e
   return { ...source, weight: convertedWeight, reps: targetReps, rir: targetRir };
 }
 
-function progressionTargetForExercise(exerciseName) {
+function progressionTargetForExercise(exerciseName, performanceSignal = null) {
   const meta = resolveExerciseMeta(exerciseName);
   const phase = exerciseLoadingStylePhase(meta);
   const loadingStyle = phase.targetStyle;
@@ -2214,12 +2215,14 @@ function progressionTargetForExercise(exerciseName) {
   const workingRows = setRowsFromWorkout(latest).filter((row) => row.reps > 0);
   const estimatedCapacity = top.reps + Math.max(0, Number(top.rir) || 0);
   const backoffSetsHeldRange = workingRows.length > 0 && workingRows.every((row) => row.reps >= range.low);
+  const signal = performanceSignal || coachExercisePerformanceSignal(meta);
+  const holdLoad = Boolean(signal.holdLoad);
   const loadStep = effectiveLoadIncrement(meta, top.weight);
   const indicator = progressiveOverloadIndicator(exerciseName, history.filter((workout) => workoutLoadingStyle(workout) === loadingStyle));
   const progressionMode = normalizeProgressionMode(meta.progressionMode);
   const capacityReached = estimatedCapacity >= range.high;
-  const loadIncreaseEligible = capacityReached && backoffSetsHeldRange && progressionMode === "normal";
-  const loadIncreaseBlockReason = !capacityReached
+  const loadIncreaseEligible = !holdLoad && capacityReached && backoffSetsHeldRange && progressionMode === "normal";
+  const loadIncreaseBlockReason = holdLoad ? "Rep range met; hold through the performance dip" : !capacityReached
     ? `RIR-adjusted top-set capacity is ${fmt(estimatedCapacity)}/${fmt(range.high)} reps`
     : !backoffSetsHeldRange
       ? `One or more working sets finished below ${fmt(range.low)} reps`
@@ -2228,7 +2231,7 @@ function progressionTargetForExercise(exerciseName) {
         : "";
   const nextRep = Math.max(range.low, Math.min(range.high, top.reps + 1));
   const constrainedLoad = capacityReached && backoffSetsHeldRange && progressionMode !== "normal";
-  const target = loadIncreaseEligible
+  const target = holdLoad ? `${fmtLoad(top.weight)} lb x ${range.label}` : loadIncreaseEligible
     ? `${fmtLoad(top.weight + loadStep)} lb x ${fmt(range.low)}-${fmt(Math.max(range.low, Math.min(range.high, top.reps - 2)))}`
     : `${fmtLoad(top.weight)} lb x ${fmt(nextRep)}-${fmt(range.high)}`;
   const modeCue = constrainedLoad
@@ -2247,7 +2250,7 @@ function progressionTargetForExercise(exerciseName) {
     effectiveRepRange: range.label,
     progressionMode,
     target,
-    body: `Last time you hit ${fmtLoad(top.weight)} lb x ${fmt(top.reps)} on ${exerciseName}. I'm setting ${target} as the next target - keep ${HYPERTROPHY.idealRirMin}-${HYPERTROPHY.idealRirMax} clean reps in reserve.${loadingStyle === "high-rep" ? " This is a high-rep track, so rep quality comes before a load jump." : ""}${modeCue}`
+    body: holdLoad ? signal.message : `Last time you hit ${fmtLoad(top.weight)} lb x ${fmt(top.reps)} on ${exerciseName}. I'm setting ${target} as the next target - keep ${HYPERTROPHY.idealRirMin}-${HYPERTROPHY.idealRirMax} clean reps in reserve.${loadingStyle === "high-rep" ? " This is a high-rep track, so rep quality comes before a load jump." : ""}${modeCue}`
   };
 }
 
@@ -3194,6 +3197,11 @@ function exerciseProgressEvidence(current, priorHistory = [], options = {}) {
   };
 }
 
+function workoutMeetsRepMinimum(workout, range) {
+  const rows = setRowsFromWorkout(workout).filter((row) => row.reps > 0);
+  return rows.length > 0 && rows.every((row) => row.reps >= range.low);
+}
+
 function exerciseUnderperformed(current, previous, options = {}) {
   if (!current || !previous) return false;
   const currentE1rm = e1rm(current);
@@ -3201,6 +3209,7 @@ function exerciseUnderperformed(current, previous, options = {}) {
   const e1rmDrop = previousE1rm > 0 && currentE1rm < previousE1rm * (1 - COACH_PERFORMANCE_DROP_THRESHOLD);
   const repDrops = comparableRepDrop(current, previous);
   const range = options.effectiveRange || parseRepRange(options.repRange || "8-15");
+  if (workoutMeetsRepMinimum(current, range)) return false;
   const missedRange = setRowsFromWorkout(current).some((row) => row.reps > 0 && row.reps < range.low);
   const broadRepRegression = repDrops >= 3;
   const failureRir = (averageRir(current) ?? HYPERTROPHY.idealRirMin) <= 0;
@@ -3268,6 +3277,7 @@ function coachExercisePerformanceSignal(exercise, workouts = coachWorkoutEntries
       tone: "",
       history,
       latest: history[0] || null,
+      evaluatedWorkoutDate: history[0]?.date || "",
       previous: null,
       transitionSource: phase.transitionSource,
       message: ""
@@ -3275,6 +3285,7 @@ function coachExercisePerformanceSignal(exercise, workouts = coachWorkoutEntries
   }
   const latest = history[0];
   const previous = history[1];
+  const evaluatedDate = ` Evaluated submitted workout: ${latest.date}.`;
   const effectiveRange = effectiveRepRange(exercise);
   const latestProgress = exerciseProgressEvidence(latest, history.slice(1), { loadingStyle, effectiveRange });
   if (latestProgress.progressed) {
@@ -3285,7 +3296,8 @@ function coachExercisePerformanceSignal(exercise, workouts = coachWorkoutEntries
       latest,
       previous,
       progressEvidence: latestProgress,
-      message: coachPerformanceMessage(exercise, "progressing", latestProgress.reasons.join(", "))
+      evaluatedWorkoutDate: latest.date,
+      message: coachPerformanceMessage(exercise, "progressing", latestProgress.reasons.join(", ")) + evaluatedDate
     };
   }
   const performanceOptions = { progressEvidence: latestProgress, effectiveRange, loadingStyle };
@@ -3300,7 +3312,8 @@ function coachExercisePerformanceSignal(exercise, workouts = coachWorkoutEntries
       latest,
       previous,
       progressEvidence: latestProgress,
-      message: coachPerformanceMessage(exercise, "repeated-failure")
+      evaluatedWorkoutDate: latest.date,
+      message: coachPerformanceMessage(exercise, "repeated-failure") + evaluatedDate
     };
   }
   if (latestUnder) {
@@ -3311,7 +3324,8 @@ function coachExercisePerformanceSignal(exercise, workouts = coachWorkoutEntries
       latest,
       previous,
       progressEvidence: latestProgress,
-      message: coachPerformanceMessage(exercise, "isolated-failure")
+      evaluatedWorkoutDate: latest.date,
+      message: coachPerformanceMessage(exercise, "isolated-failure") + evaluatedDate
     };
   }
   const latestE1rm = e1rm(latest);
@@ -3324,11 +3338,15 @@ function coachExercisePerformanceSignal(exercise, workouts = coachWorkoutEntries
       latest,
       previous,
       progressEvidence: latestProgress,
-      message: coachPerformanceMessage(exercise, "progressing")
+      evaluatedWorkoutDate: latest.date,
+      message: coachPerformanceMessage(exercise, "progressing") + evaluatedDate
     };
   }
   const repDrops = comparableRepDrop(latest, previous);
   if (repDrops > 0 || (loadingStyle !== "high-rep" && previousE1rm > 0 && latestE1rm < previousE1rm)) {
+    const holdLoad = workoutMeetsRepMinimum(latest, effectiveRange);
+    const effortCue = (averageRir(latest) ?? HYPERTROPHY.idealRirMin) <= 0
+      ? ` Leave ${HYPERTROPHY.idealRirMin}-${HYPERTROPHY.idealRirMax} reps in reserve next time.` : "";
     return {
       status: "minor-dip",
       tone: "",
@@ -3336,7 +3354,9 @@ function coachExercisePerformanceSignal(exercise, workouts = coachWorkoutEntries
       latest,
       previous,
       progressEvidence: latestProgress,
-      message: coachPerformanceMessage(exercise, "minor-dip")
+      holdLoad,
+      evaluatedWorkoutDate: latest.date,
+      message: (holdLoad ? `${exercise.name}: Rep range met; estimated performance declined. Hold the load.` + effortCue : coachPerformanceMessage(exercise, "minor-dip")) + evaluatedDate
     };
   }
   if ((averageRir(latest) ?? HYPERTROPHY.idealRirMin) <= 0) {
@@ -3347,7 +3367,9 @@ function coachExercisePerformanceSignal(exercise, workouts = coachWorkoutEntries
       latest,
       previous,
       progressEvidence: latestProgress,
-      message: coachPerformanceMessage(exercise, "reached-failure")
+      holdLoad: workoutMeetsRepMinimum(latest, effectiveRange),
+      evaluatedWorkoutDate: latest.date,
+      message: coachPerformanceMessage(exercise, "reached-failure") + evaluatedDate
     };
   }
   return {
@@ -3357,7 +3379,8 @@ function coachExercisePerformanceSignal(exercise, workouts = coachWorkoutEntries
     latest,
     previous,
     progressEvidence: latestProgress,
-    message: coachPerformanceMessage(exercise, "steady")
+    evaluatedWorkoutDate: latest.date,
+    message: coachPerformanceMessage(exercise, "steady") + evaluatedDate
   };
 }
 
@@ -3410,7 +3433,21 @@ function coachPlanTargetForExercise(exercise, signal = coachExercisePerformanceS
       message: signal.message
     };
   }
-  const progression = progressionTargetForExercise(exercise.name);
+  if (signal.holdLoad) {
+    return {
+      kind: "hold",
+      label: `Hold ${fmt(top.weight, 1)} lb`,
+      detail: `${range.label} reps at ${HYPERTROPHY.idealRirMin}-${HYPERTROPHY.idealRirMax} RIR`,
+      tone: "",
+      loadMultiplier: 1,
+      repOffset: 0,
+      increaseLoad: false,
+      loadIncreaseEligible: false,
+      loadIncreaseBlockReason: "Rep range met; hold through the performance dip",
+      message: signal.message
+    };
+  }
+  const progression = progressionTargetForExercise(exercise.name, signal);
   if (progression) {
     return {
       kind: progression.styleConversion ? "style-conversion" : "progression",
@@ -3457,7 +3494,7 @@ function logLoadDirectionForExercise(exercise, options = {}) {
       message: signal.message || `${exercise.name} dipped last session; reduce load and rebuild with controlled reps.`
     };
   }
-  const progression = progressionTargetForExercise(exercise.name);
+  const progression = progressionTargetForExercise(exercise.name, signal);
   const hasHistory = Boolean(signal.latest || signal.transitionSource || progression?.latest);
   return {
     direction: "neutral",
@@ -3678,7 +3715,8 @@ function normalizeWorkoutTimer(timer) {
     draftDate: String(timer.draftDate || "").trim(),
     startedAt: String(timer.startedAt || "").trim(),
     accumulatedActiveSeconds: Math.max(0, Number(timer.accumulatedActiveSeconds) || 0),
-    runningSince: timer.runningSince ? String(timer.runningSince) : ""
+    runningSince: timer.runningSince ? String(timer.runningSince) : "",
+    ...(timer.setBased && typeof timer.setBased === "object" ? { setBased: clonePlain(timer.setBased) } : {})
   };
   return normalized.timingSessionId && normalized.draftSessionId && normalized.draftDate ? normalized : null;
 }
@@ -4002,6 +4040,184 @@ function estimateCoachSessionTiming(items = [], options = {}) {
 
 function estimateExerciseMinutes(exercise, sets, options = {}) {
   return estimateExerciseRawSeconds(exercise, sets, options) / 60;
+}
+
+// Shadow timing uses full-session seconds per logged set, never the live timing multiplier.
+function setTimingProfile(items = []) {
+  const counts = new Map();
+  items.forEach((item) => {
+    const definition = typeof item.exercise === "object" ? item.exercise : null;
+    const identity = definition?.id || effectiveWorkoutExerciseId(item) || `name:${normalizeName(item.exercise || item.name || "")}`;
+    const style = definition ? effectiveLoadingStyle(definition) : workoutLoadingStyle(item);
+    const sets = Math.max(0, Math.floor(Number(item.sets ?? item.setRows?.length) || 0));
+    if (sets) counts.set(`${identity}:${style}`, (counts.get(`${identity}:${style}`) || 0) + sets);
+  });
+  const entries = [...counts].sort(([a], [b]) => a.localeCompare(b)).map(([key, sets]) => ({ key, sets }));
+  return { entries, allSets: entries.reduce((sum, entry) => sum + entry.sets, 0) };
+}
+
+function sameSetTimingProfile(a, b) {
+  return Boolean(a && b && JSON.stringify(a) === JSON.stringify(b));
+}
+
+function setTimingSimilarity(a, b) {
+  if (!a?.allSets || !b?.allSets) return 0;
+  const left = new Map(a.entries.map((entry) => [entry.key, entry.sets / a.allSets]));
+  const right = new Map(b.entries.map((entry) => [entry.key, entry.sets / b.allSets]));
+  let intersection = 0;
+  let union = 0;
+  new Set([...left.keys(), ...right.keys()]).forEach((key) => {
+    intersection += Math.min(left.get(key) || 0, right.get(key) || 0);
+    union += Math.max(left.get(key) || 0, right.get(key) || 0);
+  });
+  return union ? intersection / union : 0;
+}
+
+// Reconstruct legacy session composition without inventing original prediction snapshots.
+function setTimingSamples(workouts = state.workouts, before = new Date(), options = {}) {
+  const groups = new Map();
+  workouts.forEach((workout) => {
+    const id = workout.sessionTiming?.timingSessionId;
+    if (!id) return;
+    if (!groups.has(id)) groups.set(id, new Map());
+    const rows = groups.get(id);
+    const previous = rows.get(workout.id);
+    if (!previous || String(workout.updatedAt || "") > String(previous.updatedAt || "")) rows.set(workout.id, workout);
+  });
+  const cutoff = new Date(before).getTime();
+  const samples = [];
+  const excluded = [];
+  groups.forEach((rows, timingSessionId) => {
+    const entries = [...rows.values()];
+    const metadata = entries[0].sessionTiming;
+    const signature = (m) => JSON.stringify([m.estimatorVersion, m.startedAt, m.completedAt, m.activeSeconds, m.baseEstimatedSeconds, m.allSets, m.setBased || null]);
+    const profile = setTimingProfile(entries.map((entry) => ({ ...entry, sets: setRowsFromWorkout(entry).length })));
+    const completedMs = Date.parse(metadata.completedAt);
+    let reason = "";
+    if (entries.some(isSampleEntry)) reason = "sample/demo session";
+    else if (typeof timingSessionId !== "string" || !timingSessionId.trim() || !entries.every((entry) => entry.id)
+      || typeof metadata.startedAt !== "string" || typeof metadata.completedAt !== "string" || !Number.isFinite(Number(metadata.activeSeconds))
+      || !Number.isFinite(Date.parse(metadata.startedAt)) || !Number.isFinite(completedMs)
+      || Date.parse(metadata.startedAt) >= completedMs) reason = "invalid metadata";
+    else if (entries.some((entry) => signature(entry.sessionTiming) !== signature(metadata))) reason = "inconsistent session metadata";
+    else if (Number(metadata.activeSeconds) < 300 || Number(metadata.activeSeconds) > 14400) reason = "duration outside 5-240 minutes";
+    else if (!Number.isInteger(metadata.allSets) || metadata.allSets <= 0 || profile.allSets !== metadata.allSets) reason = "incomplete session set count";
+    else if (metadata.setBased?.completedProfile && !sameSetTimingProfile(profile, metadata.setBased.completedProfile)) reason = "edited session composition";
+    else if (!Number.isFinite(cutoff) || completedMs >= cutoff || (!options.allHistory && cutoff - completedMs > 42 * 86400000)) reason = "outside prior 42 days";
+    else if (entries.some((entry) => Date.parse(entry.updatedAt || entry.createdAt || metadata.completedAt) >= cutoff)) reason = "record updated after prediction";
+    const sample = { timingSessionId, completedAt: metadata.completedAt, startedAt: metadata.startedAt, activeSeconds: Number(metadata.activeSeconds), profile, shadow: metadata.setBased || null };
+    if (reason) excluded.push({ timingSessionId, reason });
+    else samples.push(sample);
+  });
+  samples.sort((a, b) => b.completedAt.localeCompare(a.completedAt) || String(a.timingSessionId).localeCompare(String(b.timingSessionId)));
+  return { samples, excluded };
+}
+
+function setTimingPrediction(profile, workouts = state.workouts, predictedAt = new Date().toISOString()) {
+  const diagnostics = setTimingSamples(workouts, predictedAt);
+  const aggregate = diagnostics.samples.slice(0, 10);
+  const matching = diagnostics.samples.map((sample) => ({ ...sample, similarity: setTimingSimilarity(profile, sample.profile) }))
+    .filter((sample) => sample.similarity >= 0.5)
+    .sort((a, b) => b.similarity - a.similarity || b.completedAt.localeCompare(a.completedAt) || String(a.timingSessionId).localeCompare(String(b.timingSessionId)))
+    .slice(0, 5);
+  const candidate = (id, cohort, fallbackReason = "") => {
+    const enough = profile.allSets > 0 && cohort.length >= (id === "B" && !fallbackReason ? 3 : 5);
+    const secondsPerSet = enough ? cohort.reduce((sum, sample) => sum + sample.activeSeconds, 0) / cohort.reduce((sum, sample) => sum + sample.profile.allSets, 0) : null;
+    const predictedSeconds = secondsPerSet === null ? null : profile.allSets * secondsPerSet;
+    return { id, status: enough ? "predicted" : "insufficient-data", secondsPerSet, predictedSeconds,
+      minutes: predictedSeconds === null ? null : Math.ceil(predictedSeconds / 60),
+      trainingSessionIds: cohort.map((sample) => sample.timingSessionId), fallbackReason };
+  };
+  return {
+    version: COACH_SET_TIMING_VERSION,
+    predictedAt,
+    profile,
+    candidates: [candidate("A", aggregate), candidate("B", matching.length >= 3 ? matching : aggregate, matching.length >= 3 ? "" : "fewer than three comparable sessions; using A")],
+    excludedSamples: diagnostics.excluded
+  };
+}
+
+function draftSetTimingProfile(drafts = state.workoutDraft) {
+  return setTimingProfile(drafts.map((draft) => ({
+    exercise: resolveExerciseMeta(draft.exercise, draft.targetMuscle),
+    sets: normalizeSetRows(draft.setRows).length
+  })));
+}
+
+function workoutStartSetTiming(drafts = state.workoutDraft, predictedAt = new Date().toISOString()) {
+  const profile = draftSetTimingProfile(drafts);
+  const copied = activeCopiedCoachPlan();
+  const verifiedPlan = copied?.id && drafts.length > 0 && drafts.every((draft) => draft.sourcePlanId === copied.id)
+    && sameSetTimingProfile(profile, setTimingProfile(copied.sessionPlan?.items || []));
+  return {
+    ...setTimingPrediction(profile, state.workouts, predictedAt),
+    planId: verifiedPlan ? copied.id : null,
+    displayedEstimateMinutes: verifiedPlan && Number.isFinite(copied.sessionPlan?.totalMinutes) ? copied.sessionPlan.totalMinutes : null,
+    provenance: verifiedPlan ? "verified copied plan" : "unverified/manual workout"
+  };
+}
+
+function validSetTimingPrediction(prediction, sample) {
+  if (prediction?.version !== COACH_SET_TIMING_VERSION || prediction.predictedAt !== sample.startedAt
+    || !prediction.profile || !Array.isArray(prediction.profile.entries) || !Array.isArray(prediction.candidates)) return false;
+  const entries = prediction.profile.entries;
+  if (!entries.length || entries.some((entry) => !entry || typeof entry.key !== "string" || !Number.isInteger(entry.sets) || entry.sets <= 0)
+    || new Set(entries.map((entry) => entry.key)).size !== entries.length
+    || entries.reduce((sum, entry) => sum + entry.sets, 0) !== prediction.profile.allSets) return false;
+  return prediction.candidates.length === 2 && ["A", "B"].every((id) => {
+    const candidate = prediction.candidates.find((item) => item?.id === id);
+    if (!candidate || !Array.isArray(candidate.trainingSessionIds)
+      || candidate.trainingSessionIds.some((trainingId) => typeof trainingId !== "string" || trainingId === sample.timingSessionId)) return false;
+    if (candidate.status === "insufficient-data") return candidate.predictedSeconds === null;
+    return candidate.status === "predicted" && Number.isFinite(candidate.predictedSeconds) && candidate.predictedSeconds > 0
+      && Number.isFinite(candidate.secondsPerSet) && candidate.secondsPerSet > 0
+      && Math.abs(candidate.predictedSeconds - candidate.secondsPerSet * prediction.profile.allSets) < 0.001;
+  });
+}
+
+function setTimingAccuracy(records, id, allowReadiness = false) {
+  const predictions = records.map((record) => ({ record, candidate: record.candidates.find((candidate) => candidate.id === id) }))
+    .filter(({ candidate }) => candidate?.status === "predicted" && Number.isFinite(candidate.predictedSeconds));
+  const errors = predictions.map(({ record, candidate }) => (record.activeSeconds - candidate.predictedSeconds) / 60);
+  const count = predictions.length;
+  const fallbackCount = predictions.filter(({ candidate }) => candidate.fallbackReason).length;
+  const coverage = records.length ? count / records.length : 0;
+  const meanAbsoluteErrorMinutes = count ? errors.reduce((sum, error) => sum + Math.abs(error), 0) / count : null;
+  const maximumUnderestimationMinutes = count ? Math.max(0, ...errors) : null;
+  const overrunsOverFiveMinutes = errors.filter((error) => error > 5).length;
+  return { id, eligibleSessions: records.length, predictions: count, coverage, meanAbsoluteErrorMinutes, maximumUnderestimationMinutes,
+    overrunsOverFiveMinutes, fallbackCount, fallbackFrequency: count ? fallbackCount / count : 0,
+    ready: allowReadiness && count >= 10 && coverage >= 0.8 && overrunsOverFiveMinutes === 0 && meanAbsoluteErrorMinutes <= 5 };
+}
+
+// Historical reconstruction is diagnostic; only frozen, unchanged prospective sessions can pass the gate.
+function setTimingValidation(workouts = state.workouts, now = new Date()) {
+  const diagnostics = setTimingSamples(workouts, now, { allHistory: true });
+  const historical = [];
+  const prospective = [];
+  const prospectiveExcluded = [];
+  [...diagnostics.samples].reverse().forEach((sample) => {
+    const reconstructed = setTimingPrediction(sample.profile, workouts, sample.startedAt);
+    historical.push({ timingSessionId: sample.timingSessionId, completedAt: sample.completedAt, activeSeconds: sample.activeSeconds,
+      retrospective: true, predictedAt: sample.startedAt, candidates: reconstructed.candidates });
+    const initial = sample.shadow?.initialPrediction;
+    let reason = "";
+    if (!initial) reason = "legacy/missing initial prediction";
+    else if (sample.shadow.version !== COACH_SET_TIMING_VERSION || !validSetTimingPrediction(initial, sample)) reason = "invalid/unsupported initial prediction";
+    else if (!sameSetTimingProfile(initial.profile, sample.profile)) reason = "changed-workout";
+    if (reason) prospectiveExcluded.push({ timingSessionId: sample.timingSessionId, reason });
+    else prospective.push({ timingSessionId: sample.timingSessionId, completedAt: sample.completedAt, activeSeconds: sample.activeSeconds,
+      retrospective: false, predictedAt: initial.predictedAt, planId: initial.planId || null,
+      displayedEstimateMinutes: initial.displayedEstimateMinutes ?? null, candidates: clonePlain(initial.candidates) });
+  });
+  const prospectiveSummary = ["A", "B"].map((id) => setTimingAccuracy(prospective, id, true));
+  const qualified = prospectiveSummary.filter((candidate) => candidate.ready)
+    .sort((a, b) => a.meanAbsoluteErrorMinutes - b.meanAbsoluteErrorMinutes || a.maximumUnderestimationMinutes - b.maximumUnderestimationMinutes || a.id.localeCompare(b.id));
+  return { version: COACH_SET_TIMING_VERSION, mode: "shadow-only", activeEstimatorVersion: COACH_TIME_ESTIMATOR_VERSION,
+    generatedAt: new Date(now).toISOString(), excludedSessions: diagnostics.excluded,
+    historical: { summary: ["A", "B"].map((id) => setTimingAccuracy(historical, id)), sessions: historical },
+    prospective: { summary: prospectiveSummary, sessions: prospective, excluded: prospectiveExcluded },
+    promotionRecommendation: qualified[0]?.id || null, automaticActivation: false };
 }
 
 function exercisePlanType(exercise = {}) {
@@ -10949,6 +11165,9 @@ function workoutSubmissionTimingMetadata(drafts, timer, workoutsBeforeSubmission
     sets: normalizeSetRows(draft.setRows).length
   }));
   const counts = timingSetCounts(items);
+  const completedProfile = setTimingProfile(items);
+  const initialPrediction = finalizedTimer.setBased || null;
+  const unchanged = sameSetTimingProfile(initialPrediction?.profile, completedProfile);
   return {
     timingSessionId: finalizedTimer.timingSessionId,
     estimatorVersion: COACH_TIME_ESTIMATOR_VERSION,
@@ -10961,7 +11180,16 @@ function workoutSubmissionTimingMetadata(drafts, timer, workoutsBeforeSubmission
     unclassifiedSets: counts.unclassifiedSets,
     standardSets: counts.standardSets,
     highRepSets: counts.highRepSets,
-    allSets: counts.allSets
+    allSets: counts.allSets,
+    setBased: {
+      version: COACH_SET_TIMING_VERSION,
+      initialPrediction,
+      completedProfile,
+      comparisonStatus: !initialPrediction ? "missing-initial-prediction" : unchanged ? "unchanged-workout" : "changed-workout",
+      ...(!initialPrediction || unchanged ? {} : {
+        retrospectivePrediction: { ...setTimingPrediction(completedProfile, workoutsBeforeSubmission, finalizedTimer.startedAt), retrospective: true }
+      })
+    }
   };
 }
 
@@ -11389,6 +11617,8 @@ function coachDebugPlanSummary(plan) {
         status: item.performanceSignal.status,
         tone: item.performanceSignal.tone,
         message: item.performanceSignal.message,
+        evaluatedWorkoutDate: item.performanceSignal.evaluatedWorkoutDate || "",
+        holdLoad: Boolean(item.performanceSignal.holdLoad),
         progressEvidence: item.performanceSignal.progressEvidence || null,
         latest: item.performanceSignal.latest ? workoutDebugSummary(item.performanceSignal.latest) : null,
         previous: item.performanceSignal.previous ? workoutDebugSummary(item.performanceSignal.previous) : null
@@ -11533,6 +11763,7 @@ function coachDebugExerciseCandidates() {
     lifetimeUses: item.memory.history.length,
     daysSince: item.memory.daysSince,
     performanceStatus: item.signal.status,
+    evaluatedWorkoutDate: item.signal.evaluatedWorkoutDate || "",
     eligible: item.eligible
   }))]));
 }
@@ -11620,7 +11851,8 @@ function coachDebugWeeklyPlan() {
         planTarget: item.planTarget?.label || "",
         loadIncreaseEligible: Boolean(item.planTarget?.loadIncreaseEligible),
         loadIncreaseBlockReason: item.planTarget?.loadIncreaseBlockReason || "",
-        performanceStatus: item.performanceSignal?.status || "neutral"
+        performanceStatus: item.performanceSignal?.status || "neutral",
+        evaluatedWorkoutDate: item.performanceSignal?.evaluatedWorkoutDate || ""
       }))
     }))
   };
@@ -11700,6 +11932,10 @@ function buildCoachDebugReport() {
     coach: {
       todayPlan: coachDebugPlanSummary(todayPlan),
       timeEstimator: coachTimeEstimatorDebug(todayPlan),
+      setBasedTiming: {
+        prediction: setTimingPrediction(setTimingProfile(todayPlan.sessionPlan?.items || [])),
+        validation: setTimingValidation()
+      },
       copiedPlan: copiedPlan ? coachDebugPlanSummary(copiedPlan) : null,
       weeklyPlan: coachDebugWeeklyPlan(),
       modeComparison: coachDebugModeComparison(),
@@ -12830,7 +13066,8 @@ async function handleAction(action, target) {
         draftDate: state.draftDate,
         startedAt: now,
         accumulatedActiveSeconds: 0,
-        runningSince: now
+        runningSince: now,
+        setBased: workoutStartSetTiming(state.workoutDraft, now)
       };
       saveStrengthDraftForDate(state.draftDate, { force: true });
       persistWorkoutTimer(state.workoutTimer);

@@ -236,6 +236,23 @@ ceil(totalRawSeconds * personalCorrectionFactor / 60)
 
 Personal correction uses recent valid timed sessions, deduplicated by `timingSessionId`, versioned by `coach-time-v1`, and excludes the workout being submitted from its own baseline. Do not simplify this into per-exercise rounded minutes or rederive old baselines from current settings.
 
+### Rep-range-first grading (1.6.11)
+
+Genuine progress and insufficient-history outcomes retain precedence. Otherwise, if every completed working set reaches the effective rep minimum, estimated-strength/rep declines cannot trigger isolated/repeated failure, failure penalties, or failure rotation. An in-range dip explicitly holds load and copied working-set loads; it must bypass automatic progression as well as reset/deload targets. Reaching zero RIR in range remains effort guidance, not failure of the rep requirement. Below-range safeguards remain active. Apply this rule to both workouts in repeated-failure evaluation. Messages and debug diagnostics identify the evaluated submitted date; drafts remain excluded.
+
+### Set-based shadow timing (1.6.11)
+
+`coach-set-time-v1` is independent of live `coach-time-v1`. It must never change Today/weekly plans, capacity, or displayed live estimates without a separate approved promotion. No extra rest/setup overhead or live correction multiplier is added to full-session seconds per set.
+
+- Samples are deduplicated by timing session and workout ID. Require complete, consistent exercise rows, positive frozen set counts, valid start/completion timestamps, and 5-240 active minutes. Exclude demo, edited-composition, incomplete, inconsistent, and future/after-prediction records with reasons; never trim legitimate slow sessions to fit the model.
+- Candidate A pools seconds/sets across the latest ten sessions completed before prediction within 42 days; require five. Candidate B pools up to five sessions with exercise/style set-share similarity of at least 0.5; require three, otherwise use A. Similarity is sum(min shares)/sum(max shares); tie-break by newest completion then ID. Round only the final total upward.
+- Timer start freezes optional `setBased` prediction metadata: version/time/profile, candidate rates/predictions/training IDs/fallbacks, and copied-plan ID/displayed estimate only when all draft source IDs and composition verify the link. Pause/resume/reload must retain this snapshot.
+- Submission adds `sessionTiming.setBased` with initial prediction, completed profile, and unchanged/changed/missing-initial status. Changed-workout final-profile predictions are explicitly retrospective and use the timer-start history cutoff. Existing timing fields stay unchanged. Clear the timer only after durable save succeeds; historical edits preserve timing evidence. Existing backup/import, sync payloads, and workout debug summaries carry this optional metadata.
+- `coach.setBasedTiming` in debug exports contains a current shadow prediction and validation report. Historical chronology reconstructs predictions using only earlier history, never qualifies for promotion, and never fabricates legacy snapshots. Prospective evaluation uses only valid frozen, unchanged-workout snapshots. Changed workouts and missing/invalid snapshots have explicit exclusions.
+- Report prediction coverage, mean absolute error, maximum underestimation, overruns above five minutes, and B fallback frequency. Readiness requires ten prospective predictions, at least 80% coverage of eligible unchanged prospective sessions, zero overruns above five minutes, and mean absolute error at most five minutes. Rank qualifying models by error, maximum underestimation, then A. This is a recommendation only; automatic activation is always false.
+
+Manual check: start a timer on a new draft, pause/resume, reload, and lock in. Export Coach debug data and confirm the frozen initial prediction survives. Repeat with a set-count/exercise change: it must be marked changed-workout, excluded from prospective accuracy, and retain a separately labeled retrospective estimate. Untimed logging and historical editing must continue to work. Never start a timer late and interpret it as a full-session duration; the model measures only timer-captured active time.
+
 ## 11. Nutrition, Maintenance, and Trends
 
 Nutrition logging supports meal-based calories/protein, body weight, and notes. Saving or updating a date creates the canonical submitted metric and queues sync.

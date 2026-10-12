@@ -198,9 +198,9 @@ assert(!appCode.includes('showBanner("Unsaved draft restored."'), "Expected star
 assert(appCode.includes("notifyMetricSaved"), "Expected metrics saves to use a dedicated bottom-only notification helper.");
 assert(!stylesCode.includes(".mobile-quick-toggle"), "Expected floating quick action button styling to be removed.");
 // Keep shell/cache expectations aligned with the release that contains exercise rotation.
-assert(indexCode.includes("v=1.6.10"), "Expected index shell references to use bumped app version.");
+assert(indexCode.includes("v=1.6.11"), "Expected index shell references to use bumped app version.");
 assert(!indexCode.includes('id="app" class="app-content" aria-live'), "Expected broad app aria-live to be removed in favor of targeted live regions.");
-assert(serviceWorkerCode.includes("trainwise-cache-v133"), "Expected service worker cache version bump.");
+assert(serviceWorkerCode.includes("trainwise-cache-v134"), "Expected service worker cache version bump.");
 // The mobile tab bar must anchor to the visible bottom edge and compact only during active scrolling.
 assert(/\.tabbar\s*\{[^}]*top:\s*auto;[^}]*bottom:\s*env\(safe-area-inset-bottom\)/s.test(stylesCode), "Expected the tab bar to use a stable bottom safe-area anchor instead of a dynamic viewport top offset.");
 assert(stylesCode.includes(".tabbar.is-scrolling") && appCode.includes("updateTabbarScrollState"), "Expected the tab bar to shrink during scrolling and restore after scrolling stops.");
@@ -3059,4 +3059,214 @@ assert.strictEqual(rotationSnapshotReload.legacyEntries, 2, "Older snapshots nee
 assert(rotationSnapshotReload.markup.includes("1 deferred / 2 active") && rotationSnapshotReload.markup.includes("still queued, not proven impossible"), "The visible summary and disclosure must expose deferred work and honest search limits.");
 assert(rotationSnapshotReload.escaped.includes("&lt;script&gt;") && !rotationSnapshotReload.escaped.includes("<script>"), "Exercise names and explanations must remain escaped in the UI.");
 
-console.log("log regression tests passed");
+const setTimingModels = runScenario(`
+  ${reset}
+  var shadowMakeSession = (id, day, seconds = 1800, sets = 10, exerciseId = "custom-bench", style = "standard") => {
+    var date = "2026-06-" + String(day).padStart(2, "0");
+    return { id: id + "-row", date, exercise: exerciseId === "custom-bench" ? "Bench Press" : "Cable Row", exerciseId, loadingStyle: style,
+      setRows: Array.from({ length: sets }, () => ({ weight: 100, reps: 10, rir: 2 })),
+      sessionTiming: { timingSessionId: id, estimatorVersion: "coach-time-v1", startedAt: date + "T10:00:00Z", completedAt: date + "T12:00:00Z", activeSeconds: seconds, baseEstimatedSeconds: 900, allSets: sets } };
+  };
+  var shadowHistory = Array.from({ length: 6 }, (_, i) => shadowMakeSession("s" + i, i + 1));
+  var profile = setTimingProfile([{ exercise: resolveExerciseMeta("Bench Press"), sets: 8 }]);
+  var predicted = setTimingPrediction(profile, shadowHistory, "2026-06-17T12:00:00Z");
+  var insufficient = setTimingPrediction(profile, shadowHistory.slice(0, 2), "2026-06-17T12:00:00Z");
+  var highRep = setTimingProfile([{ exercise: { ...resolveExerciseMeta("Bench Press"), loadingStyle: "high-rep" }, sets: 8 }]);
+  var fallback = setTimingPrediction(highRep, shadowHistory, "2026-06-17T12:00:00Z");
+  var incomplete = shadowMakeSession("incomplete", 7); incomplete.setRows.pop();
+  var conflict = shadowMakeSession("conflict", 8, 1800, 5);
+  var conflictOther = { ...conflict, id: "conflict-other", sessionTiming: { ...conflict.sessionTiming, activeSeconds: 2000 } };
+  var demo = { ...shadowMakeSession("demo", 9), sample: true };
+  var future = shadowMakeSession("future", 18);
+  var atCutoff = shadowMakeSession("cutoff", 17);
+  var edited = { ...shadowMakeSession("edited", 10), updatedAt: "2026-06-18T12:00:00Z" };
+  var invalid = shadowMakeSession("invalid", 11); invalid.sessionTiming.startedAt = "invalid";
+  var slow = shadowMakeSession("slow", 12, 14000);
+  var diagnostics = setTimingSamples([...shadowHistory, { ...shadowHistory[0] }, incomplete, conflict, conflictOther, demo, future, atCutoff, edited, invalid, slow], "2026-06-17T12:00:00Z");
+  var rounded = setTimingPrediction(profile, shadowHistory.map(w => ({ ...w, sessionTiming: { ...w.sessionTiming, activeSeconds: 1801 } })), "2026-06-17T12:00:00Z");
+  ({ predicted, insufficient, fallback, rounded, diagnostics, styleSimilarity: setTimingSimilarity(profile, highRep), identitySimilarity: setTimingSimilarity(profile, setTimingProfile([{ exercise: resolveExerciseMeta("Cable Row"), sets: 8 }])) });
+`);
+assert.strictEqual(setTimingModels.predicted.candidates[0].predictedSeconds, 1440, "Eight sets at 180 seconds/set should predict 24 minutes, with no added setup or correction.");
+assert.strictEqual(setTimingModels.predicted.candidates[1].predictedSeconds, 1440);
+assert.strictEqual(setTimingModels.predicted.candidates[1].trainingSessionIds.length, 5);
+assert.strictEqual(setTimingModels.insufficient.candidates[0].predictedSeconds, null, "Do not invent a personalized estimate without enough history.");
+assert(setTimingModels.fallback.candidates[1].fallbackReason.includes("using A"));
+assert.strictEqual(setTimingModels.styleSimilarity, 0, "Different loading styles must not match by exercise identity alone.");
+assert.strictEqual(setTimingModels.identitySimilarity, 0);
+assert.strictEqual(setTimingModels.rounded.candidates[0].minutes, 25, "Round only the final session total upward.");
+assert.strictEqual(setTimingModels.diagnostics.samples.length, 7, "Deduplicate copied rows and retain legitimate slow sessions.");
+assert(setTimingModels.diagnostics.excluded.some(s => s.reason === "incomplete session set count"));
+assert(setTimingModels.diagnostics.excluded.some(s => s.reason === "inconsistent session metadata"));
+assert(setTimingModels.diagnostics.excluded.some(s => s.reason === "record updated after prediction"));
+assert(setTimingModels.diagnostics.excluded.some(s => s.reason === "sample/demo session"));
+assert(!setTimingModels.diagnostics.samples.some(s => ["future", "cutoff", "invalid"].includes(s.timingSessionId)));
+
+const setTimingRecording = runScenario(`
+  ${reset}
+  state.workouts = shadowHistory;
+  state.draftSessionId = "shadow-draft";
+  state.workoutDraft = [{ draftId: "shadow-row", exercise: "Bench Press", targetMuscle: "chest", sourcePlanId: "verified-plan", setRows: Array.from({ length: 8 }, () => ({ weight: 100, reps: 10, rir: 2 })) }];
+  state.copiedCoachPlan = { id: "verified-plan", copiedDate: todayISO(), sessionPlan: { totalMinutes: 30, items: [{ exercise: resolveExerciseMeta("Bench Press"), sets: 8 }] } };
+  var initial = workoutStartSetTiming(state.workoutDraft, "2026-06-17T10:00:00Z");
+  var timer = { timingSessionId: "recorded", draftSessionId: state.draftSessionId, draftDate: todayISO(), startedAt: initial.predictedAt, runningSince: "", accumulatedActiveSeconds: 1800, setBased: initial };
+  var before = JSON.stringify(timer);
+  state.workoutTimer = timer;
+  var frozen = workoutSubmissionTimingMetadata(state.workoutDraft, timer, state.workouts, "2026-06-17T12:00:00Z");
+  var after = JSON.stringify(timer);
+  var normalized = normalizeWorkoutTimer(JSON.parse(JSON.stringify(timer)));
+  var resumed = resumeWorkoutTimerValue(pauseWorkoutTimerValue(normalized), Date.parse("2026-06-17T11:00:00Z"));
+  var storeBefore = localStorage;
+  var stored = {};
+  localStorage = { getItem: key => stored[key] || null, setItem: (key, value) => { stored[key] = value; }, removeItem: key => { delete stored[key]; } };
+  persistWorkoutTimer(timer);
+  state.workoutTimer = null;
+  loadWorkoutTimer();
+  var reloaded = JSON.stringify(state.workoutTimer.setBased) === JSON.stringify(initial);
+  localStorage = storeBefore;
+  state.workoutDraft[0].setRows.pop();
+  var changed = workoutSubmissionTimingMetadata(state.workoutDraft, timer, state.workouts, "2026-06-17T12:00:00Z");
+  var unverified = workoutStartSetTiming(state.workoutDraft, "2026-06-17T10:00:00Z");
+  var missingTimer = workoutSubmissionTimingMetadata(state.workoutDraft, null, state.workouts);
+  var row = { ...shadowMakeSession("recorded", 17, 1800, 8), sessionTiming: frozen };
+  state.workouts = [row];
+  var backup = exportPayload();
+  var imported = normalizeBackupPayload(JSON.parse(JSON.stringify(backup))).workouts[0];
+  var debug = workoutDebugSummary(row);
+  var edited = { ...row, exerciseId: "custom-row", exercise: "Cable Row" };
+  var exclusion = setTimingSamples([edited], "2026-06-18T12:00:00Z");
+  ({ initial, frozen, changed, unverified, missingTimer, reloaded, pure: before === after,
+     resumedFrozen: JSON.stringify(resumed.setBased) === JSON.stringify(initial),
+     roundTrip: JSON.stringify(imported.sessionTiming) === JSON.stringify(frozen),
+     debugRetained: JSON.stringify(debug.sessionTiming) === JSON.stringify(frozen), exclusion });
+`);
+assert.strictEqual(setTimingRecording.initial.planId, "verified-plan");
+assert.strictEqual(setTimingRecording.initial.displayedEstimateMinutes, 30);
+assert.strictEqual(setTimingRecording.frozen.setBased.comparisonStatus, "unchanged-workout");
+assert.strictEqual(setTimingRecording.changed.setBased.comparisonStatus, "changed-workout");
+assert(setTimingRecording.changed.setBased.retrospectivePrediction.retrospective, "Final-workout estimates must be explicitly retrospective.");
+assert.strictEqual(setTimingRecording.changed.setBased.retrospectivePrediction.predictedAt, "2026-06-17T10:00:00Z");
+assert.strictEqual(setTimingRecording.unverified.planId, null, "Do not claim copied-plan provenance after its composition changes.");
+assert.strictEqual(setTimingRecording.missingTimer, null, "Untimed logging must continue to work.");
+assert(setTimingRecording.pure && setTimingRecording.reloaded && setTimingRecording.resumedFrozen, "Metadata calculation, timer restoration, and pause/resume must preserve the initial prediction.");
+assert(setTimingRecording.roundTrip && setTimingRecording.debugRetained, "Existing backup/import and debug paths must retain optional timing evidence.");
+assert.strictEqual(setTimingRecording.exclusion.excluded[0].reason, "edited session composition");
+assert(appCode.indexOf("await commitWorkoutSave(entries, staleWorkoutIds)") < appCode.indexOf("if (submissionTiming) persistWorkoutTimer(null)"), "Failed durable saves must not clear the recording timer.");
+
+const setTimingValidationRules = runScenario(`
+  ${reset}
+  var history = shadowHistory.map(w => JSON.parse(JSON.stringify(w)));
+  for (var day = 7; day <= 16; day += 1) {
+    var workout = shadowMakeSession("prospective-" + day, day);
+    var profile = setTimingProfile([workout]);
+    var initialPrediction = setTimingPrediction(profile, history, workout.sessionTiming.startedAt);
+    workout.sessionTiming.setBased = { version: COACH_SET_TIMING_VERSION, initialPrediction, completedProfile: profile, comparisonStatus: "unchanged-workout" };
+    history.push(workout);
+  }
+  var report = setTimingValidation(history, "2026-06-18T12:00:00Z");
+  var unchanged = JSON.stringify(history);
+  setTimingValidation(history, "2026-06-18T12:00:00Z");
+  var pure = unchanged === JSON.stringify(history);
+  var lower = JSON.parse(JSON.stringify(history));
+  var wrong = lower.at(-1).sessionTiming.setBased.initialPrediction.candidates[0];
+  wrong.predictedSeconds -= 301; wrong.secondsPerSet = wrong.predictedSeconds / 10;
+  var rejected = setTimingValidation(lower, "2026-06-18T12:00:00Z");
+  var changed = JSON.parse(JSON.stringify(history));
+  changed.at(-1).sessionTiming.setBased.initialPrediction.profile.entries[0].sets = 9;
+  changed.at(-1).sessionTiming.setBased.initialPrediction.profile.allSets = 9;
+  changed.at(-1).sessionTiming.setBased.initialPrediction.candidates.forEach(c => { c.predictedSeconds = c.secondsPerSet * 9; });
+  var changedReport = setTimingValidation(changed, "2026-06-18T12:00:00Z");
+  var unsupported = JSON.parse(JSON.stringify(history));
+  unsupported.at(-1).sessionTiming.setBased.initialPrediction.candidates = {};
+  var invalidReport = setTimingValidation(unsupported, "2026-06-18T12:00:00Z");
+  var legacyReport = setTimingValidation(shadowHistory, "2026-06-18T12:00:00Z");
+  var records = Array.from({ length: 20 }, (_, i) => ({ activeSeconds: 1800, candidates: [{ id: "A", status: i < 15 ? "predicted" : "insufficient-data", predictedSeconds: i < 15 ? 1800 : null }] }));
+  var coverage = setTimingAccuracy(records, "A", true);
+  var overestimated = setTimingAccuracy(records.map(r => ({ ...r, candidates: [{ id: "A", status: "predicted", predictedSeconds: 2160 }] })), "A", true);
+  ({ report, rejected, changedReport, invalidReport, legacyReport, coverage, overestimated, pure });
+`);
+assert.strictEqual(setTimingValidationRules.report.prospective.summary[0].predictions, 10);
+assert.strictEqual(setTimingValidationRules.report.prospective.summary[0].coverage, 1);
+assert(setTimingValidationRules.report.prospective.summary.every(c => c.ready));
+assert.strictEqual(setTimingValidationRules.report.promotionRecommendation, "A", "Tied qualifying candidates must favor A deterministically.");
+assert.strictEqual(setTimingValidationRules.report.automaticActivation, false, "Readiness is only a recommendation; live timing must never activate automatically.");
+assert(setTimingValidationRules.report.historical.summary.every(c => !c.ready), "Historical reconstruction cannot pass the prospective gate.");
+assert.strictEqual(setTimingValidationRules.rejected.prospective.summary[0].overrunsOverFiveMinutes, 1);
+assert.strictEqual(setTimingValidationRules.rejected.prospective.summary[0].ready, false);
+assert.strictEqual(setTimingValidationRules.changedReport.prospective.sessions.length, 9);
+assert(setTimingValidationRules.changedReport.prospective.excluded.some(s => s.reason === "changed-workout"));
+assert(setTimingValidationRules.invalidReport.prospective.excluded.some(s => s.reason === "invalid/unsupported initial prediction"), "Malformed imported snapshots must be excluded without crashing.");
+assert.strictEqual(setTimingValidationRules.legacyReport.prospective.sessions.length, 0, "Never fabricate prospective evidence for legacy workouts.");
+assert.strictEqual(setTimingValidationRules.legacyReport.promotionRecommendation, null);
+assert.strictEqual(setTimingValidationRules.coverage.ready, false, "At least 80% coverage is required even with ten comparisons.");
+assert.strictEqual(setTimingValidationRules.overestimated.ready, false, "Large overestimates must fail the absolute-error gate too.");
+assert(setTimingValidationRules.pure, "Validation must not rewrite recorded evidence.");
+for (const session of setTimingValidationRules.report.historical.sessions) {
+  for (const candidate of session.candidates) {
+    assert(!candidate.trainingSessionIds.includes(session.timingSessionId), "Historical predictions must exclude the workout being evaluated.");
+  }
+}
+
+const setTimingCohortBoundaries = runScenario(`
+  ${reset}
+  var many = Array.from({ length: 12 }, (_, i) => shadowMakeSession("many-" + i, i + 1, i < 2 ? 9000 : 1800));
+  var target = setTimingProfile([{ exercise: resolveExerciseMeta("Bench Press"), sets: 6 }]);
+  var latestTen = setTimingPrediction(target, many, "2026-06-17T12:00:00Z");
+  var justThree = setTimingPrediction(target, many.slice(-3), "2026-06-17T12:00:00Z");
+  var old = shadowMakeSession("old", 1); old.sessionTiming.startedAt = "2026-04-01T10:00:00Z"; old.sessionTiming.completedAt = "2026-04-01T12:00:00Z";
+  var windowed = setTimingSamples([...many, old], "2026-06-17T12:00:00Z");
+  var split = setTimingProfile([{ exercise: resolveExerciseMeta("Bench Press"), sets: 3 }, { exercise: resolveExerciseMeta("Cable Row"), sets: 1 }]);
+  ({ latestTen, justThree, windowed, similarity: setTimingSimilarity(target, split) });
+`);
+assert.strictEqual(setTimingCohortBoundaries.latestTen.candidates[0].predictedSeconds, 1080, "A must use only the latest ten sessions, not older slow sessions.");
+assert.strictEqual(setTimingCohortBoundaries.latestTen.candidates[0].trainingSessionIds.length, 10);
+assert.strictEqual(setTimingCohortBoundaries.justThree.candidates[0].status, "insufficient-data");
+assert.strictEqual(setTimingCohortBoundaries.justThree.candidates[1].status, "predicted", "B needs three comparable sessions, independently of A's five-session minimum.");
+assert.strictEqual(setTimingCohortBoundaries.similarity, 0.6);
+assert(setTimingCohortBoundaries.windowed.excluded.some(s => s.timingSessionId === "old"));
+
+context.FormData = class {
+  *[Symbol.iterator]() { yield ["date", new Date().toLocaleDateString("en-CA")]; }
+};
+runScenario(`
+  (async () => {
+    ${reset}
+    var originals = { readWorkoutDraftFromForm, commitWorkoutSave, render, loadState, announce, scheduleRecordSync, setUndoAction, clearDraftRecoveryScope };
+    try {
+      state.draftSessionId = "save-shadow";
+      state.workoutDraft = [{ draftId: "save-row", exercise: "Bench Press", targetMuscle: "chest", notes: "", setRows: [{ weight: 100, reps: 10, rir: 2 }] }];
+      var startedAt = new Date(Date.now() - 600000).toISOString();
+      state.workoutTimer = { timingSessionId: "save-timer", draftSessionId: state.draftSessionId, draftDate: todayISO(), startedAt, runningSince: "", accumulatedActiveSeconds: 600, setBased: workoutStartSetTiming(state.workoutDraft, startedAt) };
+      var frozenBefore = JSON.stringify(state.workoutTimer);
+      readWorkoutDraftFromForm = () => {};
+      commitWorkoutSave = async () => { throw new Error("simulated durable-save failure"); };
+      var form = { querySelectorAll: () => [] };
+      var error = "";
+      try { await saveWorkout(form); } catch (failure) { error = failure.message; }
+      var retained = JSON.stringify(state.workoutTimer) === frozenBefore;
+      var saved = [];
+      commitWorkoutSave = async entries => { saved = JSON.parse(JSON.stringify(entries)); state.workouts = entries; };
+      render = loadState = async () => {};
+      announce = scheduleRecordSync = setUndoAction = clearDraftRecoveryScope = () => {};
+      await saveWorkout(form);
+      var successfulTiming = JSON.stringify(saved[0].sessionTiming);
+      var cleared = state.workoutTimer === null;
+      state.workoutDraft[0].setRows[0].reps = 11;
+      await saveWorkout(form);
+      return { error, retained, cleared, initialRetained: saved[0].sessionTiming.setBased.initialPrediction.predictedAt === startedAt,
+        historicalTimingPreserved: JSON.stringify(saved[0].sessionTiming) === successfulTiming };
+    } finally {
+      readWorkoutDraftFromForm = originals.readWorkoutDraftFromForm; commitWorkoutSave = originals.commitWorkoutSave;
+      render = originals.render; loadState = originals.loadState; announce = originals.announce;
+      scheduleRecordSync = originals.scheduleRecordSync; setUndoAction = originals.setUndoAction; clearDraftRecoveryScope = originals.clearDraftRecoveryScope;
+    }
+  })()
+`).then(result => {
+  assert.strictEqual(result.error, "simulated durable-save failure");
+  assert(result.retained, "A failed save must preserve the timer and frozen prediction for retry.");
+  assert(result.cleared && result.initialRetained, "A successful save must store the snapshot before clearing the timer.");
+  assert(result.historicalTimingPreserved, "Editing a submitted workout must preserve its original timing evidence.");
+  console.log("log regression tests passed");
+}).catch(error => {
+  console.error(error);
+  process.exitCode = 1;
+});

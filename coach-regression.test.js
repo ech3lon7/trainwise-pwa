@@ -389,8 +389,8 @@ const repeatedFailureRotatesExercise = runScenario(`
     restSeconds: 150
   });
   state.workouts = [
-    { ...benchWorkout(2, 8, 0), reps: 8, setRows: [{ weight: 145, reps: 8, rir: 0, restSeconds: 150 }, { weight: 135, reps: 8, rir: 0, restSeconds: 150 }, { weight: 125, reps: 8, rir: 1, restSeconds: 150 }] },
-    { ...benchWorkout(5, 10, 0), reps: 10, setRows: [{ weight: 145, reps: 10, rir: 0, restSeconds: 150 }, { weight: 135, reps: 10, rir: 1, restSeconds: 150 }, { weight: 125, reps: 10, rir: 1, restSeconds: 150 }] },
+    { ...benchWorkout(2, 6, 0), reps: 6, setRows: [{ weight: 145, reps: 6, rir: 0, restSeconds: 150 }, { weight: 135, reps: 6, rir: 0, restSeconds: 150 }, { weight: 125, reps: 6, rir: 1, restSeconds: 150 }] },
+    { ...benchWorkout(5, 7, 0), reps: 7, setRows: [{ weight: 145, reps: 7, rir: 0, restSeconds: 150 }, { weight: 135, reps: 7, rir: 1, restSeconds: 150 }, { weight: 125, reps: 7, rir: 1, restSeconds: 150 }] },
     { ...benchWorkout(8, 11, 1), reps: 11, setRows: [{ weight: 145, reps: 11, rir: 1, restSeconds: 150 }, { weight: 135, reps: 11, rir: 1, restSeconds: 150 }, { weight: 125, reps: 11, rir: 1, restSeconds: 150 }] },
     ...muscleGroups.filter((muscle) => muscle.id !== "chest").map((muscle) => makeWorkout(muscle, 2, 10))
   ];
@@ -3864,5 +3864,50 @@ const rotationConflictAndBoundary = runScenario(`
 `);
 assert(rotationConflictAndBoundary.duplicateAudit.reason.includes("Exercise library conflict"), "A deferred duplicate must expose its library conflict by name.");
 assert.strictEqual(rotationConflictAndBoundary.count, 1, "Only the outer chosen weekly result may undergo rotation.");
+
+const repRangeFirstGrading = runScenario(`
+  ${resetAndHelpers}
+  state.settings.customExercises = [{ id: "hip", name: "Barbell Hip-Thrusts", primaryMuscles: ["glutes"], secondaryMuscles: ["hamstrings"], reps: "8-15", rest: "60-120 sec", loadingStyle: "standard", userCreated: true }];
+  var hip = resolveExerciseMeta("Barbell Hip-Thrusts");
+  var hipWorkout = (id, date, rows) => ({ id, date, exercise: hip.name, exerciseId: hip.id, loadingStyle: "standard", setRows: rows.map(([weight, reps, rir]) => ({ weight, reps, rir })), createdAt: date + "T12:00:00Z" });
+  var baseline = hipWorkout("baseline", "2026-05-25", [[260,15,1],[240,15,1],[230,15,1]]);
+  var earlier = hipWorkout("earlier", "2026-06-01", [[245,18,3],[245,13,2],[235,16,0],[230,14,0]]);
+  var prior = hipWorkout("prior", "2026-06-08", [[250,12,1],[250,10,1],[240,10,1],[235,12,0]]);
+  var latest = hipWorkout("latest", "2026-06-15", [[240,12,2],[240,10,2],[230,10,2]]);
+  state.workouts = [baseline, earlier, prior, latest];
+  var signal = coachExercisePerformanceSignal(hip);
+  var target = coachPlanTargetForExercise(hip, signal);
+  var directProgression = progressionTargetForExercise(hip.name);
+  var planned = plannedSetRowsFromPreviousSession(hip, 3, target);
+  state.workoutDraft = [{ draftId: "pending", exercise: hip.name, setRows: [{ weight: 240, reps: 3, rir: 0 }], inputTouched: true }];
+  var withDraft = coachExercisePerformanceSignal(hip);
+  var effort = hipWorkout("effort", "2026-06-15", [[240,12,0],[240,10,0],[230,10,0]]);
+  var effortSignal = coachExercisePerformanceSignal(hip, [baseline, earlier, prior, effort]);
+  var below = hipWorkout("below", "2026-06-15", [[230,7,0],[230,6,0],[220,6,0]]);
+  var failure = coachExercisePerformanceSignal(hip, [earlier, prior, below]);
+  var twice = hipWorkout("twice", "2026-06-16", [[220,6,0],[220,5,0],[210,5,0]]);
+  var repeated = coachExercisePerformanceSignal(hip, [prior, below, twice]);
+  var pr = hipWorkout("pr", "2026-06-15", [[255,15,1],[255,14,1],[245,14,1]]);
+  var progress = coachExercisePerformanceSignal(hip, [prior, pr]);
+  ({ signal, target, directProgression, planned, withDraft: withDraft.status, effortSignal, failure: failure.status, repeated: repeated.status, progress: progress.status,
+     priorUnder: exerciseUnderperformed(prior, earlier, { effectiveRange: effectiveRepRange(hip) }),
+     emptyMeets: workoutMeetsRepMinimum({ setRows: [] }, effectiveRepRange(hip)),
+     neutral: coachExercisePerformanceSignal(hip, [latest]).status });
+`);
+assert.strictEqual(repRangeFirstGrading.signal.status, "minor-dip", "In-range hip-thrust declines must be contextual, not failed performances.");
+assert.strictEqual(repRangeFirstGrading.priorUnder, false, "The preceding in-range workout must not seed a repeated-failure chain.");
+assert.strictEqual(repRangeFirstGrading.target.kind, "hold", "In-range declines must bypass automatic load progression as well as resets.");
+assert.strictEqual(repRangeFirstGrading.target.loadIncreaseEligible, false);
+assert.strictEqual(repRangeFirstGrading.directProgression.increaseLoad, false, "Direct progression cards must honor the same hold guard as plan targets.");
+assert(repRangeFirstGrading.directProgression.body.includes("Hold the load"));
+assert.deepStrictEqual(Array.from(repRangeFirstGrading.planned, row => row.weight), [240, 240, 230], "Copied hold targets must retain working-set loads.");
+assert(repRangeFirstGrading.signal.message.includes("Rep range met") && repRangeFirstGrading.signal.message.includes("2026-06-15"), "Explain the range success and evaluated submitted date.");
+assert.strictEqual(repRangeFirstGrading.withDraft, repRangeFirstGrading.signal.status, "Unsubmitted drafts must not change grading.");
+assert(repRangeFirstGrading.effortSignal.holdLoad && repRangeFirstGrading.effortSignal.message.includes("reserve"), "Zero-RIR in-range dips should hold with effort guidance.");
+assert.strictEqual(repRangeFirstGrading.failure, "isolated-failure", "Preserve genuine below-range safeguards.");
+assert.strictEqual(repRangeFirstGrading.repeated, "repeated-failure");
+assert.strictEqual(repRangeFirstGrading.progress, "progressing", "Preserve genuine progress.");
+assert.strictEqual(repRangeFirstGrading.neutral, "neutral");
+assert.strictEqual(repRangeFirstGrading.emptyMeets, false);
 
 console.log("coach regression tests passed");
