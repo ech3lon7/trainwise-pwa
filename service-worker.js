@@ -1,14 +1,14 @@
 "use strict";
 
-// Use a fresh cache for grading and shadow timing while retaining unchanged image assets.
-const CACHE_NAME = "trainwise-cache-v134";
+// Use a fresh cache for daily exercise rotation while retaining unchanged image assets.
+const CACHE_NAME = "trainwise-cache-v135";
 const ASSETS = [
   "./",
   "./index.html",
-  "./styles.css?v=1.6.11",
-  "./app.js?v=1.6.11",
-  "./manifest.webmanifest?v=1.6.11",
-  "./icon.svg?v=1.6.11",
+  "./styles.css?v=1.6.12",
+  "./app.js?v=1.6.12",
+  "./manifest.webmanifest?v=1.6.12",
+  "./icon.svg?v=1.6.12",
   "./icon-512.png?v=1.6.6",
   "./apple-touch-icon.png?v=1.6.6",
   "./assets/muscles/abs.png?v=1.5.43",

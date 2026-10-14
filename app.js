@@ -3,8 +3,8 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 3;
 const STORES = ["workouts", "metrics", "settings", "syncQueue"];
-// Advance the installed shell version for grading and shadow timing calibration.
-const APP_VERSION = "1.6.11";
+// Advance the installed shell version for daily exercise rotation across muscle slots.
+const APP_VERSION = "1.6.12";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 const DRAFT_RECOVERY_KEY = "trainwise-draft-recovery-v1";
 const DATED_STRENGTH_DRAFTS_KEY = "trainwise-strength-drafts-by-date-v1";
@@ -4743,6 +4743,20 @@ function buildSessionPlan(limitMinutes = SESSION_LIMIT_MINUTES, options = {}) {
   const usedExercises = new Set();
   const conservativeSoftPlan = globalGrowthMode === "soft" && !targetMuscles.length && stats.length > 0;
 
+  // Rotate muscle slots by their next eligible exercise's submitted date before balancing regions.
+  // Secondary credits must not keep an overdue direct exercise last in the same region forever.
+  const rotationCandidates = new Map(allStats.filter(isMuscleAvailableForPlanning).map((target) => [
+    target.id,
+    coachExerciseCandidates(target.id, new Set(), { workouts: coachWorkouts })[0]
+  ]));
+  const rotatingCoverageTargets = (targets) => balancedCoverageTargets([...targets].sort((a, b) => {
+    const left = rotationCandidates.get(a.id);
+    const right = rotationCandidates.get(b.id);
+    return Number(Boolean(right?.eligible)) - Number(Boolean(left?.eligible))
+      || (left && right ? String(left.memory.last?.date || "").localeCompare(String(right.memory.last?.date || "")) : 0)
+      || coachMusclePrioritySort(a, b);
+  }));
+
   const addPerformanceNote = (signal) => {
     if (!signal?.message || !["isolated-failure", "repeated-failure"].includes(signal.status)) return;
     if (performanceNoteKeys.has(signal.message)) return;
@@ -4795,7 +4809,7 @@ function buildSessionPlan(limitMinutes = SESSION_LIMIT_MINUTES, options = {}) {
     return true;
   };
 
-  const freshTargets = balancedCoverageTargets(stats.filter(isMuscleAvailableForPlanning));
+  const freshTargets = rotatingCoverageTargets(stats.filter(isMuscleAvailableForPlanning));
 
   for (const target of freshTargets) {
     if (items.some((item) => item.muscle.id === target.id)) continue;
@@ -4891,7 +4905,7 @@ function buildSessionPlan(limitMinutes = SESSION_LIMIT_MINUTES, options = {}) {
     )).sort((a, b) => (
       (optimumSetGap(b) - optimumSetGap(a)) || coachMusclePrioritySort(a, b)
     ));
-    const freshSupplemental = balancedCoverageTargets(supplementalTargets);
+    const freshSupplemental = rotatingCoverageTargets(supplementalTargets);
 
     for (const target of freshSupplemental) {
       if (totalMinutes >= targetFloor || items.length >= caps.maxItems) break;
@@ -5060,7 +5074,7 @@ function buildSessionPlan(limitMinutes = SESSION_LIMIT_MINUTES, options = {}) {
     if (globalGrowthMode === "aggressive") {
       addSetsToExisting({ allowHighVolume: true });
     }
-    const highVolumeTargets = balancedCoverageTargets(allStats.filter((target) => (
+    const highVolumeTargets = rotatingCoverageTargets(allStats.filter((target) => (
       target.sets < HYPERTROPHY.highVolumeFillMax
       && !items.some((item) => item.muscle.id === target.id)
       && isMuscleAvailableForPlanning(target)
@@ -5301,7 +5315,9 @@ function attachCoachBriefing(plan) {
   // Explain Today omissions from the actual session without generating or advancing another plan.
   const sessions = [{ date: todayISO(), status: "planned", items: plan.sessionPlan?.items || [] }];
   const targets = Object.fromEntries(coachMuscleSetStats().map((muscle) => [muscle.id, Math.max(HYPERTROPHY.minimumSets, muscle.sets)]));
-  return { ...plan, rotation: plan.rotation || coachExerciseRotationAudit(sessions, { targets }), briefing: coachBriefingSummary(plan) };
+  // Give deferred muscles an explicit daily slot-limit explanation instead of a generic queue notice.
+  const dailyExerciseLimit = sessionPlanCaps(plan.sessionPlan?.limitMinutes, plan.sessionPlan?.restart).maxItems;
+  return { ...plan, rotation: plan.rotation || coachExerciseRotationAudit(sessions, { targets, dailyExerciseLimit }), briefing: coachBriefingSummary(plan) };
 }
 
 function normalizeCoachWeeklyPlan(value = {}) {
@@ -6742,6 +6758,11 @@ function coachExerciseRotationAudit(sessions = [], setup = {}, search = {}) {
       else if (!failureDates.length) reason = "Repeated-failure safeguard blocks the remaining dates; queued until it clears.";
       else if (candidate.memory.usedThisWeekTooOften) reason = "Weekly exercise use cap reached; queued for next week.";
       else if (conflict) reason = `Exercise library conflict: ${conflict.names.join(" / ")}. Review these definitions in Exercises.`;
+      // Daily rotation can leave a whole muscle queued when every region-balanced session slot is assigned.
+      else if (setup.dailyExerciseLimit && planned.every((session) => session.items.length >= setup.dailyExerciseLimit)
+        && !planned.some((session) => session.items.some((item) => exercise.primaryMuscles.includes(item.muscle.id)))) {
+        reason = `All ${setup.dailyExerciseLimit} daily exercise slots are assigned; this exercise remains queued for a later turn.`;
+      }
       else if (search.terminationReason === "candidate-limit") reason = "Rotation search reached its limit; still queued, not proven impossible.";
       else if (search.terminationReason === "invalid-seed") reason = "Existing schedule failed validation; rotation left it unchanged.";
       else if (rejections["target-volume"]) reason = "No tested replacement preserved muscle target coverage; still queued.";

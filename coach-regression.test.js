@@ -3726,6 +3726,68 @@ assert(
   `Redistribution must not widen the session spread. Before: ${redistributionStillBalances.beforeSpread}, after: ${redistributionStillBalances.afterSpread}.`
 );
 
+// Reproduce daily slot starvation: an overdue exercise must not stay last in its region's muscle order.
+const dailyRotationAcrossMuscles = runScenario(`
+  ${resetAndHelpers}
+  state.coachGlobalGrowthMode = "aggressive";
+  state.settings.customExercises = state.settings.customExercises.filter(exercise => exercise.id !== "custom-bench-press");
+  state.settings.customExercises.forEach(exercise => { exercise.rest = "60 sec"; });
+  var curl = state.settings.customExercises.find(exercise => exercise.id === "custom-glutes");
+  curl.name = "Hamstring Dumbell Curls";
+  curl.reps = "20-30";
+  curl.rest = "35 sec";
+  curl.loadingStyle = "high-rep";
+  state.settings.customExercises.push({ ...curl, id: "archived-curl", name: "Hamstring Dumbell Curl", primaryMuscles: ["hamstrings"], archivedAt: "2026-01-01" });
+  var lastUses = { shoulders: 21, biceps: 13, triceps: 8, quads: 4, hamstrings: 8, calves: 5, glutes: 14, chest: 1, back: 1, abs: 1 };
+  state.workouts = muscleGroups.map(muscle => makeWorkout(muscle, lastUses[muscle.id], 4, {
+    exercise: muscle.id === "glutes" ? curl.name : undefined,
+    secondaryMuscles: muscle.id === "abs" ? ["glutes"] : muscle.id === "chest" ? ["triceps", "shoulders"] : muscle.id === "back" ? ["biceps", "shoulders"] : []
+  }));
+  var before = JSON.stringify({ settings: state.settings, workouts: state.workouts });
+  var first = buildTodayPlan(60);
+  var repeated = buildTodayPlan(60);
+  var unchanged = before === JSON.stringify({ settings: state.settings, workouts: state.workouts });
+  var originalItems = first.sessionPlan.items.map(item => item.exercise.id);
+
+  // Exercise rotation must fit the supported daily timeframes and give never-submitted definitions a first turn.
+  var timeframes = [30, 45, 60, 75].map(minutes => {
+    var session = buildTodayPlan(minutes).sessionPlan;
+    return { includesCurl: session.items.some(item => item.exercise.id === curl.id), fits: session.totalMinutes <= session.hardLimitMinutes, count: session.items.length };
+  });
+  var submittedWorkouts = state.workouts;
+  state.workouts = state.workouts.filter(workout => workout.exerciseId !== curl.id);
+  var neverUsed = buildTodayPlan(60).sessionPlan.items.some(item => item.exercise.id === curl.id);
+  state.workouts = submittedWorkouts;
+
+  // Submitted history advances the turn; a preview alone must not make the overdue exercise disappear.
+  state.workouts.push(makeWorkout(muscleGroups.find(muscle => muscle.id === "glutes"), 4, 2, { id: "manual-curl", exercise: curl.name }));
+  var advanced = buildTodayPlan(60);
+  state.workouts.push(makeWorkout(muscleGroups.find(muscle => muscle.id === "glutes"), 0, 2, { id: "today-curl", exercise: curl.name }));
+  var recovery = buildTodayPlan(60);
+  ({
+    originalItems,
+    repeat: JSON.stringify(first.sessionPlan) === JSON.stringify(repeated.sessionPlan),
+    unchanged,
+    timeframes,
+    neverUsed,
+    total: first.sessionPlan.totalMinutes,
+    hardLimit: first.sessionPlan.hardLimitMinutes,
+    regions: [...new Set(first.sessionPlan.items.map(item => muscleRegion(item.muscle.id)))],
+    deferredReason: first.rotation.entries.find(entry => entry.exerciseId === "custom-quads").reason,
+    advancedItems: advanced.sessionPlan.items.map(item => item.exercise.id),
+    recoveryItems: recovery.sessionPlan.items.map(item => item.exercise.id),
+    recoveryBlocked: recovery.sessionPlan.deprioritized.some(item => item.muscle.id === "glutes")
+  });
+`);
+assert(dailyRotationAcrossMuscles.originalItems.includes("custom-glutes"), "Daily Coach must give the overdue curl a turn before newer leg exercises consume every slot.");
+assert(dailyRotationAcrossMuscles.originalItems.length <= 6 && dailyRotationAcrossMuscles.total <= dailyRotationAcrossMuscles.hardLimit, "Daily rotation must retain exercise and time limits.");
+assert(dailyRotationAcrossMuscles.timeframes.every(session => session.includesCurl && session.fits && session.count <= 6) && dailyRotationAcrossMuscles.neverUsed, "Daily rotation must cover overdue and never-used definitions across supported timeframes.");
+assert(dailyRotationAcrossMuscles.regions.includes("push") && dailyRotationAcrossMuscles.regions.includes("pull") && dailyRotationAcrossMuscles.regions.includes("legs"), "Daily rotation must preserve balanced region coverage.");
+assert(dailyRotationAcrossMuscles.repeat && dailyRotationAcrossMuscles.unchanged, "Previewing daily rotation must be deterministic and must not change submitted history or library definitions.");
+assert(dailyRotationAcrossMuscles.deferredReason.includes("6 daily exercise slots"), "An eligible muscle deferred by the daily slot limit needs a specific explanation.");
+assert(!dailyRotationAcrossMuscles.advancedItems.includes("custom-glutes") && dailyRotationAcrossMuscles.advancedItems.includes("custom-hamstrings"), "Submitted turns must let the next overdue leg exercise take the limited slot.");
+assert(!dailyRotationAcrossMuscles.recoveryItems.includes("custom-glutes") && dailyRotationAcrossMuscles.recoveryBlocked, "A submitted curl must still enforce primary-muscle recovery.");
+
 // Verify that secondary rewards cannot bury an older eligible exercise and submitted turns rotate the whole library.
 const exerciseRotationTurns = runScenario(`
   ${resetAndHelpers}
