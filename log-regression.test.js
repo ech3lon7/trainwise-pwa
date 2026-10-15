@@ -197,10 +197,10 @@ assert(!appCode.includes('selectedExercise: "Push-up"'), "Expected Log startup n
 assert(!appCode.includes('showBanner("Unsaved draft restored."'), "Expected startup draft recovery not to show a top banner.");
 assert(appCode.includes("notifyMetricSaved"), "Expected metrics saves to use a dedicated bottom-only notification helper.");
 assert(!stylesCode.includes(".mobile-quick-toggle"), "Expected floating quick action button styling to be removed.");
-// Keep shell/cache expectations aligned with the release that rotates daily muscle slots.
-assert(indexCode.includes("v=1.6.12"), "Expected index shell references to use bumped app version.");
+// Keep shell/cache expectations aligned with the release that repairs synchronization.
+assert(indexCode.includes("v=1.6.13"), "Expected index shell references to use bumped app version.");
 assert(!indexCode.includes('id="app" class="app-content" aria-live'), "Expected broad app aria-live to be removed in favor of targeted live regions.");
-assert(serviceWorkerCode.includes("trainwise-cache-v135"), "Expected service worker cache version bump.");
+assert(serviceWorkerCode.includes("trainwise-cache-v136"), "Expected service worker cache version bump.");
 // The mobile tab bar must anchor to the visible bottom edge and compact only during active scrolling.
 assert(/\.tabbar\s*\{[^}]*top:\s*auto;[^}]*bottom:\s*env\(safe-area-inset-bottom\)/s.test(stylesCode), "Expected the tab bar to use a stable bottom safe-area anchor instead of a dynamic viewport top offset.");
 assert(stylesCode.includes(".tabbar.is-scrolling") && appCode.includes("updateTabbarScrollState"), "Expected the tab bar to shrink during scrolling and restore after scrolling stops.");
@@ -3265,6 +3265,155 @@ runScenario(`
   assert(result.retained, "A failed save must preserve the timer and frozen prediction for retry.");
   assert(result.cleared && result.initialRetained, "A successful save must store the snapshot before clearing the timer.");
   assert(result.historicalTimingPreserved, "Editing a submitted workout must preserve its original timing evidence.");
+  // Run sync reproductions after the asynchronous save checks so their temporary boundaries cannot overlap.
+  return runScenario(`
+    (async () => {
+      var originals = { supabaseConfigWithFreshSession, bootstrapRecordSync, pullRecordSync, flushRecordSyncQueue, ensureSyncDeviceId, dbPut, loadState, render, announce, scheduleRecordSync, settlePushedSyncQueueEntry, fetch: globalThis.fetch };
+      var config = { url: "https://sync.test", key: "test-key", session: { access_token: "test-token" } };
+      var configure = () => {
+        state.settings = { supabaseUrl: config.url, supabaseAnonKey: config.key, supabaseSession: config.session, syncBootstrapVersion: 1 };
+        state.syncQueue = [];
+        state.activeTab = "log";
+      };
+      try {
+        // Offline and unsigned attempts must not poison the lock used by later online, signed-in attempts.
+        var passes = 0;
+        var reruns = 0;
+        supabaseConfigWithFreshSession = async () => { passes += 1; return config; };
+        bootstrapRecordSync = async () => false;
+        pullRecordSync = async () => ({ stateChanged: false });
+        flushRecordSyncQueue = dbPut = loadState = render = async () => {};
+        ensureSyncDeviceId = async () => "test-device";
+        announce = () => {};
+        scheduleRecordSync = () => { reruns += 1; };
+        recordSyncPromise = null;
+        recordSyncRerunRequested = false;
+        configure();
+        navigator.onLine = false;
+        await performRecordSync();
+        navigator.onLine = true;
+        var reconnected = await performRecordSync();
+        var reconnectPasses = passes;
+        recordSyncPromise = null;
+        recordSyncRerunRequested = false;
+        state.settings = {};
+        await performRecordSync();
+        configure();
+        var signedIn = await performRecordSync();
+        var signInPasses = passes - reconnectPasses;
+        recordSyncPromise = null;
+        recordSyncRerunRequested = false;
+        state.settings = {};
+        var signInError = "";
+        try { await performRecordSync({ notify: true }); } catch (error) { signInError = error.message; }
+        configure();
+        var signedInAfterError = await performRecordSync().catch(() => false);
+        // A failed request must release the same lock so a subsequent retry can reach the server.
+        supabaseConfigWithFreshSession = async () => { throw new Error("simulated network failure"); };
+        var failed = await performRecordSync();
+        var failedMessage = state.syncMessage;
+        supabaseConfigWithFreshSession = async () => config;
+        var retried = await performRecordSync();
+        var lockCases = { reconnected, reconnectPasses, signedIn, signInPasses, signedInAfterError, signInError, failed, failedMessage, retried };
+
+        // A genuinely active sync must still coalesce another attempt and request one follow-up pass.
+        recordSyncPromise = null;
+        recordSyncRerunRequested = false;
+        reruns = 0;
+        var release;
+        var gate = new Promise(resolve => { release = resolve; });
+        supabaseConfigWithFreshSession = async () => { await gate; return config; };
+        var active = performRecordSync();
+        var overlapping = performRecordSync();
+        release();
+        await Promise.all([active, overlapping]);
+        var coalesced = reruns === 1 && recordSyncPromise === null;
+
+        // A phone record arriving during a PC upload must remain visible to the next incremental pull.
+        configure();
+        state.settings.syncCursor = "2026-10-14T10:00:00.000Z";
+        var stored = new Map();
+        var cloud = [];
+        var queries = [];
+        var phone = { record_type: "workout", record_id: "phone-save", payload: { id: "phone-save", notes: "phone" }, revision: 1, updated_at: "2026-10-14T10:00:01.000Z" };
+        supabaseConfigWithFreshSession = async () => config;
+        pullRecordSync = originals.pullRecordSync;
+        flushRecordSyncQueue = originals.flushRecordSyncQueue;
+        dbPut = async (store, value) => { if (store === "workouts") stored.set(value.id, value); };
+        settlePushedSyncQueueEntry = async entry => { state.syncQueue = state.syncQueue.filter(item => item.id !== entry.id); };
+        globalThis.fetch = async (url, options = {}) => {
+          if (options.method === "POST") {
+            var body = JSON.parse(options.body);
+            var uploaded = { record_type: body.p_record_type, record_id: body.p_record_id, payload: body.p_payload, revision: 1, updated_at: "2026-10-14T10:00:02.000Z" };
+            cloud = [phone, uploaded];
+            return { ok: true, json: async () => ({ status: "applied", record: uploaded }) };
+          }
+          queries.push(url);
+          var after = decodeURIComponent(url.split("&updated_at=gte.")[1]?.split("&")[0] || "");
+          return { ok: true, json: async () => cloud.filter(record => record.updated_at >= after) };
+        };
+        state.syncQueue = [{ id: "workout:pc-save", recordType: "workout", recordId: "pc-save", payload: { id: "pc-save", notes: "pc" }, baseRevision: 0, status: "pending" }];
+        await performRecordSync();
+        var cursorAfterUpload = state.settings.syncCursor;
+        await performRecordSync();
+        var phoneDownloaded = stored.has("phone-save");
+
+        // A full pull must recover old skipped records while preserving a conflicting pending local edit.
+        stored.clear();
+        state.settings.syncCursor = "2026-10-14T10:00:03.000Z";
+        state.syncQueue = [{ id: "workout:pending-edit", recordType: "workout", recordId: "pending-edit", payload: { id: "pending-edit", notes: "local edit" }, baseRevision: 1, status: "pending" }];
+        cloud.push({ record_type: "workout", record_id: "pending-edit", payload: { id: "pending-edit", notes: "cloud edit" }, revision: 2, updated_at: "2026-10-14T10:00:02.000Z" });
+        state.settings.syncRecordMeta = {};
+        await performRecordSync({ pull: true, push: false, fullPull: true });
+        var recovered = stored.has("phone-save");
+        var conflict = state.syncQueue.find(entry => entry.recordId === "pending-edit");
+        var fullQuery = !queries.at(-1).includes("&updated_at=");
+
+        // A manual rescan requested during a background pull must perform its own unfiltered request afterward.
+        var normalFetch = globalThis.fetch;
+        var releaseBackground;
+        var backgroundGate = new Promise(resolve => { releaseBackground = resolve; });
+        var backgroundStarted;
+        var started = new Promise(resolve => { backgroundStarted = resolve; });
+        var firstRequest = true;
+        globalThis.fetch = async (url, options) => {
+          if (firstRequest) {
+            firstRequest = false;
+            backgroundStarted();
+            await backgroundGate;
+          }
+          return normalFetch(url, options);
+        };
+        var beforeRequests = queries.length;
+        var background = performRecordSync({ push: false });
+        await started;
+        var fullRequested = performRecordSync({ push: false, fullPull: true });
+        releaseBackground();
+        await Promise.all([background, fullRequested]);
+        var concurrentFullPull = queries.length === beforeRequests + 2 && !queries.at(-1).includes("&updated_at=");
+        return { lockCases, coalesced, cursorAfterUpload, phoneDownloaded, recovered, fullQuery, concurrentFullPull, localPreserved: conflict.status === "conflict" && conflict.payload.notes === "local edit" && !stored.has("pending-edit") };
+      } finally {
+        supabaseConfigWithFreshSession = originals.supabaseConfigWithFreshSession;
+        bootstrapRecordSync = originals.bootstrapRecordSync; pullRecordSync = originals.pullRecordSync;
+        flushRecordSyncQueue = originals.flushRecordSyncQueue; ensureSyncDeviceId = originals.ensureSyncDeviceId;
+        dbPut = originals.dbPut; loadState = originals.loadState; render = originals.render; announce = originals.announce;
+        scheduleRecordSync = originals.scheduleRecordSync; settlePushedSyncQueueEntry = originals.settlePushedSyncQueueEntry;
+        if (originals.fetch === undefined) delete globalThis.fetch; else globalThis.fetch = originals.fetch;
+        recordSyncPromise = null; recordSyncRerunRequested = false; delete navigator.onLine;
+      }
+    })()
+  `);
+}).then(result => {
+  assert(result.lockCases.reconnected && result.lockCases.reconnectPasses === 1, "An offline sync attempt must not prevent syncing after reconnecting.");
+  assert(result.lockCases.signedIn && result.lockCases.signInPasses === 1, "An unsigned sync attempt must not prevent syncing after signing in.");
+  assert(result.lockCases.signedInAfterError && result.lockCases.signInError === "Sign in to Supabase first.", "A notified sign-in error must release the lock and retain its useful error message.");
+  assert(result.lockCases.failed === false && result.lockCases.failedMessage === "simulated network failure" && result.lockCases.retried, "Failed network requests must remain retryable and expose their error.");
+  assert(result.coalesced, "A genuinely in-flight sync must still coalesce attempts and schedule one follow-up.");
+  assert.strictEqual(result.cursorAfterUpload, "2026-10-14T10:00:00.000Z", "Uploads must not advance the download checkpoint past unseen records.");
+  assert(result.phoneDownloaded, "A phone record written during a PC upload must arrive on the next incremental pull.");
+  assert(result.recovered && result.fullQuery, "A full pull must recover records behind a previously advanced checkpoint.");
+  assert(result.concurrentFullPull, "A full pull requested during background sync must not lose its rescan option.");
+  assert(result.localPreserved, "A full rescan must preserve pending local edits and expose conflicts rather than overwrite them.");
   console.log("log regression tests passed");
 }).catch(error => {
   console.error(error);

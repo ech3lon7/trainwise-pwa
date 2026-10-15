@@ -3,8 +3,8 @@
 const DB_NAME = "trainwise-db";
 const DB_VERSION = 3;
 const STORES = ["workouts", "metrics", "settings", "syncQueue"];
-// Advance the installed shell version for daily exercise rotation across muscle slots.
-const APP_VERSION = "1.6.12";
+// Advance the installed shell version for sync retries and recovery of skipped cloud records.
+const APP_VERSION = "1.6.13";
 const SAMPLE_BATCH = "hypertrophy-demo-v1";
 const DRAFT_RECOVERY_KEY = "trainwise-draft-recovery-v1";
 const DATED_STRENGTH_DRAFTS_KEY = "trainwise-strength-drafts-by-date-v1";
@@ -12642,7 +12642,7 @@ async function flushRecordSyncQueue(config) {
     }
     if (!remote) throw new Error("Cloud sync returned no saved record.");
     await saveSyncRecordMeta(entry.recordType, entry.recordId, remote.revision, entry.payload, entry.deleted);
-    await updateSyncCursor([remote]);
+    // Only downloaded batches may advance the pull cursor; an upload can be newer than unseen device changes.
     await settlePushedSyncQueueEntry(entry, remote.revision);
   }
 }
@@ -12666,22 +12666,28 @@ function syncSyncStatusDom() {
   if (status) status.textContent = syncStatusText();
 }
 
-async function performRecordSync({ pull = true, push = true, reconcile = false, notify = false } = {}) {
+async function performRecordSync({ pull = true, push = true, reconcile = false, notify = false, fullPull = false } = {}) {
+  // A requested rescan must run after an active incremental sync instead of being silently coalesced into it.
+  if (recordSyncPromise && fullPull) {
+    await recordSyncPromise.catch(() => {});
+    return performRecordSync({ pull, push, reconcile, notify, fullPull });
+  }
   if (recordSyncPromise) {
     recordSyncRerunRequested = true;
     return recordSyncPromise;
   }
+  // Skipped attempts must never occupy the in-flight lock; reconnecting or signing in must be able to retry.
+  if (!recordSyncConfigured()) {
+    state.syncStatus = "idle";
+    if (notify) throw new Error("Sign in to Supabase first.");
+    return false;
+  }
+  if (typeof navigator !== "undefined" && navigator.onLine === false) {
+    state.syncStatus = "offline";
+    syncSyncStatusDom();
+    return false;
+  }
   recordSyncPromise = (async () => {
-    if (!recordSyncConfigured()) {
-      state.syncStatus = "idle";
-      if (notify) throw new Error("Sign in to Supabase first.");
-      return false;
-    }
-    if (typeof navigator !== "undefined" && navigator.onLine === false) {
-      state.syncStatus = "offline";
-      syncSyncStatusDom();
-      return false;
-    }
     state.syncStatus = "syncing";
     state.syncMessage = "";
     syncSyncStatusDom();
@@ -12690,7 +12696,7 @@ async function performRecordSync({ pull = true, push = true, reconcile = false, 
       await ensureSyncDeviceId();
       let stateChanged = await bootstrapRecordSync(config);
       if (pull) {
-        const pullResult = await pullRecordSync(config);
+        const pullResult = await pullRecordSync(config, { full: fullPull });
         stateChanged = stateChanged || pullResult.stateChanged;
       }
       if (reconcile) await queueAllLocalSyncRecords();
@@ -13777,7 +13783,8 @@ async function handleAction(action, target) {
     },
     async "pull-supabase-sync"() {
       forceSettingsPanelOpen("supabase-sync");
-      await performRecordSync({ pull: true, push: false, notify: true });
+      // Manual Pull rescans cloud records to recover anything skipped by an older download checkpoint.
+      await performRecordSync({ pull: true, push: false, notify: true, fullPull: true });
       await render();
     },
     async "resolve-sync-conflict"() {
